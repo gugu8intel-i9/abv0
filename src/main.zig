@@ -49,7 +49,9 @@ pub fn printUsage() void {
     std.debug.print("  " ++ ANSI_RED ++ "uninstall" ++ ANSI_RESET ++ " <pkg>          Remove an installed package and its secure links\n", .{});
     std.debug.print("  " ++ ANSI_YELLOW ++ "run" ++ ANSI_RESET ++ " <pkg> [args...]       Run a package executable instantly (auto-installs if missing)\n", .{});
     std.debug.print("  " ++ ANSI_MAGENTA ++ "shell" ++ ANSI_RESET ++ " <pkg1> [pkg2...]     Innovative Sandboxed Shell: Spawn an ephemeral subshell with specific packages\n", .{});
-    std.debug.print("  " ++ ANSI_GREEN ++ "doctor" ++ ANSI_RESET ++ "                  Innovative Self-Healing Check: Securely verifies and self-heals broken execution links\n", .{});
+    std.debug.print("  " ++ ANSI_GREEN ++ "doctor" ++ ANSI_RESET ++ "                  Innovative System Diagnostic: Verifies PATH profile, permissions, and links\n", .{});
+    std.debug.print("  " ++ ANSI_YELLOW ++ "fix" ++ ANSI_RESET ++ "                     Innovative Automated Repair: Actively fixes broken packages and directory permissions\n", .{});
+    std.debug.print("  " ++ ANSI_RED ++ "detect" ++ ANSI_RESET ++ " <pkg>              Advanced Malware & Suspicious Behavior Heuristic Scanner\n", .{});
     std.debug.print("  " ++ ANSI_YELLOW ++ "gc" ++ ANSI_RESET ++ "                      Instant Garbage Collector: Prunes abandoned secure temp downloads and shells\n", .{});
     std.debug.print("  " ++ ANSI_MAGENTA ++ "search" ++ ANSI_RESET ++ " <query>           Search the lightning-fast abv0 registry\n", .{});
     std.debug.print("  " ++ ANSI_CYAN ++ "list" ++ ANSI_RESET ++ "                     List all packages available in the secure registry\n", .{});
@@ -273,7 +275,7 @@ pub fn main() !void {
             });
         }
 
-        std.debug.print("[ ⠋ ] Starting high-performance secure setup for {} packages...\n", .{workers.items.len});
+        store.printProgressBar("Orchestrating concurrent worker setup threads...", 1, 1);
 
         // Launch parallel worker execution threads
         for (workers.items) |*worker| {
@@ -288,7 +290,7 @@ pub fn main() !void {
 
         const elapsed_ns = timer.read();
         const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
-        std.debug.print(ANSI_GREEN ++ ANSI_BOLD ++ "\n[ ✅ ] Successfully completed secure setup for {} packages in {d:.2}ms!\n" ++ ANSI_RESET, .{ workers.items.len, elapsed_ms });
+        std.debug.print(ANSI_GREEN ++ ANSI_BOLD ++ "\n[ COMPLETED ] Successfully finished secure setup for {} packages in {d:.2}ms!\n" ++ ANSI_RESET, .{ workers.items.len, elapsed_ms });
         std.debug.print("Note: Make sure to add {s} to your PATH!\n", .{pkg_store.bin_root});
     } else if (std.mem.eql(u8, cmd, "uninstall")) {
         if (cmd_args.items.len == 0) {
@@ -304,7 +306,7 @@ pub fn main() !void {
         try pkg_store.uninstall(pkg);
         const elapsed_ns = timer.read();
         const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
-        std.debug.print(ANSI_GREEN ++ ANSI_BOLD ++ "\n[ ✅ ] Successfully uninstalled {s} in {d:.2}ms!\n" ++ ANSI_RESET, .{ pkg.name, elapsed_ms });
+        std.debug.print(ANSI_GREEN ++ ANSI_BOLD ++ "\n[ COMPLETED ] Successfully uninstalled {s} in {d:.2}ms!\n" ++ ANSI_RESET, .{ pkg.name, elapsed_ms });
     } else if (std.mem.eql(u8, cmd, "run")) {
         if (cmd_args.items.len == 0) {
             std.debug.print("Error: Please provide a package name to run. Example: abv0 run jq -- --version\n", .{});
@@ -340,17 +342,36 @@ pub fn main() !void {
 
         try pkg_store.executeShell(req_pkgs.items, platform, use_micro_split);
     } else if (std.mem.eql(u8, cmd, "doctor")) {
-        // Innovative Feature: Self-Healing Audit
+        // Diagnostic Doctor
         try pkg_store.doctor(&reg, platform);
         const elapsed_ns = timer.read();
         const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
-        std.debug.print("Completed health audit in {d:.2}ms.\n", .{elapsed_ms});
+        std.debug.print("Diagnostic finished in {d:.2}ms.\n", .{elapsed_ms});
+    } else if (std.mem.eql(u8, cmd, "fix")) {
+        // Auto-fix Active Repair
+        try pkg_store.fix(&reg, platform);
+        const elapsed_ns = timer.read();
+        const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
+        std.debug.print("Repair sequence completed in {d:.2}ms.\n", .{elapsed_ms});
+    } else if (std.mem.eql(u8, cmd, "detect")) {
+        // Advanced Malware Scanner
+        if (cmd_args.items.len == 0) {
+            std.debug.print("Error: Please provide a package name to detect. Example: abv0 detect threat-sample\n", .{});
+            return;
+        }
+        const pkg_name = cmd_args.items[0];
+        const pkg = reg.packages.get(pkg_name) orelse {
+            std.debug.print("Error: Package '{s}' not found in registry.\n", .{pkg_name});
+            return;
+        };
+
+        try pkg_store.detectMalware(pkg, platform);
     } else if (std.mem.eql(u8, cmd, "gc")) {
-        // Innovative Feature: Instant Garbage Collection
+        // Instant Garbage Collection
         try pkg_store.gc();
         const elapsed_ns = timer.read();
         const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
-        std.debug.print("Completed secure garbage collection in {d:.2}ms.\n", .{elapsed_ms});
+        std.debug.print("[ GC FINISHED ] Pruned residual temp files in {d:.2}ms.\n", .{elapsed_ms});
     } else {
         std.debug.print("Error: Unknown command: {s}\n\n", .{cmd});
         printUsage();

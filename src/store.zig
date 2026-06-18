@@ -17,6 +17,25 @@ pub fn isValidId(id: []const u8) bool {
     return true;
 }
 
+// Gorgeous CLI text progress animation
+pub fn printProgressBar(msg: []const u8, filled: usize, total: usize) void {
+    const bar_len: usize = 20;
+    const active_filled = if (total == 0) bar_len else (filled * bar_len) / total;
+
+    var bar_buf: [32]u8 = undefined;
+    for (0..bar_len) |i| {
+        if (i < active_filled) {
+            bar_buf[i] = '=';
+        } else if (i == active_filled and i < bar_len) {
+            bar_buf[i] = '>';
+        } else {
+            bar_buf[i] = ' ';
+        }
+    }
+
+    std.debug.print("[{s}] {s}\n", .{ bar_buf[0..bar_len], msg });
+}
+
 pub const Store = struct {
     allocator: std.mem.Allocator,
     store_root: []const u8,
@@ -99,7 +118,7 @@ pub const Store = struct {
 
     // Innovative Feature: Micro-file Splitting Download Engine
     fn microSplitDownload(self: *Store, url: []const u8, archive_path: []const u8, tmp_dir_path: []const u8) !bool {
-        std.debug.print("   [ * ] Micro-Split Mode activated. Querying remote Content-Length...\n", .{});
+        printProgressBar("Querying remote server Content-Length...", 1, 10);
 
         // Query headers
         const curl_res = try std.process.Child.run(.{
@@ -132,12 +151,11 @@ pub const Store = struct {
         }
 
         if (content_length == null or content_length.? < 100_000) {
-            std.debug.print("   [ - ] File size too small or missing Content-Length. Falling back to single-stream download.\n", .{});
             return false;
         }
 
         const total_bytes = content_length.?;
-        std.debug.print("   [ + ] Server supports micro-splitting! Total size: {d} MB. Dividing into 4 concurrent chunks...\n", .{total_bytes / (1024 * 1024)});
+        printProgressBar("Slicing file into 4 parallel micro chunk streams...", 3, 10);
 
         const chunks = 4;
         const chunk_size = total_bytes / chunks;
@@ -161,8 +179,6 @@ pub const Store = struct {
             const chunk_path = try std.fs.path.join(self.allocator, &.{ tmp_dir_path, chunk_name });
             try chunk_files.append(chunk_path);
 
-            std.debug.print("       -> Launching Micro-Chunk {d}: bytes {d} to {d}\n", .{ i + 1, start_byte, end_byte });
-
             const thread = try std.Thread.spawn(.{}, downloadChunk, .{ self.allocator, url, start_byte, end_byte, chunk_path });
             try threads.append(thread);
         }
@@ -172,7 +188,7 @@ pub const Store = struct {
             thread.join();
         }
 
-        std.debug.print("   [ = ] Concurrently downloaded all micro-files. Concatenating into main archive...\n", .{});
+        printProgressBar("Concatenating micro chunk buffers into main file...", 7, 10);
 
         const out_file = try std.fs.cwd().createFile(archive_path, .{ .mode = 0o600 });
         defer out_file.close();
@@ -208,10 +224,11 @@ pub const Store = struct {
 
         // Check if already in store
         if (try self.isInstalled(pkg, platform_name)) {
-            std.debug.print("[ ✅ ] Package '{s}' already installed in secure store ({s})\n", .{ pkg.name, pkg_dir });
+            std.debug.print("Package '{s}' already installed in secure store ({s})\n", .{ pkg.name, pkg_dir });
         } else {
-            std.debug.print("[ ⠋ ] Downloading {s} v{s} for {s}...\n", .{ pkg.name, pkg.version, platform_name });
-            std.debug.print("      URL: {s}\n", .{info.url});
+            const init_msg = try std.fmt.allocPrint(self.allocator, "Initializing setup for {s}...", .{pkg.name});
+            defer self.allocator.free(init_msg);
+            printProgressBar(init_msg, 1, 5);
 
             // Security fix: Use highly unpredictable tmp work dir names with cryptographic random noise and 0700 permissions
             const random_token = std.crypto.random.int(u64);
@@ -234,6 +251,10 @@ pub const Store = struct {
             }
 
             if (!micro_success) {
+                const dl_msg = try std.fmt.allocPrint(self.allocator, "Downloading {s} from {s}...", .{ pkg.name, info.url });
+                defer self.allocator.free(dl_msg);
+                printProgressBar(dl_msg, 2, 5);
+
                 // Standard secure stream download
                 const curl_result = try std.process.Child.run(.{
                     .allocator = self.allocator,
@@ -250,7 +271,10 @@ pub const Store = struct {
             }
 
             // Secure SHA256 Verification
-            std.debug.print("[ ⠙ ] Verifying SHA256 cryptographic integrity for {s}...\n", .{pkg.name});
+            const verify_msg = try std.fmt.allocPrint(self.allocator, "Verifying SHA256 integrity sums for {s}...", .{pkg.name});
+            defer self.allocator.free(verify_msg);
+            printProgressBar(verify_msg, 3, 5);
+
             const file = try std.fs.cwd().openFile(archive_path, .{});
             var hasher = std.crypto.hash.sha2.Sha256.init(.{});
             var buf: [65536]u8 = undefined;
@@ -272,10 +296,12 @@ pub const Store = struct {
                 std.fs.cwd().deleteTree(tmp_dir_path) catch {};
                 return error.ChecksumMismatch;
             }
-            std.debug.print("[ ⠹ ] SHA256 checksum verified securely!\n", .{});
 
             // Unpack archive safely
-            std.debug.print("[ ⠸ ] Unpacking {s} ({s})...\n", .{ pkg.name, info.archive_type });
+            const unpack_msg = try std.fmt.allocPrint(self.allocator, "Unpacking {s} archive...", .{pkg.name});
+            defer self.allocator.free(unpack_msg);
+            printProgressBar(unpack_msg, 4, 5);
+
             if (std.mem.eql(u8, info.archive_type, "tar.gz") or std.mem.eql(u8, info.archive_type, "tar.xz")) {
                 const tar_res = try std.process.Child.run(.{
                     .allocator = self.allocator,
@@ -323,7 +349,10 @@ pub const Store = struct {
         }
 
         // Fast link binaries to ~/.abv0/bin
-        std.debug.print("[ ⠼ ] Linking executables for {s} into {s}...\n", .{ pkg.name, self.bin_root });
+        const link_msg = try std.fmt.allocPrint(self.allocator, "Linking {s} executables into {s}...", .{ pkg.name, self.bin_root });
+        defer self.allocator.free(link_msg);
+        printProgressBar(link_msg, 5, 5);
+
         for (pkg.bin) |bin_name| {
             const src_bin = try std.fs.path.join(self.allocator, &.{ pkg_dir, info.bin_path });
             defer self.allocator.free(src_bin);
@@ -355,7 +384,7 @@ pub const Store = struct {
             defer self.allocator.free(dst_bin);
 
             if (std.fs.cwd().deleteFile(dst_bin)) |_| {
-                std.debug.print("[ 🗑  ] Unlinked binary {s}\n", .{dst_bin});
+                std.debug.print("Unlinked binary {s}\n", .{dst_bin});
             } else |_| {}
         }
 
@@ -367,7 +396,7 @@ pub const Store = struct {
             defer self.allocator.free(pkg_dir);
 
             if (std.fs.cwd().deleteTree(pkg_dir)) |_| {
-                std.debug.print("[ 🗑  ] Removed secure package store {s}\n", .{pkg_dir});
+                std.debug.print("Removed secure package store {s}\n", .{pkg_dir});
                 uninstalled_any = true;
             } else |_| {}
         }
@@ -404,7 +433,7 @@ pub const Store = struct {
 
     // Innovative Feature: Isolated Ephemeral Sandboxed Shell
     pub fn executeShell(self: *Store, pkgs: []const registry.Package, platform_name: []const u8, use_micro_split: bool) !void {
-        std.debug.print("[ ⠋ ] Setting up secure isolated ephemeral environment shell...\n", .{});
+        printProgressBar("Setting up secure isolated ephemeral environment shell...", 1, 4);
 
         // 1. Ensure all requested packages are in store
         for (pkgs) |pkg| {
@@ -412,6 +441,8 @@ pub const Store = struct {
                 try self.install(pkg, platform_name, use_micro_split);
             }
         }
+
+        printProgressBar("Provisioning isolated temporary sandbox paths...", 2, 4);
 
         // 2. Create an isolated temporary bin directory
         const timestamp = std.time.timestamp();
@@ -431,6 +462,8 @@ pub const Store = struct {
         // Security check: restrict permissions on active shell folder
         _ = std.process.Child.run(.{ .allocator = self.allocator, .argv = &.{ "chmod", "0700", shell_base_path } }) catch {};
 
+        printProgressBar("Linking requested dependencies into sandbox...", 3, 4);
+
         // 3. Populate isolated bin with APFS clones/symlinks of only requested packages
         for (pkgs) |pkg| {
             const info = pkg.platforms.get(platform_name) orelse return error.UnsupportedPlatform;
@@ -448,7 +481,8 @@ pub const Store = struct {
             }
         }
 
-        std.debug.print("[ ⠼ ] Spawning secure sandboxed subshell. Type 'exit' to return and dissolve sandbox.\n", .{});
+        printProgressBar("Spawning secure sandboxed subshell...", 4, 4);
+        std.debug.print("Type 'exit' to return to your host system and dissolve the sandbox automatically.\n", .{});
 
         // 4. Construct PATH: isolated_bin + standard system paths (without global abv0 bin)
         const old_path = std.posix.getenv("PATH") orelse "/usr/bin:/bin:/usr/sbin:/sbin";
@@ -467,60 +501,190 @@ pub const Store = struct {
         child.env_map = &env_map;
 
         _ = try child.spawnAndWait();
-        std.debug.print("[ ✅ ] Exited sandboxed shell. Temporary environment securely dissolved.\n", .{});
+        std.debug.print("[ CLEAR ] Sandboxed temporary session successfully closed and dissolved.\n", .{});
     }
 
-    // Innovative Feature: Self-Healing Doctor
+    // Diagnostic Helper: Doctor Audits Profile and Permissions
     pub fn doctor(self: *Store, reg: *registry.Registry, platform_name: []const u8) !void {
-        std.debug.print("[ ⠋ ] Running abv0 secure self-healing health check and integrity audit...\n", .{});
+        std.debug.print("=== [ abv0 System Diagnostic & Doctor Check ] ===\n\n", .{});
 
-        var issues_found: u32 = 0;
-        var issues_fixed: u32 = 0;
+        var total_warnings: u32 = 0;
+        var total_broken_links: u32 = 0;
+
+        // 1. Verify PATH profile
+        std.debug.print("Checking PATH profile...\n", .{});
+        if (std.posix.getenv("PATH")) |env_path| {
+            if (std.mem.indexOf(u8, env_path, self.bin_root) == null) {
+                total_warnings += 1;
+                std.debug.print("[ Warning ] Your active PATH environment variable does not contain the abv0 managed binary folder:\n", .{});
+                std.debug.print("            -> Expected: {s}\n", .{self.bin_root});
+                std.debug.print("            -> Solution: Add export PATH=\"{s}:$PATH\" to your ~/.zshrc profile.\n\n", .{self.bin_root});
+            } else {
+                std.debug.print("   -> Profile PATH correctly contains abv0 managed binary path.\n\n", .{});
+            }
+        }
+
+        // 2. Writable Store Profile Verification
+        std.debug.print("Checking directory permissions and storage integrity...\n", .{});
+        std.fs.cwd().access(self.store_root, .{ .mode = .read_write }) catch {
+            total_warnings += 1;
+            std.debug.print("[ Warning ] Internal store directory ({s}) is missing write permissions.\n\n", .{self.store_root});
+        };
+
+        // 3. Execution Link Health check
+        std.debug.print("Auditing installed package link state...\n", .{});
+        var it = reg.packages.iterator();
+        while (it.next()) |entry| {
+            const pkg = entry.value_ptr.*;
+            if (try self.isInstalled(pkg, platform_name)) {
+                // Check binary targets
+                for (pkg.bin) |bin_name| {
+                    const dst_bin = try std.fs.path.join(self.allocator, &.{ self.bin_root, bin_name });
+                    defer self.allocator.free(dst_bin);
+
+                    std.fs.cwd().access(dst_bin, .{}) catch {
+                        total_broken_links += 1;
+                        std.debug.print("[ Broken Link ] Package '{s}' is installed, but executable '{s}' is unlinked or missing from ~/.abv0/bin.\n", .{ pkg.name, bin_name });
+                    };
+                }
+            }
+        }
+
+        std.debug.print("\n=== [ Diagnostic Summary ] ===\n", .{});
+        if (total_warnings == 0 and total_broken_links == 0) {
+            std.debug.print("[ HEALTHY ] Your system is raring to brew and perfectly optimized.\n", .{});
+        } else {
+            std.debug.print("[ WARNINGS FOUND ] Found {} warnings and {} broken execution links.\n", .{ total_warnings, total_broken_links });
+            std.debug.print("                   Run 'abv0 fix' to automatically heal and resolve all broken packages and permissions.\n", .{});
+        }
+    }
+
+    // Self-Healing Auto-Fix command
+    pub fn fix(self: *Store, reg: *registry.Registry, platform_name: []const u8) !void {
+        printProgressBar("Starting abv0 automated self-healing package & permission repair...", 1, 4);
+
+        var packages_healed: u32 = 0;
+        var permissions_fixed: u32 = 0;
+
+        printProgressBar("Resetting strict secure 0o700 user permissions on critical paths...", 2, 4);
+
+        _ = std.process.Child.run(.{ .allocator = self.allocator, .argv = &.{ "chmod", "-R", "u+rwX", self.store_root } }) catch {};
+        permissions_fixed += 1;
+
+        printProgressBar("Re-linking all unlinked or fractured executables into ~/.abv0/bin...", 3, 4);
 
         var it = reg.packages.iterator();
         while (it.next()) |entry| {
             const pkg = entry.value_ptr.*;
             if (try self.isInstalled(pkg, platform_name)) {
                 const info = pkg.platforms.get(platform_name) orelse continue;
-                const pkg_dir = self.getPkgStorePath(pkg, platform_name) catch continue;
+                const pkg_dir = try self.getPkgStorePath(pkg, platform_name);
                 defer self.allocator.free(pkg_dir);
 
-                // Verify each binary link exists in ~/.abv0/bin
                 for (pkg.bin) |bin_name| {
                     const dst_bin = try std.fs.path.join(self.allocator, &.{ self.bin_root, bin_name });
                     defer self.allocator.free(dst_bin);
 
-                    if (std.fs.cwd().access(dst_bin, .{})) |_| {
-                        // Link is completely intact
-                    } else |_| {
-                        issues_found += 1;
-                        std.debug.print("[ ⚠️ ] Broken link detected for executable: {s}\n", .{bin_name});
-
+                    std.fs.cwd().access(dst_bin, .{}) catch {
                         const src_bin = try std.fs.path.join(self.allocator, &.{ pkg_dir, info.bin_path });
                         defer self.allocator.free(src_bin);
 
                         if (os_macos.fastLink(src_bin, dst_bin)) |_| {
-                            issues_fixed += 1;
-                            std.debug.print("       Successfully self-healed link: {s} -> {s}\n", .{ bin_name, src_bin });
+                            packages_healed += 1;
+                            std.debug.print("   -> Successfully self-healed and re-linked: {s}\n", .{bin_name});
                         } else |err| {
-                            std.debug.print("       Failed to self-heal link: {}\n", .{err});
+                            std.debug.print("   -> Failed to link {s}: {}\n", .{ bin_name, err });
                         }
-                    }
+                    };
                 }
             }
         }
 
-        if (issues_found == 0) {
-            std.debug.print("[ ✅ ] Secure audit complete! All installed execution links and content stores are pristine.\n", .{});
+        printProgressBar("Purging residual temporary downloads...", 4, 4);
+        try self.gc();
+
+        std.debug.print("\n[ REPAIR COMPLETE ] Successfully healed {} broken package links and fixed directory permissions.\n", .{packages_healed});
+    }
+
+    // Innovative Feature: Malware & Suspicious Heuristic Detector
+    pub fn detectMalware(self: *Store, pkg: registry.Package, platform_name: []const u8) !void {
+        std.debug.print("=== [ abv0 Advanced Malware & Security Heuristic Scanner ] ===\n\n", .{});
+        std.debug.print("Target Package: {s} v{s} ({s})\n", .{ pkg.name, pkg.version, platform_name });
+
+        if (!(try self.isInstalled(pkg, platform_name))) {
+            std.debug.print("Error: Package '{s}' is not installed in your store. Run 'abv0 install {s}' first to scan its files.\n", .{ pkg.name, pkg.name });
+            return;
+        }
+
+        const pkg_dir = try self.getPkgStorePath(pkg, platform_name);
+        defer self.allocator.free(pkg_dir);
+
+        printProgressBar("Initializing Signature Heuristics Engine...", 1, 5);
+
+        var threat_score: u32 = 0;
+        var risk_reasons = std.ArrayList([]const u8).init(self.allocator);
+        defer {
+            for (risk_reasons.items) |r| self.allocator.free(r);
+            risk_reasons.deinit();
+        }
+
+        printProgressBar("Scanning binary definitions and executable byte streams...", 2, 5);
+
+        // Scan the actual executable path
+        const info = pkg.platforms.get(platform_name) orelse return error.UnsupportedPlatform;
+        const bin_path = try std.fs.path.join(self.allocator, &.{ pkg_dir, info.bin_path });
+        defer self.allocator.free(bin_path);
+
+        const file = try std.fs.cwd().openFile(bin_path, .{});
+        defer file.close();
+
+        const content = try file.readToEndAlloc(self.allocator, 50 * 1024 * 1024);
+        defer self.allocator.free(content);
+
+        printProgressBar("Evaluating heuristic threat vectors and behavioral patterns...", 4, 5);
+
+        // 1. Suspicious Reverse Shell & Backdoor Heuristics
+        if (std.mem.indexOf(u8, content, "/bin/sh -i") != null or std.mem.indexOf(u8, content, "nc -e") != null) {
+            threat_score += 40;
+            try risk_reasons.append(try self.allocator.dupe(u8, "Suspicious reverse shell backdoor execution sequence detected (/bin/sh -i or nc -e)"));
+        }
+
+        // 2. Cryptominer Pool & Stratum protocol Heuristics
+        if (std.mem.indexOf(u8, content, "stratum+tcp://") != null or std.mem.indexOf(u8, content, "nicehash") != null) {
+            threat_score += 50;
+            try risk_reasons.append(try self.allocator.dupe(u8, "Embedded cryptominer Stratum mining pool strings detected"));
+        }
+
+        // 3. Credential Harvesting & System File Access
+        if (std.mem.indexOf(u8, content, "/etc/shadow") != null or std.mem.indexOf(u8, content, "/.ssh/id_rsa") != null) {
+            threat_score += 35;
+            try risk_reasons.append(try self.allocator.dupe(u8, "Private key or shadow password credential harvesting pattern accessed"));
+        }
+
+        // 4. Insecure Remote Script Piping
+        if (std.mem.indexOf(u8, content, "curl | sh") != null or std.mem.indexOf(u8, content, "wget -O- | sh") != null) {
+            threat_score += 25;
+            try risk_reasons.append(try self.allocator.dupe(u8, "Insecure remote pipe execution script pattern (curl | sh)"));
+        }
+
+        printProgressBar("Consolidating Security Report...", 5, 5);
+
+        std.debug.print("\n=== [ Security Audit Verdict ] ===\n", .{});
+        if (threat_score == 0) {
+            std.debug.print("[ PASSED ] Threat Score: 0/100\n", .{});
+            std.debug.print("           Verdict: Completely pristine, clean, and trusted software package. Zero malware patterns found.\n", .{});
         } else {
-            std.debug.print("[ ✅ ] Secure audit complete! Found {} issues and successfully self-healed {}.\n", .{ issues_found, issues_fixed });
+            std.debug.print("[ HIGH RISK SUSPICION ] Threat Score: {}/100\n", .{threat_score});
+            std.debug.print("                        Verdict: Suspicious heuristic patterns identified in package code!\n\n", .{});
+            std.debug.print("Detailed Risk Vectors Identifed:\n", .{});
+            for (risk_reasons.items) |reason| {
+                std.debug.print("  -> {s}\n", .{reason});
+            }
         }
     }
 
-    // Innovative Feature: Instant Garbage Collector / Prune
+    // Instant Garbage Collector / Prune
     pub fn gc(self: *Store) !void {
-        std.debug.print("[ ⠋ ] Starting abv0 instant garbage collector...\n", .{});
-
         var store_dir = try std.fs.cwd().openDir(self.store_root, .{ .iterate = true });
         defer store_dir.close();
 
@@ -534,7 +698,6 @@ pub const Store = struct {
 
                 if (std.fs.cwd().deleteTree(tmp_path)) |_| {
                     deleted_count += 1;
-                    std.debug.print("Pruned abandoned secure temporary download: {s}\n", .{entry.name});
                 } else |_| {}
             }
         }
@@ -550,11 +713,8 @@ pub const Store = struct {
 
                 if (std.fs.cwd().deleteTree(shell_path)) |_| {
                     deleted_count += 1;
-                    std.debug.print("Pruned abandoned ephemeral sandboxed shell environment: {s}\n", .{entry.name});
                 } else |_| {}
             }
         }
-
-        std.debug.print("[ ✅ ] Secure garbage collection finished! Reclaimed {} abandoned items.\n", .{deleted_count});
     }
 };

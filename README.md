@@ -15,8 +15,9 @@ Traditional package managers like Homebrew rely on heavy interpreted runtimes (R
 5. **High-Performance Parallel Batching:** Multi-package installations run entirely concurrently in independent worker threads, saturating network bandwidth and disk I/O.
 6. **Range-Split Micro Chunk Download (`--micro-split`):** Optional hyper-optimized download engine that queries remote `Content-Length`, slices large packages into multiple byte-ranges, and launches parallel download streams to maximize fiber internet speeds.
 7. **Sandboxed Ephemeral Shells (`abv0 shell`):** Instantly provision an isolated subshell with specific packages injected into your `PATH`. Exiting automatically dissolves the sandbox untouched.
-8. **Instant Self-Healing (`abv0 doctor`):** Audits all execution links against your internal content-addressable store in sub-1 millisecond and self-heals broken links instantly.
-9. **Rigorous Security Defenses:** Enforces strict ID sanitization to block Path Traversal and Command Injection, verifies multi-user `0o700` directory permissions, and validates SHA256 integrity sums before execution.
+8. **System Diagnostics & Automated Repair (`abv0 doctor` & `abv0 fix`):** Distinct diagnostic profiling exactly like Homebrew that audits your `PATH` and link state, coupled with an active `abv0 fix` repair engine that automatically heals broken packages and resets secure directory permissions.
+9. **Advanced Malware Scanner (`abv0 detect`):** High-performance static heuristics engine that evaluates installed executables and scripts for reverse shells, embedded cryptominers (Stratum mining pools), private key stealing, and unauthorized system file access.
+10. **Clean Text Progress Bars:** Beautiful text progress bar animations (`[===========>        ]`) providing pristine visual feedback during setup, multi-chunk downloads, and diagnostic repairs.
 
 ---
 
@@ -67,8 +68,15 @@ abv0 install <pkg1> [pkg2...] [--micro-split]
 abv0 shell <pkg1> [pkg2...] [--micro-split]
 # Example: abv0 shell jq bat
 
-# Instantly audit and self-heal broken execution links
+# System Diagnostic: Audits PATH profile, directory permissions, and broken link states
 abv0 doctor
+
+# Automated Self-Healing Repair: Actively fixes directory permissions and re-links broken packages
+abv0 fix
+
+# Advanced Security Scanner: Evaluates package executables for malware heuristics and Threat Scores
+abv0 detect <package>
+# Example: abv0 detect threat-sample
 
 # Instant Garbage Collector: Reclaim abandoned downloads and temporary shells
 abv0 gc
@@ -107,17 +115,21 @@ Licensed under the GNU Affero Public License v3. See [LICENSE](./LICENSE) for de
 ---
 
 ## Changelog / Recent Changes
+* **v0.4.0 (Malware Detection, Doctor Profiling & Progress Bar Release):**
+  * **Pristine Progress Bars:** Updated loading visuals to clean text progress bars (`[===========>        ]`) across all download, slicing, unpacking, and repair operations.
+  * **Distinct System Diagnostic:** Separated `abv0 doctor` into an elegant analytical health tool exactly like Homebrew that audits your active `PATH` profile, permissions, and links.
+  * **Active Repair Engine:** Added `abv0 fix` to actively self-heal fractured packages, enforce directory ownership, re-link unlinked binaries, and purge abandoned temporary items.
+  * **Advanced Threat Scanner:** Built `abv0 detect <pkg>` with static behavioral heuristics to calculate overall Security Threat Scores and identify embedded reverse shells, Stratum mining pools, and private credential harvesters.
+  * **Interactive Security Threat Sample:** Added official `threat-sample` package definition to enable immediate local evaluation of the Malware Detection scanner.
 * **v0.3.0 (Security Hardening & Micro-Splitting Release):**
-  * **Range-Split Micro Downloads:** Added optional `--micro-split` flag to divide large remote packages into multi-chunk parallel streams for ultra-fast downloads.
-  * **Loading Visuals:** Implemented professional Unicode spinner sequences (`[ ⠋ ]`, `[ ⠙ ]`, etc.) to provide clear progress animation during longer downloads and installations.
-  * **Rigorous Security Hardening:** Audited codebase and added `isValidId()` sanitization to block arbitrary Path Traversal and Command Injection attacks.
-  * **Strict Permission Enforcing:** Enforced secure `0o700` access permissions on internal stores and temporary work directories to prevent unauthorized local multi-user tampering.
-  * **Memory Hardening:** Swapped raw `cat` child execution for a pristine Zig buffered streaming read/write file reconciler to eliminate large memory allocations.
+  * Range-Split Micro Chunk concurrent download streaming (`--micro-split`).
+  * Professional loading spinner animations.
+  * Security Path Traversal and Command Injection defenses (`isValidId()`).
+  * Strict `0o700` multi-user directory permission enforcement.
+  * Memory hardened Zig streaming archive file reconciler.
 * **v0.2.0 (High-Performance Innovation Release):**
   * Parallel Multi-Threaded Setup for multi-package installations.
   * Ephemeral Sandboxed Shells (`abv0 shell`).
-  * Instant Self-Healing Audit (`abv0 doctor`).
-  * Instant Garbage Collector (`abv0 gc`).
   * Structured JSON machine-readable outputs (`--json`).
 * **v0.1.1 (Clean Professional Update):**
   * Removed all emojis from source code, CLI output messages, and documentation for a clean, minimalist, professional terminal aesthetic.
