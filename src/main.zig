@@ -393,6 +393,12 @@ pub fn main() !void {
         const elapsed_ns = timer.read();
         const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
         std.debug.print(ANSI_GREEN ++ ANSI_BOLD ++ "\n[ COMPLETED ] Successfully uninstalled {s} in {d:.2}ms!\n" ++ ANSI_RESET, .{ pkg.name, elapsed_ms });
+    } else if (std.mem.eql(u8, cmd, "hybrid-sync") or std.mem.eql(u8, cmd, "sync")) {
+        // Active 4-in-1 Hybrid Core Synchronizer
+        try pkg_store.synchronizeHybridRegistry(&reg);
+        const elapsed_ns = timer.read();
+        const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
+        std.debug.print("Completed hybrid sync sequence in {d:.2}ms.\n", .{elapsed_ms});
     } else if (std.mem.eql(u8, cmd, "outdated")) {
         // List Outdated
         std.debug.print("Scanning installed packages against active registry manifests...\n", .{});

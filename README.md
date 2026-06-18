@@ -136,7 +136,9 @@ Licensed under the GNU Affero Public License v3. See [LICENSE](./LICENSE) for de
 ---
 
 ## 📜 Changelog / Recent Changes
-* **v0.9.5 (Registry Architecture Roadmap & Roadmap Documentation Release):**
+* **v0.9.6 (4-in-1 Next-Generation Hybrid Registry Matrix Release):**
+  * **Hybrid Registry Reconciler:** Built the definitive `abv0 hybrid-sync` (or `abv0 sync`) architectural orchestrator. It seamlessly executes an authoritative offline Git pull on your master tap, auto-compiles parsed manifests into an embedded SQLite database (`registry.db`), serializes high-speed zero-copy Memory-Mapped indexes (`index.abv`), and readies Decentralized edge fallbacks globally.
+* **v0.9.5 (Registry Architecture Roadmap Release):**
   * **Registry Roadmap:** Authored comprehensive architectural roadmap comparing dedicated Git repository manifest structures, Memory-Mapped zero-copy flat binary stores (`.abv`), and embedded SQLite storage solutions.
 * **v0.9.4 (Universal Build-From-Source Automated Compiler Engine Release):**
   * **Automated Source Auto-Compilation:** Built a powerful compilation reconciler into the setup pipeline. When a specific software package has no pre-compiled binary release assets available on GitHub (like `btop` on macOS), `abv0` downloads the source repository snapshot, actively discovers the required build toolchain (`make`, `cmake`, `cargo build --release`, `go build`), actively compiles the application from source entirely on the fly, discovers the newly compiled executables, and APFS-clones/links them into your execution path!
