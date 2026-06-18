@@ -38,8 +38,32 @@ chmod 0700 "${BIN_DIR}/abv0"
 
 echo ""
 echo "✅ abv0 installed successfully to ${BIN_DIR}/abv0"
-echo "💡 Make sure to add it to your PATH in your profile (~/.zshrc or ~/.bashrc):"
-echo "    export PATH=\"${BIN_DIR}:\$PATH\""
+
+# Actively attempt to update shell profiles
+ADDED_PROFILE=0
+if [ -f "$HOME/.zshrc" ]; then
+    if ! grep -q "$BIN_DIR" "$HOME/.zshrc" 2>/dev/null; then
+        echo "export PATH=\"$BIN_DIR:\$PATH\"" >> "$HOME/.zshrc"
+        echo "🔗 Successfully added abv0 binary directory to your ~/.zshrc profile."
+        ADDED_PROFILE=1
+    fi
+elif [ -f "$HOME/.bashrc" ]; then
+    if ! grep -q "$BIN_DIR" "$HOME/.bashrc" 2>/dev/null; then
+        echo "export PATH=\"$BIN_DIR:\$PATH\"" >> "$HOME/.bashrc"
+        echo "🔗 Successfully added abv0 binary directory to your ~/.bashrc profile."
+        ADDED_PROFILE=1
+    fi
+fi
+
+if [ $ADDED_PROFILE -eq 0 ]; then
+    echo "💡 Please add the managed binary path to your PATH environment variable (~/.zshrc or ~/.bashrc):"
+    echo "    export PATH=\"${BIN_DIR}:\$PATH\""
+fi
+
 echo ""
-echo "🚀 Try running your first brew command:"
+echo "🔥 IMPORTANT: To use abv0 in your currently open terminal right now, you must run:"
+echo "    export PATH=\"${BIN_DIR}:\$PATH\""
+echo "    (or open a new terminal window / tab)."
+echo ""
+echo "🚀 Then try running your first brew command:"
 echo "    abv0 list"
