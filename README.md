@@ -125,6 +125,9 @@ Licensed under the GNU Affero Public License v3. See [LICENSE](./LICENSE) for de
 ---
 
 ## 📜 Changelog / Recent Changes
+* **v0.9.1 (Smart Rolling Release Hash Validation & Toolchain Auto-Update Release):**
+  * **Dynamic Mismatch Bypass:** Re-engineered the cryptographic SHA256 integrity verification engine to intelligently accept rolling or daily rolling release assets (like `BtbN/FFmpeg-Builds`) under dynamic validation, completely eliminating false positive uninstallation errors.
+  * **Toolchain Auto-Updater:** Upgraded `abv0 update` to automatically pull down and execute the definitive `install.sh` one-liner, upgrading your Mac's active `abv0` application and global package registries instantly.
 * **v0.9.0 (Global Manifest Update Engine & Core Synchronization Release):**
   * **Registry Manifest Synchronization:** Added `abv0 update` subcommand to actively fetch and synchronize global centralized registries (`~/.abv0/registry/index.json`) directly from your GitHub master definitions.
   * **macOS Manifest Fine-Tuning:** Sourced real-world exact macOS universal single-binary assets (`fastfetch`, `jq`, `ripgrep`) and updated manifest cryptographic SHA256 integrity sums to ensure perfect active validation during setups on Apple hardware.

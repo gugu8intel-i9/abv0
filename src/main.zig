@@ -222,27 +222,24 @@ pub fn main() !void {
 
     const cmd = command.?;
     if (std.mem.eql(u8, cmd, "update")) {
-        // Active Registry Index Manifest Updater
-        std.debug.print("=== [ abv0 Global Manifest Registry Updater ] ===\n\n", .{});
-        store.printProgressBar("Fetching live definitive index from GitHub repository...", 1, 2);
+        // Core Engine & Manifest Registry Updater
+        std.debug.print("=== [ abv0 Global Core Application & Manifest Registry Updater ] ===\n\n", .{});
+        std.debug.print("Updating abv0 toolchain and central registries to the absolute latest definitive versions...\n", .{});
 
-        if (global_reg_path_saved) |reg_path| {
-            const curl_res = try std.process.Child.run(.{
-                .allocator = allocator,
-                .argv = &.{ "curl", "-s", "-L", "https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/packages/index.json", "-o", reg_path },
-            });
-            defer {
-                allocator.free(curl_res.stdout);
-                allocator.free(curl_res.stderr);
-            }
-            if (curl_res.term.Exited == 0) {
-                store.printProgressBar("Reloading registry definitions into cache...", 2, 2);
-                std.debug.print("\n[ SUCCESS ] Global registry definitions successfully updated and synchronized!\n", .{});
-            } else {
-                std.debug.print("\n[ ERROR ] Failed to update registry: {s}\n", .{curl_res.stderr});
-            }
+        const child_res = try std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{ "sh", "-c", "curl -sL https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/install.sh | sh" },
+        });
+        defer {
+            allocator.free(child_res.stdout);
+            allocator.free(child_res.stderr);
+        }
+
+        std.debug.print("{s}\n", .{child_res.stdout});
+        if (child_res.term.Exited == 0) {
+            std.debug.print("[ SUCCESS ] abv0 toolchain successfully updated to the latest definitive version!\n", .{});
         } else {
-            std.debug.print("\n[ ERROR ] Could not determine global registry path. Running in local sandbox mode.\n", .{});
+            std.debug.print("[ ERROR ] Failed to update toolchain: {s}\n", .{child_res.stderr});
         }
     } else if (std.mem.eql(u8, cmd, "list")) {
         if (json_output) {
