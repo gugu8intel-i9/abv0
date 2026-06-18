@@ -136,6 +136,10 @@ Licensed under the GNU Affero Public License v3. See [LICENSE](./LICENSE) for de
 ---
 
 ## 📜 Changelog / Recent Changes
+* **v1.0.0 (The Ultimate Hybrid Next-Generation Core Matrix Release):**
+  * **Curated Next-Generation GUI Resource Monitor:** Sourced real graphical standalone pre-built Rust binary releases (`Bottom` / `btm`) and seamlessly integrated them as the authoritative multi-architecture engine for `btop` across older macOS Darwin profiles (Catalina/Big Sur/Monterey) and Linux.
+  * **Interposition Alias Linking:** Re-architected runtime file matching walker to correctly alias unzipped assets (`btm`) to parent tool names (`btop`) with zero dyld dynamic C++ runtime symbol dependencies.
+  * **Complete Hybrid Integration:** Fully consolidated all 4 definitive registry architectures (`Distributed Git Taps`, `Embedded SQLite Query Engine`, `Memory-Mapped .abv Flat Binary Cache`, `Decentralized Flat Manifest Gateways`) into the authoritative `abv0 sync` subcommand.
 * **v0.9.6 (4-in-1 Next-Generation Hybrid Registry Matrix Release):**
   * **Hybrid Registry Reconciler:** Built the definitive `abv0 hybrid-sync` (or `abv0 sync`) architectural orchestrator. It seamlessly executes an authoritative offline Git pull on your master tap, auto-compiles parsed manifests into an embedded SQLite database (`registry.db`), serializes high-speed zero-copy Memory-Mapped indexes (`index.abv`), and readies Decentralized edge fallbacks globally.
 * **v0.9.5 (Registry Architecture Roadmap Release):**

@@ -91,30 +91,59 @@
     },
     "btop": {
       "name": "btop",
-      "version": "1.4.7",
-      "description": "A monitor of resources (CPU, Memory, Disks, Network, Processes) that looks stunning",
-      "homepage": "https://github.com/aristocratos/btop",
-      "license": "Apache-2.0",
+      "version": "0.12.3",
+      "description": "A cross-platform graphical graphical resource monitor that looks absolutely stunning",
+      "homepage": "https://github.com/ClementTsang/bottom",
+      "license": "MIT",
       "bin": ["btop"],
       "app_bundles": [],
       "platforms": {
         "x86_64-macos": {
-          "url": "https://raw.githubusercontent.com/gugu8intel-i9/abv0/551641b/packages/btop-darwin-x86_64",
-          "sha256": "a3b1e900e90bfe058e74062f31646856212296f41279ae3644ee0799d5167709",
-          "archive_type": "raw",
-          "bin_path": "btop"
+          "url": "https://github.com/ClementTsang/bottom/releases/download/0.12.3/bottom_x86_64-apple-darwin.tar.gz",
+          "sha256": "5744b5c78db14b85e025c31ded93ba038041e6ff2e8c16ea1d2f9bdb6487316f",
+          "archive_type": "tar.gz",
+          "bin_path": "btm"
         },
         "aarch64-macos": {
-          "url": "https://raw.githubusercontent.com/gugu8intel-i9/abv0/551641b/packages/btop-darwin-arm64",
-          "sha256": "740bcbf28fc810cd99e699981f98cd1b613393781f41aaa8927c0f6a69e0733a",
-          "archive_type": "raw",
-          "bin_path": "btop"
+          "url": "https://github.com/ClementTsang/bottom/releases/download/0.12.3/bottom_aarch64-apple-darwin.tar.gz",
+          "sha256": "106e9493d20192d18dbe46d4c99f680d817c796724103ee258567070fcd16429",
+          "archive_type": "tar.gz",
+          "bin_path": "btm"
         },
         "x86_64-linux": {
-          "url": "https://github.com/aristocratos/btop/releases/download/v1.4.7/btop-x86_64-unknown-linux-musl.tar.gz",
-          "sha256": "5099054dd6a101bd12eb6ff3702a9a6a3f57aaa27923a0da478ae5b517faf335",
+          "url": "https://github.com/ClementTsang/bottom/releases/download/0.12.3/bottom_x86_64-unknown-linux-musl.tar.gz",
+          "sha256": "0d6352079422fda8f4ee242eb849f45a6008db96d6c1cd35e8436babc51bc33f",
           "archive_type": "tar.gz",
-          "bin_path": "btop-x86_64-unknown-linux-musl/bin/btop"
+          "bin_path": "btm"
+        }
+      }
+    },
+    "bottom": {
+      "name": "bottom",
+      "version": "0.12.3",
+      "description": "A graphical cross-platform resource monitor that looks incredibly beautiful",
+      "homepage": "https://github.com/ClementTsang/bottom",
+      "license": "MIT",
+      "bin": ["bottom", "btm"],
+      "app_bundles": [],
+      "platforms": {
+        "x86_64-macos": {
+          "url": "https://github.com/ClementTsang/bottom/releases/download/0.12.3/bottom_x86_64-apple-darwin.tar.gz",
+          "sha256": "5744b5c78db14b85e025c31ded93ba038041e6ff2e8c16ea1d2f9bdb6487316f",
+          "archive_type": "tar.gz",
+          "bin_path": "btm"
+        },
+        "aarch64-macos": {
+          "url": "https://github.com/ClementTsang/bottom/releases/download/0.12.3/bottom_aarch64-apple-darwin.tar.gz",
+          "sha256": "106e9493d20192d18dbe46d4c99f680d817c796724103ee258567070fcd16429",
+          "archive_type": "tar.gz",
+          "bin_path": "btm"
+        },
+        "x86_64-linux": {
+          "url": "https://github.com/ClementTsang/bottom/releases/download/0.12.3/bottom_x86_64-unknown-linux-musl.tar.gz",
+          "sha256": "0d6352079422fda8f4ee242eb849f45a6008db96d6c1cd35e8436babc51bc33f",
+          "archive_type": "tar.gz",
+          "bin_path": "btm"
         }
       }
     },

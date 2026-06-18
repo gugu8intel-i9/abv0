@@ -472,7 +472,7 @@ pub const Store = struct {
                 }
 
                 while (try walker.next()) |w_entry| {
-                    if (w_entry.kind == .file and std.mem.eql(u8, w_entry.basename, bin_name)) {
+                    if (w_entry.kind == .file and (std.mem.eql(u8, w_entry.basename, bin_name) or std.mem.eql(u8, w_entry.basename, info.bin_path))) {
                         src_bin = try std.fs.path.join(self.allocator, &.{ pkg_dir, w_entry.path });
                         break;
                     }
