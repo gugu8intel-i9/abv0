@@ -39,6 +39,9 @@ echo "⬇️  Downloading ${TARGET}..."
 curl -s -L -o "${BIN_DIR}/abv0" "${URL}"
 chmod 0700 "${BIN_DIR}/abv0"
 
+# Create super friendly alias symlink so that users who type 'abvo' (with an 'o') get redirected seamlessly
+ln -sf "${BIN_DIR}/abv0" "${BIN_DIR}/abvo"
+
 echo "⬇️  Fetching active package registry index..."
 curl -s -L -o "${REG_DIR}/index.json" "${REG_URL}"
 chmod 0700 "${REG_DIR}/index.json"
