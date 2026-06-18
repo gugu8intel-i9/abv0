@@ -114,6 +114,35 @@
         }
       }
     },
+    "ffmpeg": {
+      "name": "ffmpeg",
+      "version": "latest",
+      "description": "Complete solution to record, convert and stream audio and video",
+      "homepage": "https://ffmpeg.org/",
+      "license": "GPL-3.0",
+      "bin": ["ffmpeg", "ffprobe", "ffplay"],
+      "app_bundles": [],
+      "platforms": {
+        "x86_64-linux": {
+          "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz",
+          "sha256": "68fd66ae1be70d896d5c8dcadf0973d4f13ac718bf369f37b2d34f3c4e62100e",
+          "archive_type": "tar.xz",
+          "bin_path": "ffmpeg-master-latest-linux64-gpl/bin/"
+        },
+        "x86_64-macos": {
+          "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz",
+          "sha256": "68fd66ae1be70d896d5c8dcadf0973d4f13ac718bf369f37b2d34f3c4e62100e",
+          "archive_type": "tar.xz",
+          "bin_path": "ffmpeg-master-latest-linux64-gpl/bin/"
+        },
+        "aarch64-macos": {
+          "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz",
+          "sha256": "68fd66ae1be70d896d5c8dcadf0973d4f13ac718bf369f37b2d34f3c4e62100e",
+          "archive_type": "tar.xz",
+          "bin_path": "ffmpeg-master-latest-linux64-gpl/bin/"
+        }
+      }
+    },
     "mock-gui": {
       "name": "mock-gui",
       "version": "1.0.0",

@@ -409,7 +409,12 @@ pub const Store = struct {
             printProgressBar(link_msg, 5, 5);
 
             for (pkg.bin) |bin_name| {
-                const src_bin = try std.fs.path.join(self.allocator, &.{ pkg_dir, info.bin_path });
+                var src_bin: []const u8 = undefined;
+                if (std.mem.endsWith(u8, info.bin_path, "/")) {
+                    src_bin = try std.fs.path.join(self.allocator, &.{ pkg_dir, info.bin_path, bin_name });
+                } else {
+                    src_bin = try std.fs.path.join(self.allocator, &.{ pkg_dir, info.bin_path });
+                }
                 defer self.allocator.free(src_bin);
 
                 const dst_bin = try std.fs.path.join(self.allocator, &.{ self.bin_root, bin_name });
@@ -505,7 +510,13 @@ pub const Store = struct {
         const pkg_dir = try self.getPkgStorePath(pkg, platform_name);
         defer self.allocator.free(pkg_dir);
 
-        const bin_path = try std.fs.path.join(self.allocator, &.{ pkg_dir, info.bin_path });
+        var bin_path: []const u8 = undefined;
+        if (std.mem.endsWith(u8, info.bin_path, "/")) {
+            const exe_name = if (pkg.bin.len > 0) pkg.bin[0] else "ffmpeg";
+            bin_path = try std.fs.path.join(self.allocator, &.{ pkg_dir, info.bin_path, exe_name });
+        } else {
+            bin_path = try std.fs.path.join(self.allocator, &.{ pkg_dir, info.bin_path });
+        }
         defer self.allocator.free(bin_path);
 
         var child_args = std.ArrayList([]const u8).init(self.allocator);
@@ -560,7 +571,12 @@ pub const Store = struct {
             defer self.allocator.free(pkg_dir);
 
             for (pkg.bin) |bin_name| {
-                const src_bin = try std.fs.path.join(self.allocator, &.{ pkg_dir, info.bin_path });
+                var src_bin: []const u8 = undefined;
+                if (std.mem.endsWith(u8, info.bin_path, "/")) {
+                    src_bin = try std.fs.path.join(self.allocator, &.{ pkg_dir, info.bin_path, bin_name });
+                } else {
+                    src_bin = try std.fs.path.join(self.allocator, &.{ pkg_dir, info.bin_path });
+                }
                 defer self.allocator.free(src_bin);
 
                 const dst_bin = try std.fs.path.join(self.allocator, &.{ shell_bin_path, bin_name });
@@ -686,7 +702,12 @@ pub const Store = struct {
                     defer self.allocator.free(dst_bin);
 
                     std.fs.cwd().access(dst_bin, .{}) catch {
-                        const src_bin = try std.fs.path.join(self.allocator, &.{ pkg_dir, info.bin_path });
+                        var src_bin: []const u8 = undefined;
+                        if (std.mem.endsWith(u8, info.bin_path, "/")) {
+                            src_bin = try std.fs.path.join(self.allocator, &.{ pkg_dir, info.bin_path, bin_name });
+                        } else {
+                            src_bin = try std.fs.path.join(self.allocator, &.{ pkg_dir, info.bin_path });
+                        }
                         defer self.allocator.free(src_bin);
 
                         if (os_macos.fastLink(src_bin, dst_bin)) |_| {
@@ -751,7 +772,13 @@ pub const Store = struct {
 
         // Scan the actual executable path
         const info = pkg.platforms.get(platform_name) orelse return error.UnsupportedPlatform;
-        const bin_path = try std.fs.path.join(self.allocator, &.{ pkg_dir, info.bin_path });
+        var bin_path: []const u8 = undefined;
+        if (std.mem.endsWith(u8, info.bin_path, "/")) {
+            const exe_name = if (pkg.bin.len > 0) pkg.bin[0] else "ffmpeg";
+            bin_path = try std.fs.path.join(self.allocator, &.{ pkg_dir, info.bin_path, exe_name });
+        } else {
+            bin_path = try std.fs.path.join(self.allocator, &.{ pkg_dir, info.bin_path });
+        }
         defer self.allocator.free(bin_path);
 
         const file = try std.fs.cwd().openFile(bin_path, .{});
