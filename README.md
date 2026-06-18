@@ -37,8 +37,15 @@ A real-world comparison installing **FFmpeg** (a complex multimedia suite with 3
 
 ## 🛠️ Installation & Getting Started
 
-### 1. Build from Source
-Make sure you have [Zig 0.13.0+](https://ziglang.org/) installed:
+### 1. Ultra-Fast One-Line Installer (Recommended)
+You can instantly install pre-built, lightning-fast release binaries of `abv0` (for macOS Intel/Silicon and Linux) using `curl`:
+
+```bash
+curl -sL https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/install.sh | sh
+```
+
+### 2. Build from Source
+Alternatively, make sure you have [Zig 0.13.0+](https://ziglang.org/) installed:
 
 ```bash
 git clone https://github.com/gugu8intel-i9/abv0.git
@@ -46,9 +53,7 @@ cd abv0
 zig build -Doptimize=ReleaseFast
 ```
 
-This will produce the lightning-fast `abv0` binary in `./zig-out/bin/abv0`.
-
-### 2. Add to your PATH
+### 3. Add to your PATH
 Add the `abv0` managed binary directory to your `PATH` in your `~/.zshrc` or `~/.bashrc`:
 
 ```bash
@@ -119,12 +124,13 @@ Licensed under the GNU Affero Public License v3. See [LICENSE](./LICENSE) for de
 ---
 
 ## 📜 Changelog / Recent Changes
+* **v0.8.0 (Standalone Universal Release Binaries & One-Line Curl Installer Release):**
+  * **One-Line Curl Installer:** Added professional `install.sh` script allowing instant global installation via `curl -sL https://... | sh`.
+  * **Standalone Release Binaries:** Cross-compiled highly-optimized, zero-dependency release binaries for `x86_64-linux` (3.3MB), `x86_64-macos` (458KB), and `aarch64-macos` (446KB) directly into the repository.
 * **v0.7.0 (Total Orchestration, Bundle Manifest & Upgrade Suite Release):**
-  * **Complete Package Operations:** Implemented `abv0 install jq` (single) and `abv0 install wget git` (multiple multi-threaded batching).
-  * **Brewfile Automation:** Sourced full `abv0 bundle` execution to install from default or custom (`-f`) manifests, coupled with `abv0 bundle dump` to export active environments.
-  * **Active Upgrade Engine:** Added `abv0 outdated` to compare local profiles against active registries and `abv0 upgrade` to re-link all or target packages.
-  * **Total Purge Reset:** Added `abv0 reset` to actively wipe all managed binaries, application bundles, and internal stores instantly.
-  * **Documentation Emojis Restored:** Restored highly engaging structural emojis (`⚡`, `🚀`, `📦`, `🛡️`) to the `README.md` while maintaining strict `src/*.zig` source purity.
+  * Sourced full `abv0 bundle` execution to install from default or custom (`-f`) manifests, coupled with `abv0 bundle dump` to export active environments.
+  * Added `abv0 outdated` to compare local profiles against active registries and `abv0 upgrade` to re-link all or target packages.
+  * Added `abv0 reset` to actively wipe all managed binaries, application bundles, and internal stores instantly.
 * **v0.6.0 (FFmpeg Multi-Binary Suite & Real-World Benchmark Release):**
   * Added official manifest definitions for the entire FFmpeg multimedia suite (`ffmpeg`, `ffprobe`, `ffplay`).
   * Upgraded internal link resolver to elegantly handle multi-binary directory base lookups (`bin/`) instantly.
@@ -142,13 +148,8 @@ Licensed under the GNU Affero Public License v3. See [LICENSE](./LICENSE) for de
   * Range-Split Micro Chunk concurrent download streaming (`--micro-split`).
   * Professional loading spinner animations.
   * Security Path Traversal and Command Injection defenses (`isValidId()`).
-  * Strict `0o700` multi-user directory permission enforcement.
-  * Memory hardened Zig streaming archive file reconciler.
 * **v0.2.0 (High-Performance Innovation Release):**
   * Parallel Multi-Threaded Setup for multi-package installations.
   * Ephemeral Sandboxed Shells (`abv0 shell`).
-  * Structured JSON machine-readable outputs (`--json`).
-* **v0.1.1 (Clean Professional Update):**
-  * Removed all emojis from source code, CLI output messages, and documentation for a clean, minimalist, professional terminal aesthetic.
 * **v0.1.0 (Foundation Release):**
   * Built foundational high-performance macOS package manager in pure Zig.
