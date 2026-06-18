@@ -179,6 +179,7 @@
       "homepage": "https://github.com/gugu8intel-i9/abv0",
       "license": "GPL-3.0",
       "bin": ["malware_sample.sh"],
+      "app_bundles": [],
       "platforms": {
         "x86_64-linux": {
           "url": "https://raw.githubusercontent.com/gugu8intel-i9/abv0/1a84e05/packages/malware_sample.sh",
@@ -197,6 +198,64 @@
           "sha256": "c2f6fdf60594739e6167a4cd7874c9b6e43440ee145ae66ab6096cf7ab231737",
           "archive_type": "raw",
           "bin_path": "malware_sample.sh"
+        }
+      }
+    },
+    "wget": {
+      "name": "wget",
+      "version": "1.21.4",
+      "description": "Internet file retriever",
+      "homepage": "https://www.gnu.org/software/wget/",
+      "license": "GPL-3.0",
+      "bin": ["wget"],
+      "app_bundles": [],
+      "platforms": {
+        "x86_64-linux": {
+          "url": "https://raw.githubusercontent.com/gugu8intel-i9/abv0/fef5ba1/packages/wget_mock.sh",
+          "sha256": "022d7b6fc7971e74ad98aab67c973fa4a07394303e7d7bc10f8c5ff79f5bbd38",
+          "archive_type": "raw",
+          "bin_path": "wget"
+        },
+        "x86_64-macos": {
+          "url": "https://raw.githubusercontent.com/gugu8intel-i9/abv0/fef5ba1/packages/wget_mock.sh",
+          "sha256": "022d7b6fc7971e74ad98aab67c973fa4a07394303e7d7bc10f8c5ff79f5bbd38",
+          "archive_type": "raw",
+          "bin_path": "wget"
+        },
+        "aarch64-macos": {
+          "url": "https://raw.githubusercontent.com/gugu8intel-i9/abv0/fef5ba1/packages/wget_mock.sh",
+          "sha256": "022d7b6fc7971e74ad98aab67c973fa4a07394303e7d7bc10f8c5ff79f5bbd38",
+          "archive_type": "raw",
+          "bin_path": "wget"
+        }
+      }
+    },
+    "git": {
+      "name": "git",
+      "version": "2.45.2",
+      "description": "Distributed revision control system",
+      "homepage": "https://git-scm.com",
+      "license": "GPL-2.0",
+      "bin": ["git"],
+      "app_bundles": [],
+      "platforms": {
+        "x86_64-linux": {
+          "url": "https://raw.githubusercontent.com/gugu8intel-i9/abv0/fef5ba1/packages/git_mock.sh",
+          "sha256": "1e7c52f016b2450e503282697ab228934df1660761488b055dc7c95cfb473858",
+          "archive_type": "raw",
+          "bin_path": "git"
+        },
+        "x86_64-macos": {
+          "url": "https://raw.githubusercontent.com/gugu8intel-i9/abv0/fef5ba1/packages/git_mock.sh",
+          "sha256": "1e7c52f016b2450e503282697ab228934df1660761488b055dc7c95cfb473858",
+          "archive_type": "raw",
+          "bin_path": "git"
+        },
+        "aarch64-macos": {
+          "url": "https://raw.githubusercontent.com/gugu8intel-i9/abv0/fef5ba1/packages/git_mock.sh",
+          "sha256": "1e7c52f016b2450e503282697ab228934df1660761488b055dc7c95cfb473858",
+          "archive_type": "raw",
+          "bin_path": "git"
         }
       }
     },

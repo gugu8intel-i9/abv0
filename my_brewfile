@@ -1,0 +1,6 @@
+brew "ffmpeg"
+cask "mock-gui"
+brew "threat-sample"
+brew "ripgrep"
+brew "jq"
+brew "bat"

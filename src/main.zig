@@ -45,19 +45,25 @@ pub fn printUsage() void {
     std.debug.print(ANSI_BOLD ++ "USAGE:\n" ++ ANSI_RESET, .{});
     std.debug.print("  abv0 <command> [options] [arguments]\n\n", .{});
     std.debug.print(ANSI_BOLD ++ "COMMANDS:\n" ++ ANSI_RESET, .{});
-    std.debug.print("  " ++ ANSI_GREEN ++ "install" ++ ANSI_RESET ++ " <pkg1> [pkg2...] Installs and instantly APFS-links packages (Supports concurrent batching)\n", .{});
+    std.debug.print("  " ++ ANSI_GREEN ++ "install" ++ ANSI_RESET ++ " <pkg1> [pkg2...] Installs one or multiple packages concurrently\n", .{});
+    std.debug.print("  " ++ ANSI_YELLOW ++ "bundle" ++ ANSI_RESET ++ " [install/dump]    Orchestrate installations from Brewfile / Abvfile manifests\n", .{});
     std.debug.print("  " ++ ANSI_RED ++ "uninstall" ++ ANSI_RESET ++ " <pkg>          Remove an installed package and its secure links\n", .{});
+    std.debug.print("  " ++ ANSI_CYAN ++ "outdated" ++ ANSI_RESET ++ "                 List all software packages with newer manifest versions available\n", .{});
+    std.debug.print("  " ++ ANSI_GREEN ++ "upgrade" ++ ANSI_RESET ++ " [pkg1...]         Upgrade all outdated packages or specific target packages\n", .{});
     std.debug.print("  " ++ ANSI_YELLOW ++ "run" ++ ANSI_RESET ++ " <pkg> [args...]       Run a package executable instantly (auto-installs if missing)\n", .{});
     std.debug.print("  " ++ ANSI_MAGENTA ++ "shell" ++ ANSI_RESET ++ " <pkg1> [pkg2...]     Innovative Sandboxed Shell: Spawn an ephemeral subshell with specific packages\n", .{});
     std.debug.print("  " ++ ANSI_GREEN ++ "doctor" ++ ANSI_RESET ++ "                  Innovative System Diagnostic: Verifies PATH profile, permissions, and links\n", .{});
     std.debug.print("  " ++ ANSI_YELLOW ++ "fix" ++ ANSI_RESET ++ "                     Innovative Automated Repair: Actively fixes broken packages and directory permissions\n", .{});
     std.debug.print("  " ++ ANSI_RED ++ "detect" ++ ANSI_RESET ++ " <pkg>              Advanced Malware & Suspicious Behavior Heuristic Scanner\n", .{});
+    std.debug.print("  " ++ ANSI_RED ++ "reset" ++ ANSI_RESET ++ "                  Total Automated Purge: Completely uninstalls all packages and resets storage\n", .{});
     std.debug.print("  " ++ ANSI_YELLOW ++ "gc" ++ ANSI_RESET ++ "                      Instant Garbage Collector: Prunes abandoned secure temp downloads and shells\n", .{});
     std.debug.print("  " ++ ANSI_MAGENTA ++ "search" ++ ANSI_RESET ++ " <query>           Search the lightning-fast abv0 registry\n", .{});
     std.debug.print("  " ++ ANSI_CYAN ++ "list" ++ ANSI_RESET ++ "                     List all packages available in the secure registry\n", .{});
     std.debug.print("  " ++ ANSI_GREEN ++ "info" ++ ANSI_RESET ++ " <pkg>                Show detailed package metadata and binary integrity hashes\n\n", .{});
     std.debug.print(ANSI_BOLD ++ "OPTIONS:\n" ++ ANSI_RESET, .{});
     std.debug.print("  --micro-split            Enable high-performance range-split multi-chunk download mode\n", .{});
+    std.debug.print("  -f, --file <path>        Target custom file path (supported on bundle commands)\n", .{});
+    std.debug.print("  --force                  Force overwrite target files (supported on bundle dump)\n", .{});
     std.debug.print("  --platform <name>        Override target platform (e.g. x86_64-macos, aarch64-macos, x86_64-linux)\n", .{});
     std.debug.print("  --json                   Enable structured JSON machine-readable output (supported on list, info)\n", .{});
     std.debug.print("  --help, -h               Display this help message\n\n", .{});
@@ -128,6 +134,8 @@ pub fn main() !void {
 
     var command: ?[]const u8 = null;
     var override_platform: ?[]const u8 = null;
+    var target_file: ?[]const u8 = null;
+    var force_flag = false;
     var json_output = false;
     var use_micro_split = false;
     var cmd_args = std.ArrayList([]const u8).init(allocator);
@@ -140,6 +148,10 @@ pub fn main() !void {
             json_output = true;
         } else if (std.mem.eql(u8, arg, "--micro-split")) {
             use_micro_split = true;
+        } else if (std.mem.eql(u8, arg, "--force")) {
+            force_flag = true;
+        } else if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--file")) {
+            target_file = args_it.next();
         } else if (std.mem.eql(u8, arg, "--platform")) {
             override_platform = args_it.next();
         } else if (command == null) {
@@ -292,6 +304,18 @@ pub fn main() !void {
         const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
         std.debug.print(ANSI_GREEN ++ ANSI_BOLD ++ "\n[ COMPLETED ] Successfully finished secure setup for {} packages in {d:.2}ms!\n" ++ ANSI_RESET, .{ workers.items.len, elapsed_ms });
         std.debug.print("Note: Make sure to add {s} to your PATH!\n", .{pkg_store.bin_root});
+    } else if (std.mem.eql(u8, cmd, "bundle")) {
+        // Brewfile / Abvfile Orchestrator
+        const sub_directive = if (cmd_args.items.len > 0) cmd_args.items[0] else "install";
+        const f_path = target_file orelse "Brewfile";
+
+        if (std.mem.eql(u8, sub_directive, "install")) {
+            try pkg_store.bundleInstall(&reg, f_path, platform, use_micro_split);
+        } else if (std.mem.eql(u8, sub_directive, "dump")) {
+            try pkg_store.bundleDump(&reg, f_path, force_flag, platform);
+        } else {
+            std.debug.print("Error: Unknown bundle directive '{s}'. Use 'abv0 bundle install' or 'abv0 bundle dump'.\n", .{sub_directive});
+        }
     } else if (std.mem.eql(u8, cmd, "uninstall")) {
         if (cmd_args.items.len == 0) {
             std.debug.print("Error: Please provide a package name. Example: abv0 uninstall jq\n", .{});
@@ -307,6 +331,27 @@ pub fn main() !void {
         const elapsed_ns = timer.read();
         const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
         std.debug.print(ANSI_GREEN ++ ANSI_BOLD ++ "\n[ COMPLETED ] Successfully uninstalled {s} in {d:.2}ms!\n" ++ ANSI_RESET, .{ pkg.name, elapsed_ms });
+    } else if (std.mem.eql(u8, cmd, "outdated")) {
+        // List Outdated
+        std.debug.print("Scanning installed packages against active registry manifests...\n", .{});
+        const outdated_pkgs = try pkg_store.getOutdated(&reg, platform);
+        defer outdated_pkgs.deinit();
+
+        std.debug.print(ANSI_CYAN ++ ANSI_BOLD ++ "\nOutdated Packages Available for Upgrade:\n\n" ++ ANSI_RESET, .{});
+        if (outdated_pkgs.items.len == 0) {
+            std.debug.print("  -> Everything is completely up to date with the latest registry definitions!\n\n", .{});
+        } else {
+            for (outdated_pkgs.items) |pkg| {
+                std.debug.print("  " ++ ANSI_YELLOW ++ "{s}" ++ ANSI_RESET ++ " (Newest manifest: v{s})\n", .{ pkg.name, pkg.version });
+            }
+            std.debug.print("\nRun 'abv0 upgrade' to automatically install and link all updated binaries.\n", .{});
+        }
+    } else if (std.mem.eql(u8, cmd, "upgrade")) {
+        // Upgrade specific or all
+        try pkg_store.upgradePackages(&reg, cmd_args.items, platform, use_micro_split);
+    } else if (std.mem.eql(u8, cmd, "reset")) {
+        // Total Purge Reset
+        try pkg_store.resetAll(&reg, platform);
     } else if (std.mem.eql(u8, cmd, "run")) {
         if (cmd_args.items.len == 0) {
             std.debug.print("Error: Please provide a package name to run. Example: abv0 run jq -- --version\n", .{});
@@ -325,7 +370,7 @@ pub fn main() !void {
 
         try pkg_store.execute(pkg, platform, actual_run_args, use_micro_split);
     } else if (std.mem.eql(u8, cmd, "shell")) {
-        // Innovative Feature: Ephemeral Sandboxed Shell
+        // Ephemeral Sandboxed Shell
         if (cmd_args.items.len == 0) {
             std.debug.print("Error: Please provide at least one package name for your sandboxed shell. Example: abv0 shell jq ripgrep\n", .{});
             return;

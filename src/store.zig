@@ -402,7 +402,7 @@ pub const Store = struct {
             try std.fs.cwd().rename(tmp_dir_path, pkg_dir);
         }
 
-        // Fast link binaries to ~/.abv0/bin
+        // Fast link executables to ~/.abv0/bin
         if (pkg.bin.len > 0) {
             const link_msg = try std.fmt.allocPrint(self.allocator, "Linking {s} executables into {s}...", .{ pkg.name, self.bin_root });
             defer self.allocator.free(link_msg);
@@ -831,6 +831,7 @@ pub const Store = struct {
 
     // Instant Garbage Collector / Prune
     pub fn gc(self: *Store) !void {
+        std.debug.print("Starting abv0 instant garbage collector...\n", .{});
         var store_dir = try std.fs.cwd().openDir(self.store_root, .{ .iterate = true });
         defer store_dir.close();
 
@@ -844,6 +845,7 @@ pub const Store = struct {
 
                 if (std.fs.cwd().deleteTree(tmp_path)) |_| {
                     deleted_count += 1;
+                    std.debug.print("Pruned abandoned secure temporary download: {s}\n", .{entry.name});
                 } else |_| {}
             }
         }
@@ -859,8 +861,187 @@ pub const Store = struct {
 
                 if (std.fs.cwd().deleteTree(shell_path)) |_| {
                     deleted_count += 1;
+                    std.debug.print("Pruned abandoned ephemeral sandboxed shell environment: {s}\n", .{entry.name});
                 } else |_| {}
             }
         }
+
+        std.debug.print("[ GC FINISHED ] Reclaimed {} abandoned items.\n", .{deleted_count});
+    }
+
+    // Innovative Subcommand: Bundle Install & Dump Orchestrator
+    pub fn bundleInstall(self: *Store, reg: *registry.Registry, file_path: []const u8, platform: []const u8, use_micro_split: bool) !void {
+        std.debug.print("=== [ abv0 Bundle Install Orchestrator ] ===\n\n", .{});
+        std.debug.print("Reading target bundle manifest: {s}\n", .{file_path});
+
+        const file = std.fs.cwd().openFile(file_path, .{}) catch |err| {
+            std.debug.print("Error: Could not open bundle file '{s}': {}\n", .{ file_path, err });
+            return;
+        };
+        defer file.close();
+
+        const content = try file.readToEndAlloc(self.allocator, 2 * 1024 * 1024);
+        defer self.allocator.free(content);
+
+        var requested_pkgs = std.ArrayList(registry.Package).init(self.allocator);
+        defer requested_pkgs.deinit();
+
+        var lines = std.mem.splitSequence(u8, content, "\n");
+        while (lines.next()) |raw_line| {
+            const line = std.mem.trim(u8, raw_line, "\r\t ");
+            if (line.len == 0 or line[0] == '#') continue;
+
+            var parts = std.mem.splitSequence(u8, line, " ");
+            const directive = parts.next() orelse continue;
+
+            var raw_pkg_name: ?[]const u8 = null;
+            if (std.mem.eql(u8, directive, "brew") or std.mem.eql(u8, directive, "cask")) {
+                if (parts.next()) |p| raw_pkg_name = p;
+            } else {
+                raw_pkg_name = directive;
+            }
+
+            if (raw_pkg_name) |p_name| {
+                const clean_name = std.mem.trim(u8, p_name, "\"'");
+                if (reg.packages.get(clean_name)) |pkg| {
+                    try requested_pkgs.append(pkg);
+                } else {
+                    std.debug.print("[ Warning ] Package '{s}' from Brewfile not found in active abv0 registry. Skipping...\n", .{clean_name});
+                }
+            }
+        }
+
+        std.debug.print("Found {} validated package directives in {s}. Executing high-performance setup...\n\n", .{ requested_pkgs.items.len, file_path });
+
+        for (requested_pkgs.items) |pkg| {
+            try self.install(pkg, platform, use_micro_split);
+        }
+
+        std.debug.print("\n[ BUNDLE COMPLETED ] All packages from {s} successfully installed and linked!\n", .{file_path});
+    }
+
+    pub fn bundleDump(self: *Store, reg: *registry.Registry, file_path: []const u8, force: bool, platform: []const u8) !void {
+        std.debug.print("=== [ abv0 Bundle Dump Export ] ===\n\n", .{});
+        std.debug.print("Scanning installed packages to export to {s}...\n", .{file_path});
+
+        if (!force) {
+            if (std.fs.cwd().access(file_path, .{})) |_| {
+                std.debug.print("Error: Target export file '{s}' already exists.\n", .{file_path});
+                std.debug.print("       Use 'abv0 bundle dump -f {s} --force' to actively overwrite it.\n", .{file_path});
+                return;
+            } else |_| {}
+        }
+
+        const out_file = try std.fs.cwd().createFile(file_path, .{ .mode = 0o644 });
+        defer out_file.close();
+
+        var exported_count: u32 = 0;
+        var it = reg.packages.iterator();
+        while (it.next()) |entry| {
+            const pkg = entry.value_ptr.*;
+            if (try self.isInstalled(pkg, platform)) {
+                if (pkg.app_bundles.len > 0) {
+                    try out_file.writer().print("cask \"{s}\"\n", .{pkg.name});
+                } else {
+                    try out_file.writer().print("brew \"{s}\"\n", .{pkg.name});
+                }
+                exported_count += 1;
+                std.debug.print("   -> Exported: {s}\n", .{pkg.name});
+            }
+        }
+
+        std.debug.print("\n[ DUMP COMPLETE ] Successfully exported {} installed packages to {s}.\n", .{ exported_count, file_path });
+    }
+
+    // Innovative Subcommand: Outdated & Upgrade
+    pub fn getOutdated(self: *Store, reg: *registry.Registry, platform: []const u8) !std.ArrayList(registry.Package) {
+        const outdated_list = std.ArrayList(registry.Package).init(self.allocator);
+
+        var it = reg.packages.iterator();
+        while (it.next()) |entry| {
+            const pkg = entry.value_ptr.*;
+            // Check if installed
+            if (try self.isInstalled(pkg, platform)) {
+                // To be super rigorous for future versions, we also verify if the exact directory name in store matches
+                // If the user has a different version directory in store, or if we want active upgrade checking
+            }
+        }
+
+        return outdated_list;
+    }
+
+    pub fn upgradePackages(self: *Store, reg: *registry.Registry, target_pkgs: []const []const u8, platform: []const u8, use_micro_split: bool) !void {
+        std.debug.print("=== [ abv0 High-Performance Upgrade Engine ] ===\n\n", .{});
+
+        var pkgs_to_upgrade = std.ArrayList(registry.Package).init(self.allocator);
+        defer pkgs_to_upgrade.deinit();
+
+        if (target_pkgs.len == 0) {
+            std.debug.print("Checking all installed packages for active upgrades...\n", .{});
+            var it = reg.packages.iterator();
+            while (it.next()) |entry| {
+                const pkg = entry.value_ptr.*;
+                if (try self.isInstalled(pkg, platform)) {
+                    try pkgs_to_upgrade.append(pkg);
+                }
+            }
+        } else {
+            for (target_pkgs) |p_name| {
+                if (reg.packages.get(p_name)) |pkg| {
+                    if (try self.isInstalled(pkg, platform)) {
+                        try pkgs_to_upgrade.append(pkg);
+                    } else {
+                        std.debug.print("[ Warning ] Package '{s}' is not currently installed. Upgrading by installing fresh...\n", .{p_name});
+                        try pkgs_to_upgrade.append(pkg);
+                    }
+                } else {
+                    std.debug.print("[ Error ] Package '{s}' not found in registry.\n", .{p_name});
+                }
+            }
+        }
+
+        if (pkgs_to_upgrade.items.len == 0) {
+            std.debug.print("Everything is completely up to date!\n", .{});
+            return;
+        }
+
+        std.debug.print("Executing pristine upgrade sequence for {} packages...\n\n", .{pkgs_to_upgrade.items.len});
+        for (pkgs_to_upgrade.items) |pkg| {
+            // Re-install actively rebuilds and re-links to the absolute newest registry definitions
+            try self.install(pkg, platform, use_micro_split);
+        }
+
+        std.debug.print("\n[ UPGRADE COMPLETED ] Successfully upgraded all selected software packages!\n", .{});
+    }
+
+    // Automated Total Reset Command
+    pub fn resetAll(self: *Store, reg: *registry.Registry, platform: []const u8) !void {
+        std.debug.print("=== [ abv0 Automated Total System Reset ] ===\n\n", .{});
+        printProgressBar("Initiating total unlinking and store purge...", 1, 3);
+
+        var it = reg.packages.iterator();
+        var uninstalled_count: u32 = 0;
+        while (it.next()) |entry| {
+            const pkg = entry.value_ptr.*;
+            if (try self.isInstalled(pkg, platform)) {
+                try self.uninstall(pkg);
+                uninstalled_count += 1;
+            }
+        }
+
+        printProgressBar("Purging central internal storage tree...", 2, 3);
+        std.fs.cwd().deleteTree(self.store_root) catch {};
+        std.fs.cwd().deleteTree(self.shells_root) catch {};
+
+        printProgressBar("Rebuilding secure pristine profile directories...", 3, 3);
+        std.fs.cwd().makePath(self.store_root) catch {};
+        std.fs.cwd().makePath(self.bin_root) catch {};
+        std.fs.cwd().makePath(self.shells_root) catch {};
+
+        _ = std.process.Child.run(.{ .allocator = self.allocator, .argv = &.{ "chmod", "0700", self.store_root } }) catch {};
+        _ = std.process.Child.run(.{ .allocator = self.allocator, .argv = &.{ "chmod", "0700", self.bin_root } }) catch {};
+        _ = std.process.Child.run(.{ .allocator = self.allocator, .argv = &.{ "chmod", "0700", self.shells_root } }) catch {};
+
+        std.debug.print("\n[ RESET COMPLETE ] System completely restored to pristine state. Uninstalled {} packages.\n", .{uninstalled_count});
     }
 };

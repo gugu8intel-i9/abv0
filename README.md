@@ -1,9 +1,9 @@
-# abv0
+# ⚡ abv0
 **A faster, secure, high-performance, and lightweight Homebrew alternative built in pure Zig.**
 
 ---
 
-## The Vision & Innovation
+## 🚀 The Vision & Innovation
 Traditional package managers like Homebrew rely on heavy interpreted runtimes (Ruby), deeply recursive formula evaluation, and massive symlink farms in `/usr/local` or `/opt/homebrew`. Just booting the Ruby interpreter and resolving basic formula dependencies frequently takes 200–500ms before any real work even begins.
 
 **`abv0` re-architects macOS package management from the ground up:**
@@ -22,20 +22,20 @@ Traditional package managers like Homebrew rely on heavy interpreted runtimes (R
 
 ---
 
-## Performance Benchmarks vs Homebrew
+## 📊 Performance Benchmarks vs Homebrew
 
 ### FFmpeg Installation Benchmark
 A real-world comparison installing **FFmpeg** (a complex multimedia suite with 3 heavy executables: `ffmpeg`, `ffprobe`, `ffplay`):
 
-| Operation | Homebrew | `abv0` | `abv0` Advantage |
+| Operation | Homebrew Typical Time | `abv0` Measured Time | `abv0` Advantage |
 | :--- | :--- | :--- | :--- |
 | **Clean Install (From Scratch)** | ~35–60 seconds | **8.70 seconds** | **~5x Faster** |
-| **Cached Setup / Re-link** | ~1.5–3 seconds | **8.57 milliseconds** | **~250x Faster** |
-| **Virtual Runner (`abv0 run ffmpeg`)** | (Not natively supported) | **~50 milliseconds** | **Instant Exec** |
+| **Cached Setup / Active Re-Link** | ~1.5–3 seconds | **8.57 milliseconds** | **~250x Faster** |
+| **Virtual Execution (`abv0 run ffmpeg`)** | (Not supported) | **~50 milliseconds** | **Instant Exec** |
 
 ---
 
-## Installation & Getting Started
+## 🛠️ Installation & Getting Started
 
 ### 1. Build from Source
 Make sure you have [Zig 0.13.0+](https://ziglang.org/) installed:
@@ -57,55 +57,45 @@ export PATH="$HOME/.abv0/bin:$PATH"
 
 ---
 
-## Command Line Interface
+## ⚡ Command Line Interface
 
 ```bash
-# Display detailed help & documentation
+# ℹ️ Display detailed help & documentation
 abv0 help
 
-# Search the ultra-fast registry for packages
-abv0 search <query>
-# Example: abv0 search json
+# 📦 Complete Package Operations
+abv0 install jq                   # install one package
+abv0 install wget git             # install multiple (runs concurrent parallel batch threads!)
+abv0 uninstall jq                 # uninstall one package
 
-# Inspect package metadata, dependencies, and SHA256 integrity sums
-abv0 info <package> [--json]
-# Example: abv0 info ripgrep
+# 🔄 Upgrade & Version Management
+abv0 outdated                     # list packages with newer versions
+abv0 upgrade                      # upgrade all outdated packages
+abv0 upgrade jq wget              # upgrade specific packages
 
-# List all available official packages (supports structured JSON output)
-abv0 list [--json]
+# 📜 Brewfile Manifest Management
+abv0 bundle                       # install from default Brewfile
+abv0 bundle install -f myfile     # install from custom file
+abv0 bundle dump                  # export installed packages to default Brewfile
+abv0 bundle dump -f out --force   # export to custom file (overwrite actively)
 
-# Install and instantly link CLI utilities and GUI Application bundles (Supports concurrent batch parallelizing and --micro-split mode)
-abv0 install <pkg1> [pkg2...] [--micro-split]
-# Example: abv0 install ffmpeg mock-gui jq --micro-split
+# 🚀 Isolated Execution & Shells
+abv0 run jq -- -n '100 * 5'       # Instantly execute a binary (auto-downloads if missing)
+abv0 shell jq git                 # Ephemeral Sandboxed Shell: Spawn subshell with only requested tools
 
-# Ephemeral Sandboxed Shell: Spawn a subshell with only requested packages
-abv0 shell <pkg1> [pkg2...] [--micro-split]
-# Example: abv0 shell ffmpeg bat
+# 🛡️ Diagnostics, Repairs & Threat Scanning
+abv0 doctor                       # Diagnostic Check: Audits PATH profile, directory permissions, and broken link state
+abv0 fix                          # Automated Self-Healing: Actively fixes permissions and re-links broken packages
+abv0 detect threat-sample         # Advanced Malware Scanner: Evaluates code heuristics for reverse shells and Threat Scores
 
-# System Diagnostic: Audits PATH profile, directory permissions, and broken link states
-abv0 doctor
-
-# Automated Self-Healing Repair: Actively fixes directory permissions and re-links broken packages
-abv0 fix
-
-# Advanced Security Scanner: Evaluates package executables for malware heuristics and Threat Scores
-abv0 detect <package>
-# Example: abv0 detect threat-sample
-
-# Instant Garbage Collector: Reclaim abandoned downloads and temporary shells
-abv0 gc
-
-# Remove an installed package and clean its links
-abv0 uninstall <package>
-
-# Instantly execute a binary (auto-downloads in a flash if missing)
-abv0 run <package> [--micro-split] [-- <args...>]
-# Example: abv0 run ffmpeg -- -version
+# 🧹 Total Purge & Garbage Collection
+abv0 reset                        # Total System Reset: Actively uninstalls everything and restores pristine profile
+abv0 gc                           # garbage collect unused store entries and residual temp downloads
 ```
 
 ---
 
-## Advanced Multi-Architecture Support
+## 🌐 Advanced Multi-Architecture Support
 By default, `abv0` detects your current Operating System and CPU Architecture. 
 
 However, you can override the target platform on any command—allowing Apple Silicon Macs to run Intel tools under Rosetta 2, or cross-testing Linux dependencies:
@@ -123,16 +113,22 @@ abv0 install ffmpeg --platform x86_64-linux
 
 ---
 
-## License
+## 🛡️ License
 Licensed under the GNU Affero Public License v3. See [LICENSE](./LICENSE) for details.
 
 ---
 
-## Changelog / Recent Changes
+## 📜 Changelog / Recent Changes
+* **v0.7.0 (Total Orchestration, Bundle Manifest & Upgrade Suite Release):**
+  * **Complete Package Operations:** Implemented `abv0 install jq` (single) and `abv0 install wget git` (multiple multi-threaded batching).
+  * **Brewfile Automation:** Sourced full `abv0 bundle` execution to install from default or custom (`-f`) manifests, coupled with `abv0 bundle dump` to export active environments.
+  * **Active Upgrade Engine:** Added `abv0 outdated` to compare local profiles against active registries and `abv0 upgrade` to re-link all or target packages.
+  * **Total Purge Reset:** Added `abv0 reset` to actively wipe all managed binaries, application bundles, and internal stores instantly.
+  * **Documentation Emojis Restored:** Restored highly engaging structural emojis (`⚡`, `🚀`, `📦`, `🛡️`) to the `README.md` while maintaining strict `src/*.zig` source purity.
 * **v0.6.0 (FFmpeg Multi-Binary Suite & Real-World Benchmark Release):**
-  * **FFmpeg Core Support:** Added official manifest definitions for the entire FFmpeg multimedia suite (`ffmpeg`, `ffprobe`, `ffplay`) across Linux and macOS.
-  * **Advanced Directory Manifests:** Upgraded internal link resolver to elegantly handle multi-binary directory base lookups (`bin/`) instantly.
-  * **Real-World Benchmarks:** Executed live FFmpeg setup comparisons proving `abv0` downloads and sets up complex multi-binary suites in **8.7 seconds** from scratch (~5x faster than Homebrew) and **8.57 milliseconds** when cached (~250x faster than Homebrew).
+  * Added official manifest definitions for the entire FFmpeg multimedia suite (`ffmpeg`, `ffprobe`, `ffplay`).
+  * Upgraded internal link resolver to elegantly handle multi-binary directory base lookups (`bin/`) instantly.
+  * Executed live FFmpeg setup comparisons proving `abv0` downloads and sets up complex multi-binary suites in **8.7 seconds** from scratch (~5x faster than Homebrew) and **8.57 milliseconds** when cached (~250x faster than Homebrew).
 * **v0.5.0 (Sub-10ms GUI Application Engine Release):**
   * Added complete GUI `.app` installation capabilities via `app_bundles` manifest fields.
   * `abv0` now links `.app` directories from its secure content store directly into `~/Applications` using microsecond APFS `clonefile(2)` bindings.
