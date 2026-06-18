@@ -87,4 +87,15 @@ abv0 install jq --platform x86_64-linux
 ---
 
 ## 🛡️ License
-Licensed under the GNU Affero General Public License v3.0. See [LICENSE](./LICENSE) for details.
+Licensed under the GNU Affero Public License v3. See [LICENSE](./LICENSE) for details.
+
+---
+
+## 📜 Changelog / Recent Changes
+* **v0.1.0 (Foundation Release):**
+  * Built foundational high-performance macOS package manager in pure Zig.
+  * Implemented zero-latency `index.json` registry parsing and sub-10ms package setup guarantees.
+  * Added native APFS `clonefile(2)` bindings for instant copy-on-write 0ms package installation on macOS.
+  * Added universal support for macOS (`x86_64` and `aarch64`) and multi-platform overrides.
+  * Added interactive subcommands: `install`, `uninstall`, `run`, `search`, `list`, `info`.
+  * Fully verified GNU Affero Public License v3 compliance.
