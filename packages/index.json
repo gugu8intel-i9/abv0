@@ -1,0 +1,146 @@
+{
+  "registry_version": 1,
+  "updated_at": "2026-06-18T00:00:00Z",
+  "packages": {
+    "jq": {
+      "name": "jq",
+      "version": "1.7.1",
+      "description": "Command-line JSON processor",
+      "homepage": "https://jqlang.github.io/jq/",
+      "license": "MIT",
+      "bin": ["jq"],
+      "platforms": {
+        "x86_64-macos": {
+          "url": "https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-macos-universal",
+          "sha256": "43c0d832d2011b6f0e4d7756f34e6de7ad709b11ae882f09ccb3687fa13c3230",
+          "archive_type": "raw",
+          "bin_path": "jq"
+        },
+        "aarch64-macos": {
+          "url": "https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-macos-universal",
+          "sha256": "43c0d832d2011b6f0e4d7756f34e6de7ad709b11ae882f09ccb3687fa13c3230",
+          "archive_type": "raw",
+          "bin_path": "jq"
+        },
+        "x86_64-linux": {
+          "url": "https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64",
+          "sha256": "5942c9b0934e510ee61eb3e30273f1b3fe2590df93933a93d7c58b81d19c8ff5",
+          "archive_type": "raw",
+          "bin_path": "jq"
+        }
+      }
+    },
+    "ripgrep": {
+      "name": "ripgrep",
+      "version": "14.1.0",
+      "description": "Line-oriented search tool that recursively searches current directory for a regex pattern",
+      "homepage": "https://github.com/BurntSushi/ripgrep",
+      "license": "Unlicense/MIT",
+      "bin": ["rg"],
+      "platforms": {
+        "x86_64-macos": {
+          "url": "https://github.com/BurntSushi/ripgrep/releases/download/14.1.0/ripgrep-14.1.0-x86_64-apple-darwin.tar.gz",
+          "sha256": "4722f462ffab1810ff4aeb40fa1871a25abfd919ff7edddf717f90c10972412b",
+          "archive_type": "tar.gz",
+          "bin_path": "ripgrep-14.1.0-x86_64-apple-darwin/rg"
+        },
+        "aarch64-macos": {
+          "url": "https://github.com/BurntSushi/ripgrep/releases/download/14.1.0/ripgrep-14.1.0-aarch64-apple-darwin.tar.gz",
+          "sha256": "cb6641e17df2fe680ea13d091e0a8ad13d49f6920fbb722fec9bdcf56e6dcfcf",
+          "archive_type": "tar.gz",
+          "bin_path": "ripgrep-14.1.0-aarch64-apple-darwin/rg"
+        },
+        "x86_64-linux": {
+          "url": "https://github.com/BurntSushi/ripgrep/releases/download/14.1.0/ripgrep-14.1.0-x86_64-unknown-linux-musl.tar.gz",
+          "sha256": "2225a0422119bb142f1cf44c3c3a9f07fe7584144365313ecbc00bc87258079d",
+          "archive_type": "tar.gz",
+          "bin_path": "ripgrep-14.1.0-x86_64-unknown-linux-musl/rg"
+        }
+      }
+    },
+    "bat": {
+      "name": "bat",
+      "version": "0.24.0",
+      "description": "A cat(1) clone with wings (syntax highlighting and Git integration)",
+      "homepage": "https://github.com/sharkdp/bat",
+      "license": "MIT/Apache-2.0",
+      "bin": ["bat"],
+      "platforms": {
+        "x86_64-macos": {
+          "url": "https://github.com/sharkdp/bat/releases/download/v0.24.0/bat-v0.24.0-x86_64-apple-darwin.tar.gz",
+          "sha256": "099cd3fdc181cc0ecffba4043b8118029c78fe2fa4173ea5db043b2d1cbb007a",
+          "archive_type": "tar.gz",
+          "bin_path": "bat-v0.24.0-x86_64-apple-darwin/bat"
+        },
+        "aarch64-macos": {
+          "url": "https://github.com/sharkdp/bat/releases/download/v0.24.0/bat-v0.24.0-aarch64-apple-darwin.tar.gz",
+          "sha256": "beac37fe435ca102bb1dc7b94d2ba05f0134f5aa0fdf1d97bc5f3325cdd0de67",
+          "archive_type": "tar.gz",
+          "bin_path": "bat-v0.24.0-aarch64-apple-darwin/bat"
+        },
+        "x86_64-linux": {
+          "url": "https://github.com/sharkdp/bat/releases/download/v0.24.0/bat-v0.24.0-x86_64-unknown-linux-musl.tar.gz",
+          "sha256": "e30ceba8ec2ec9b2d354b3211e4bf3ec1e9c5c7d03bb6ec3ea4457a1518f88c3",
+          "archive_type": "tar.gz",
+          "bin_path": "bat-v0.24.0-x86_64-unknown-linux-musl/bat"
+        }
+      }
+    },
+    "fastfetch": {
+      "name": "fastfetch",
+      "version": "2.15.0",
+      "description": "Like neofetch, but much faster because written solely in C",
+      "homepage": "https://github.com/fastfetch-cli/fastfetch",
+      "license": "MIT",
+      "bin": ["fastfetch"],
+      "platforms": {
+        "x86_64-macos": {
+          "url": "https://github.com/fastfetch-cli/fastfetch/releases/download/2.15.0/fastfetch-macos-universal.zip",
+          "sha256": "f62bbf61e3860bbdd5c65ee1a4cf1cb72de0057ea7f7d1420a32fb6dce621bf3",
+          "archive_type": "zip",
+          "bin_path": "fastfetch-macos-universal/usr/bin/fastfetch"
+        },
+        "aarch64-macos": {
+          "url": "https://github.com/fastfetch-cli/fastfetch/releases/download/2.15.0/fastfetch-macos-universal.zip",
+          "sha256": "f62bbf61e3860bbdd5c65ee1a4cf1cb72de0057ea7f7d1420a32fb6dce621bf3",
+          "archive_type": "zip",
+          "bin_path": "fastfetch-macos-universal/usr/bin/fastfetch"
+        },
+        "x86_64-linux": {
+          "url": "https://github.com/fastfetch-cli/fastfetch/releases/download/2.15.0/fastfetch-linux-amd64.tar.gz",
+          "sha256": "d87f7ad8690ea39cceb0bfab7cfbd43e33bf6a84f50fece3a5165977fb797302",
+          "archive_type": "tar.gz",
+          "bin_path": "fastfetch-linux-amd64/usr/bin/fastfetch"
+        }
+      }
+    },
+    "zig": {
+      "name": "zig",
+      "version": "0.13.0",
+      "description": "General-purpose programming language and toolchain for maintaining robust, optimal, and reusable software",
+      "homepage": "https://ziglang.org/",
+      "license": "MIT",
+      "bin": ["zig"],
+      "platforms": {
+        "x86_64-macos": {
+          "url": "https://ziglang.org/download/0.13.0/zig-macos-x86_64-0.13.0.tar.xz",
+          "sha256": "df06e87a2d480d1daea5040eec9a7861962a98f12cc20a10aa493397ab4ccbc1",
+          "archive_type": "tar.xz",
+          "bin_path": "zig-macos-x86_64-0.13.0/zig"
+        },
+        "aarch64-macos": {
+          "url": "https://ziglang.org/download/0.13.0/zig-macos-aarch64-0.13.0.tar.xz",
+          "sha256": "1bc78b3014a938c5b9679f2feaf1cd14fc8e5c2cfca50c6ca80bc4f78aa0e7d5",
+          "archive_type": "tar.xz",
+          "bin_path": "zig-macos-aarch64-0.13.0/zig"
+        },
+        "x86_64-linux": {
+          "url": "https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz",
+          "sha256": "0386ab4ec35850abdb158c5825cf8abf0d01b6973ba041b6ecbebb08ffbf78e7",
+          "archive_type": "tar.xz",
+          "bin_path": "zig-linux-x86_64-0.13.0/zig"
+        }
+      }
+    }
+  }
+}
