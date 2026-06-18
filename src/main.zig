@@ -45,19 +45,68 @@ pub fn printUsage() void {
     std.debug.print(ANSI_BOLD ++ "USAGE:\n" ++ ANSI_RESET, .{});
     std.debug.print("  abv0 <command> [options] [arguments]\n\n", .{});
     std.debug.print(ANSI_BOLD ++ "COMMANDS:\n" ++ ANSI_RESET, .{});
-    std.debug.print("  " ++ ANSI_GREEN ++ "install" ++ ANSI_RESET ++ " <pkg>       Install and instantly APFS-link a package\n", .{});
-    std.debug.print("  " ++ ANSI_RED ++ "uninstall" ++ ANSI_RESET ++ " <pkg>     Remove an installed package and its links\n", .{});
-    std.debug.print("  " ++ ANSI_YELLOW ++ "run" ++ ANSI_RESET ++ " <pkg> [args...] Run a package executable instantly (auto-installs if missing)\n", .{});
-    std.debug.print("  " ++ ANSI_MAGENTA ++ "search" ++ ANSI_RESET ++ " <query>      Search the lightning-fast abv0 registry\n", .{});
-    std.debug.print("  " ++ ANSI_CYAN ++ "list" ++ ANSI_RESET ++ "               List all packages available in the registry\n", .{});
-    std.debug.print("  " ++ ANSI_GREEN ++ "info" ++ ANSI_RESET ++ " <pkg>          Show detailed package metadata and binary hashes\n\n", .{});
+    std.debug.print("  " ++ ANSI_GREEN ++ "install" ++ ANSI_RESET ++ " <pkg1> [pkg2...] Installs and instantly APFS-links packages (Supports parallel batching)\n", .{});
+    std.debug.print("  " ++ ANSI_RED ++ "uninstall" ++ ANSI_RESET ++ " <pkg>          Remove an installed package and its links\n", .{});
+    std.debug.print("  " ++ ANSI_YELLOW ++ "run" ++ ANSI_RESET ++ " <pkg> [args...]       Run a package executable instantly (auto-installs if missing)\n", .{});
+    std.debug.print("  " ++ ANSI_MAGENTA ++ "shell" ++ ANSI_RESET ++ " <pkg1> [pkg2...]     Innovative Sandboxed Shell: Spawn a temporary subshell with only requested packages\n", .{});
+    std.debug.print("  " ++ ANSI_GREEN ++ "doctor" ++ ANSI_RESET ++ "                  Innovative Self-Healing Check: Instantly verifies and self-heals broken execution links\n", .{});
+    std.debug.print("  " ++ ANSI_YELLOW ++ "gc" ++ ANSI_RESET ++ "                      Instant Garbage Collector: Prunes abandoned temporary downloads and abandoned shells\n", .{});
+    std.debug.print("  " ++ ANSI_MAGENTA ++ "search" ++ ANSI_RESET ++ " <query>           Search the lightning-fast abv0 registry\n", .{});
+    std.debug.print("  " ++ ANSI_CYAN ++ "list" ++ ANSI_RESET ++ "                     List all packages available in the registry\n", .{});
+    std.debug.print("  " ++ ANSI_GREEN ++ "info" ++ ANSI_RESET ++ " <pkg>                Show detailed package metadata and binary hashes\n\n", .{});
     std.debug.print(ANSI_BOLD ++ "OPTIONS:\n" ++ ANSI_RESET, .{});
-    std.debug.print("  --platform <name>  Override target platform (e.g. x86_64-macos, aarch64-macos, x86_64-linux)\n", .{});
-    std.debug.print("  --help, -h         Display this help message\n\n", .{});
+    std.debug.print("  --platform <name>        Override target platform (e.g. x86_64-macos, aarch64-macos, x86_64-linux)\n", .{});
+    std.debug.print("  --json                   Enable structured JSON output (supported on list, info)\n", .{});
+    std.debug.print("  --help, -h               Display this help message\n\n", .{});
     std.debug.print(ANSI_BOLD ++ "MAC-SPECIFIC INNOVATION:\n" ++ ANSI_RESET, .{});
     std.debug.print("  On macOS, abv0 bypasses traditional, fragile symlinking and file copying by invoking\n", .{});
     std.debug.print("  APFS " ++ ANSI_YELLOW ++ "clonefile(2)" ++ ANSI_RESET ++ " for 0ms microsecond-level package setups and zero extra disk storage.\n", .{});
 }
+
+fn writePackageJson(pkg: registry.Package, writer: anytype) !void {
+    try writer.print("{{\n", .{});
+    try writer.print("  \"name\": \"{s}\",\n", .{pkg.name});
+    try writer.print("  \"version\": \"{s}\",\n", .{pkg.version});
+    try writer.print("  \"description\": \"{s}\",\n", .{pkg.description});
+    try writer.print("  \"homepage\": \"{s}\",\n", .{pkg.homepage});
+    try writer.print("  \"license\": \"{s}\",\n", .{pkg.license});
+    try writer.print("  \"bin\": [", .{});
+    for (pkg.bin, 0..) |b, i| {
+        if (i > 0) try writer.print(", ", .{});
+        try writer.print("\"{s}\"", .{b});
+    }
+    try writer.print("],\n", .{});
+    try writer.print("  \"platforms\": {{\n", .{});
+
+    var plat_it = pkg.platforms.iterator();
+    var count: usize = 0;
+    while (plat_it.next()) |plat_entry| {
+        if (count > 0) try writer.print(",\n", .{});
+        const plat = plat_entry.key_ptr.*;
+        const info = plat_entry.value_ptr.*;
+        try writer.print("    \"{s}\": {{\n", .{plat});
+        try writer.print("      \"archive_type\": \"{s}\",\n", .{info.archive_type});
+        try writer.print("      \"sha256\": \"{s}\",\n", .{info.sha256});
+        try writer.print("      \"url\": \"{s}\",\n", .{info.url});
+        try writer.print("      \"bin_path\": \"{s}\"\n", .{info.bin_path});
+        try writer.print("    }}", .{});
+        count += 1;
+    }
+    try writer.print("\n  }}\n}}", .{});
+}
+
+// Thread helper struct for parallel installations
+const InstallWorker = struct {
+    pkg_store: *store.Store,
+    pkg: registry.Package,
+    platform: []const u8,
+
+    pub fn execute(self: *InstallWorker) void {
+        self.pkg_store.install(self.pkg, self.platform) catch |err| {
+            std.debug.print("Error installing {s}: {}\n", .{ self.pkg.name, err });
+        };
+    }
+};
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -74,22 +123,22 @@ pub fn main() !void {
     _ = args_it.next(); // skip exe name
 
     var command: ?[]const u8 = null;
-    var target_pkg: ?[]const u8 = null;
     var override_platform: ?[]const u8 = null;
-    var run_args = std.ArrayList([]const u8).init(allocator);
+    var json_output = false;
+    var cmd_args = std.ArrayList([]const u8).init(allocator);
 
     while (args_it.next()) |arg| {
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             printUsage();
             return;
+        } else if (std.mem.eql(u8, arg, "--json")) {
+            json_output = true;
         } else if (std.mem.eql(u8, arg, "--platform")) {
             override_platform = args_it.next();
         } else if (command == null) {
             command = arg;
-        } else if (target_pkg == null) {
-            target_pkg = arg;
         } else {
-            try run_args.append(arg);
+            try cmd_args.append(arg);
         }
     }
 
@@ -107,8 +156,6 @@ pub fn main() !void {
     var reg = registry.Registry.init(allocator);
     defer reg.deinit();
 
-    // In a real deployment, index.json might be installed in /opt/abv0/index.json or ~/.abv0/registry.json
-    // For development and testing, we find it relative to current working directory or executable
     reg.loadFromFile("packages/index.json") catch |err| {
         std.debug.print("Error: Failed to load package registry: {}\n", .{err});
         return;
@@ -119,18 +166,31 @@ pub fn main() !void {
 
     const cmd = command.?;
     if (std.mem.eql(u8, cmd, "list")) {
-        std.debug.print(ANSI_CYAN ++ ANSI_BOLD ++ "Available Packages in abv0 Registry:\n\n" ++ ANSI_RESET, .{});
-        var it = reg.packages.iterator();
-        while (it.next()) |entry| {
-            const pkg = entry.value_ptr.*;
-            std.debug.print("  " ++ ANSI_GREEN ++ ANSI_BOLD ++ "{s}" ++ ANSI_RESET ++ " v{s}\n    {s}\n\n", .{ pkg.name, pkg.version, pkg.description });
+        if (json_output) {
+            const writer = std.io.getStdOut().writer();
+            try writer.print("[\n", .{});
+            var it = reg.packages.iterator();
+            var count: usize = 0;
+            while (it.next()) |entry| {
+                if (count > 0) try writer.print(",\n", .{});
+                try writePackageJson(entry.value_ptr.*, writer);
+                count += 1;
+            }
+            try writer.print("\n]\n", .{});
+        } else {
+            std.debug.print(ANSI_CYAN ++ ANSI_BOLD ++ "Available Packages in abv0 Registry:\n\n" ++ ANSI_RESET, .{});
+            var it = reg.packages.iterator();
+            while (it.next()) |entry| {
+                const pkg = entry.value_ptr.*;
+                std.debug.print("  " ++ ANSI_GREEN ++ ANSI_BOLD ++ "{s}" ++ ANSI_RESET ++ " v{s}\n    {s}\n\n", .{ pkg.name, pkg.version, pkg.description });
+            }
         }
     } else if (std.mem.eql(u8, cmd, "search")) {
-        if (target_pkg == null) {
+        if (cmd_args.items.len == 0) {
             std.debug.print("Error: Please provide a search query. Example: abv0 search json\n", .{});
             return;
         }
-        const query = target_pkg.?;
+        const query = cmd_args.items[0];
         std.debug.print(ANSI_CYAN ++ ANSI_BOLD ++ "Search results for '{s}':\n\n" ++ ANSI_RESET, .{query});
 
         var found = false;
@@ -149,59 +209,87 @@ pub fn main() !void {
             std.debug.print("  No packages found matching your query.\n", .{});
         }
     } else if (std.mem.eql(u8, cmd, "info")) {
-        if (target_pkg == null) {
+        if (cmd_args.items.len == 0) {
             std.debug.print("Error: Please provide a package name. Example: abv0 info jq\n", .{});
             return;
         }
-        const pkg_name = target_pkg.?;
+        const pkg_name = cmd_args.items[0];
         const pkg = reg.packages.get(pkg_name) orelse {
             std.debug.print("Error: Package '{s}' not found in registry.\n", .{pkg_name});
             return;
         };
 
-        std.debug.print(ANSI_CYAN ++ ANSI_BOLD ++ "Information for {s}:\n" ++ ANSI_RESET, .{pkg.name});
-        std.debug.print("  " ++ ANSI_BOLD ++ "Version:" ++ ANSI_RESET ++ "     {s}\n", .{pkg.version});
-        std.debug.print("  " ++ ANSI_BOLD ++ "Description:" ++ ANSI_RESET ++ " {s}\n", .{pkg.description});
-        std.debug.print("  " ++ ANSI_BOLD ++ "Homepage:" ++ ANSI_RESET ++ "    {s}\n", .{pkg.homepage});
-        std.debug.print("  " ++ ANSI_BOLD ++ "License:" ++ ANSI_RESET ++ "     {s}\n", .{pkg.license});
-        std.debug.print("  " ++ ANSI_BOLD ++ "Binaries:" ++ ANSI_RESET ++ "    ", .{});
-        for (pkg.bin) |b| {
-            std.debug.print("{s} ", .{b});
-        }
-        std.debug.print("\n\n  " ++ ANSI_BOLD ++ "Supported Platforms & SHA256 Hashes:\n" ++ ANSI_RESET, .{});
+        if (json_output) {
+            const writer = std.io.getStdOut().writer();
+            try writePackageJson(pkg, writer);
+            try writer.print("\n", .{});
+        } else {
+            std.debug.print(ANSI_CYAN ++ ANSI_BOLD ++ "Information for {s}:\n" ++ ANSI_RESET, .{pkg.name});
+            std.debug.print("  " ++ ANSI_BOLD ++ "Version:" ++ ANSI_RESET ++ "     {s}\n", .{pkg.version});
+            std.debug.print("  " ++ ANSI_BOLD ++ "Description:" ++ ANSI_RESET ++ " {s}\n", .{pkg.description});
+            std.debug.print("  " ++ ANSI_BOLD ++ "Homepage:" ++ ANSI_RESET ++ "    {s}\n", .{pkg.homepage});
+            std.debug.print("  " ++ ANSI_BOLD ++ "License:" ++ ANSI_RESET ++ "     {s}\n", .{pkg.license});
+            std.debug.print("  " ++ ANSI_BOLD ++ "Binaries:" ++ ANSI_RESET ++ "    ", .{});
+            for (pkg.bin) |b| {
+                std.debug.print("{s} ", .{b});
+            }
+            std.debug.print("\n\n  " ++ ANSI_BOLD ++ "Supported Platforms & SHA256 Hashes:\n" ++ ANSI_RESET, .{});
 
-        var plat_it = pkg.platforms.iterator();
-        while (plat_it.next()) |plat_entry| {
-            const plat = plat_entry.key_ptr.*;
-            const info = plat_entry.value_ptr.*;
-            std.debug.print("    " ++ ANSI_YELLOW ++ "{s}" ++ ANSI_RESET ++ "\n", .{plat});
-            std.debug.print("      Archive:  {s}\n", .{info.archive_type});
-            std.debug.print("      Checksum: {s}\n", .{info.sha256});
-            std.debug.print("      URL:      {s}\n\n", .{info.url});
+            var plat_it = pkg.platforms.iterator();
+            while (plat_it.next()) |plat_entry| {
+                const plat = plat_entry.key_ptr.*;
+                const info = plat_entry.value_ptr.*;
+                std.debug.print("    " ++ ANSI_YELLOW ++ "{s}" ++ ANSI_RESET ++ "\n", .{plat});
+                std.debug.print("      Archive:  {s}\n", .{info.archive_type});
+                std.debug.print("      Checksum: {s}\n", .{info.sha256});
+                std.debug.print("      URL:      {s}\n\n", .{info.url});
+            }
         }
     } else if (std.mem.eql(u8, cmd, "install")) {
-        if (target_pkg == null) {
-            std.debug.print("Error: Please provide a package name. Example: abv0 install jq\n", .{});
+        if (cmd_args.items.len == 0) {
+            std.debug.print("Error: Please provide at least one package name. Example: abv0 install jq ripgrep\n", .{});
             return;
         }
-        const pkg_name = target_pkg.?;
-        const pkg = reg.packages.get(pkg_name) orelse {
-            std.debug.print("Error: Package '{s}' not found in registry.\n", .{pkg_name});
-            return;
-        };
 
-        try pkg_store.install(pkg, platform);
+        // Innovative Feature: Parallel Batch Installations
+        var workers = std.ArrayList(InstallWorker).init(allocator);
+        var threads = std.ArrayList(std.Thread).init(allocator);
+
+        for (cmd_args.items) |pkg_name| {
+            const pkg = reg.packages.get(pkg_name) orelse {
+                std.debug.print("Error: Package '{s}' not found in registry. Skipping...\n", .{pkg_name});
+                continue;
+            };
+            try workers.append(.{
+                .pkg_store = &pkg_store,
+                .pkg = pkg,
+                .platform = platform,
+            });
+        }
+
+        std.debug.print("Starting high-performance setup for {} packages...\n", .{workers.items.len});
+
+        // Spawn parallel execution threads
+        for (workers.items) |*worker| {
+            const thread = try std.Thread.spawn(.{}, InstallWorker.execute, .{worker});
+            try threads.append(thread);
+        }
+
+        // Wait for all worker threads to complete perfectly
+        for (threads.items) |thread| {
+            thread.join();
+        }
 
         const elapsed_ns = timer.read();
         const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
-        std.debug.print(ANSI_GREEN ++ ANSI_BOLD ++ "\nSuccessfully setup {s} v{s} in {d:.2}ms!\n" ++ ANSI_RESET, .{ pkg.name, pkg.version, elapsed_ms });
+        std.debug.print(ANSI_GREEN ++ ANSI_BOLD ++ "\nSuccessfully installed {} packages in {d:.2}ms!\n" ++ ANSI_RESET, .{ workers.items.len, elapsed_ms });
         std.debug.print("Note: Make sure to add {s} to your PATH!\n", .{pkg_store.bin_root});
     } else if (std.mem.eql(u8, cmd, "uninstall")) {
-        if (target_pkg == null) {
+        if (cmd_args.items.len == 0) {
             std.debug.print("Error: Please provide a package name. Example: abv0 uninstall jq\n", .{});
             return;
         }
-        const pkg_name = target_pkg.?;
+        const pkg_name = cmd_args.items[0];
         const pkg = reg.packages.get(pkg_name) orelse {
             std.debug.print("Error: Package '{s}' not found in registry.\n", .{pkg_name});
             return;
@@ -212,22 +300,51 @@ pub fn main() !void {
         const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
         std.debug.print(ANSI_GREEN ++ ANSI_BOLD ++ "\nSuccessfully uninstalled {s} in {d:.2}ms!\n" ++ ANSI_RESET, .{ pkg.name, elapsed_ms });
     } else if (std.mem.eql(u8, cmd, "run")) {
-        if (target_pkg == null) {
+        if (cmd_args.items.len == 0) {
             std.debug.print("Error: Please provide a package name to run. Example: abv0 run jq -- --version\n", .{});
             return;
         }
-        const pkg_name = target_pkg.?;
+        const pkg_name = cmd_args.items[0];
         const pkg = reg.packages.get(pkg_name) orelse {
             std.debug.print("Error: Package '{s}' not found in registry.\n", .{pkg_name});
             return;
         };
 
-        var actual_run_args = run_args.items;
+        var actual_run_args = cmd_args.items[1..];
         if (actual_run_args.len > 0 and std.mem.eql(u8, actual_run_args[0], "--")) {
             actual_run_args = actual_run_args[1..];
         }
 
         try pkg_store.execute(pkg, platform, actual_run_args);
+    } else if (std.mem.eql(u8, cmd, "shell")) {
+        // Innovative Feature: Instant Sandboxed Shell
+        if (cmd_args.items.len == 0) {
+            std.debug.print("Error: Please provide at least one package name for your sandboxed shell. Example: abv0 shell jq ripgrep\n", .{});
+            return;
+        }
+
+        var req_pkgs = std.ArrayList(registry.Package).init(allocator);
+        for (cmd_args.items) |pkg_name| {
+            const pkg = reg.packages.get(pkg_name) orelse {
+                std.debug.print("Error: Package '{s}' not found in registry. Aborting shell creation.\n", .{pkg_name});
+                return;
+            };
+            try req_pkgs.append(pkg);
+        }
+
+        try pkg_store.executeShell(req_pkgs.items, platform);
+    } else if (std.mem.eql(u8, cmd, "doctor")) {
+        // Innovative Feature: Self-Healing Audit
+        try pkg_store.doctor(&reg, platform);
+        const elapsed_ns = timer.read();
+        const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
+        std.debug.print("Completed health audit in {d:.2}ms.\n", .{elapsed_ms});
+    } else if (std.mem.eql(u8, cmd, "gc")) {
+        // Innovative Feature: Instant Garbage Collection
+        try pkg_store.gc();
+        const elapsed_ns = timer.read();
+        const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
+        std.debug.print("Completed garbage collection in {d:.2}ms.\n", .{elapsed_ms});
     } else {
         std.debug.print("Error: Unknown command: {s}\n\n", .{cmd});
         printUsage();

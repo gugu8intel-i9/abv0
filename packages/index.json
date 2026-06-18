@@ -80,7 +80,7 @@
         },
         "x86_64-linux": {
           "url": "https://github.com/sharkdp/bat/releases/download/v0.24.0/bat-v0.24.0-x86_64-unknown-linux-musl.tar.gz",
-          "sha256": "e30ceba8ec2ec9b2d354b3211e4bf3ec1e9c5c7d03bb6ec3ea4457a1518f88c3",
+          "sha256": "d39a21e3da57fe6a3e07184b3c1dc245f8dba379af569d3668b6dcdfe75e3052",
           "archive_type": "tar.gz",
           "bin_path": "bat-v0.24.0-x86_64-unknown-linux-musl/bat"
         }
