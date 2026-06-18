@@ -28,13 +28,20 @@ case "${OS}" in
 esac
 
 BIN_DIR="$HOME/.abv0/bin"
+REG_DIR="$HOME/.abv0/registry"
 mkdir -p "${BIN_DIR}"
+mkdir -p "${REG_DIR}"
 
 URL="https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/release/${TARGET}"
+REG_URL="https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/packages/index.json"
 
 echo "⬇️  Downloading ${TARGET}..."
 curl -s -L -o "${BIN_DIR}/abv0" "${URL}"
 chmod 0700 "${BIN_DIR}/abv0"
+
+echo "⬇️  Fetching active package registry index..."
+curl -s -L -o "${REG_DIR}/index.json" "${REG_URL}"
+chmod 0700 "${REG_DIR}/index.json"
 
 echo ""
 echo "✅ abv0 installed successfully to ${BIN_DIR}/abv0"

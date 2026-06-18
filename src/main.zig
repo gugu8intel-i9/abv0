@@ -175,10 +175,45 @@ pub fn main() !void {
     var reg = registry.Registry.init(allocator);
     defer reg.deinit();
 
-    reg.loadFromFile("packages/index.json") catch |err| {
-        std.debug.print("Error: Failed to load package registry: {}\n", .{err});
-        return;
-    };
+    // High-performance robust self-healing Registry Finder
+    var registry_loaded = false;
+    const home_dir = std.posix.getenv("HOME");
+    if (home_dir) |h_dir| {
+        const reg_dir = try std.fs.path.join(allocator, &.{ h_dir, ".abv0", "registry" });
+        defer allocator.free(reg_dir);
+
+        std.fs.cwd().makePath(reg_dir) catch {};
+        const global_reg_path = try std.fs.path.join(allocator, &.{ reg_dir, "index.json" });
+        defer allocator.free(global_reg_path);
+
+        if (reg.loadFromFile(global_reg_path)) |_| {
+            registry_loaded = true;
+        } else |_| {
+            // Self-heal actively by downloading fresh manifest registry
+            std.debug.print("Initializing secure local abv0 registry index...\n", .{});
+            const curl_res = try std.process.Child.run(.{
+                .allocator = allocator,
+                .argv = &.{ "curl", "-s", "-L", "https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/packages/index.json", "-o", global_reg_path },
+            });
+            defer {
+                allocator.free(curl_res.stdout);
+                allocator.free(curl_res.stderr);
+            }
+            if (curl_res.term.Exited == 0) {
+                if (reg.loadFromFile(global_reg_path)) |_| {
+                    registry_loaded = true;
+                } else |_| {}
+            }
+        }
+    }
+
+    // Local sandbox development fallback
+    if (!registry_loaded) {
+        reg.loadFromFile("packages/index.json") catch |err| {
+            std.debug.print("Error: Failed to load package registry: {}\n", .{err});
+            return;
+        };
+    }
 
     var pkg_store = try store.Store.init(allocator);
     defer pkg_store.deinit();
