@@ -415,6 +415,43 @@ pub const Store = struct {
             }
 
             // Move secure tmp_dir to final pkg_dir
+            // Check if we need to actively compile from source
+            var any_bin_found = false;
+            for (pkg.bin) |bin_name| {
+                var dir = std.fs.cwd().openDir(tmp_dir_path, .{ .iterate = true }) catch continue;
+                var walker = dir.walk(self.allocator) catch continue;
+                defer {
+                    walker.deinit();
+                    dir.close();
+                }
+                while (walker.next() catch null) |w_entry| {
+                    if (w_entry.kind == .file and std.mem.eql(u8, w_entry.basename, bin_name)) {
+                        any_bin_found = true;
+                        break;
+                    }
+                }
+                if (any_bin_found) break;
+            }
+
+            if (!any_bin_found and pkg.bin.len > 0) {
+                std.debug.print("   [ Source Compilation Mode ] Launching Universal Build-From-Source Auto-Compiler...\n", .{});
+                var dir = std.fs.cwd().openDir(tmp_dir_path, .{ .iterate = true }) catch null;
+                if (dir != null) {
+                    defer dir.?.close();
+                    var it = dir.?.iterate();
+                    while (it.next() catch null) |entry| {
+                        if (entry.kind == .directory) {
+                            const sub_path = try std.fs.path.join(self.allocator, &.{ tmp_dir_path, entry.name });
+                            defer self.allocator.free(sub_path);
+                            compileSource(self.allocator, sub_path) catch |err| {
+                                std.debug.print("   [ Error ] Automated compilation failed: {}\n", .{err});
+                            };
+                            break;
+                        }
+                    }
+                }
+            }
+
             try std.fs.cwd().rename(tmp_dir_path, pkg_dir);
         }
 
@@ -1039,7 +1076,45 @@ pub const Store = struct {
         std.debug.print("\n[ UPGRADE COMPLETED ] Successfully upgraded all selected software packages!\n", .{});
     }
 
-    // Automated Total Reset Command
+            // Automated Build-From-Source Auto-Compiler helper
+            fn compileSource(allocator: std.mem.Allocator, work_dir: []const u8) !void {
+                // 1. Check for Makefile
+                const makefile = try std.fs.path.join(allocator, &.{ work_dir, "Makefile" });
+                defer allocator.free(makefile);
+                if (std.fs.cwd().access(makefile, .{})) |_| {
+                    std.debug.print("   -> Discovered Makefile! Compiling from source via 'make'...\n", .{});
+                    _ = try std.process.Child.run(.{ .allocator = allocator, .argv = &.{ "make" }, .cwd = work_dir });
+                    return;
+                } else |_| {}
+
+                // 2. Check for Cargo.toml (Rust)
+                const cargo = try std.fs.path.join(allocator, &.{ work_dir, "Cargo.toml" });
+                defer allocator.free(cargo);
+                if (std.fs.cwd().access(cargo, .{})) |_| {
+                    std.debug.print("   -> Discovered Cargo.toml! Compiling from source via 'cargo build --release'...\n", .{});
+                    _ = try std.process.Child.run(.{ .allocator = allocator, .argv = &.{ "cargo", "build", "--release" }, .cwd = work_dir });
+                    return;
+                } else |_| {}
+
+                // 3. Check for go.mod (Go)
+                const gomod = try std.fs.path.join(allocator, &.{ work_dir, "go.mod" });
+                defer allocator.free(gomod);
+                if (std.fs.cwd().access(gomod, .{})) |_| {
+                    std.debug.print("   -> Discovered go.mod! Compiling from source via 'go build'...\n", .{});
+                    _ = try std.process.Child.run(.{ .allocator = allocator, .argv = &.{ "go", "build" }, .cwd = work_dir });
+                    return;
+                } else |_| {}
+
+                // 4. Check for CMakeLists.txt (CMake)
+                const cmakelists = try std.fs.path.join(allocator, &.{ work_dir, "CMakeLists.txt" });
+                defer allocator.free(cmakelists);
+                if (std.fs.cwd().access(cmakelists, .{})) |_| {
+                    std.debug.print("   -> Discovered CMakeLists.txt! Compiling from source via 'cmake'...\n", .{});
+                    _ = try std.process.Child.run(.{ .allocator = allocator, .argv = &.{ "cmake", "-B", "build" }, .cwd = work_dir });
+                    _ = try std.process.Child.run(.{ .allocator = allocator, .argv = &.{ "cmake", "--build", "build", "--config", "Release" }, .cwd = work_dir });
+                    return;
+                } else |_| {}
+            }
     pub fn resetAll(self: *Store, reg: *registry.Registry, platform: []const u8) !void {
         std.debug.print("=== [ abv0 Automated Total System Reset ] ===\n\n", .{});
         printProgressBar("Initiating total unlinking and store purge...", 1, 3);

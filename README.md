@@ -126,6 +126,8 @@ Licensed under the GNU Affero Public License v3. See [LICENSE](./LICENSE) for de
 ---
 
 ## 📜 Changelog / Recent Changes
+* **v0.9.4 (Universal Build-From-Source Automated Compiler Engine Release):**
+  * **Automated Source Auto-Compilation:** Built a powerful compilation reconciler into the setup pipeline. When a specific software package has no pre-compiled binary release assets available on GitHub (like `btop` on macOS), `abv0` downloads the source repository snapshot, actively discovers the required build toolchain (`make`, `cmake`, `cargo build --release`, `go build`), actively compiles the application from source entirely on the fly, discovers the newly compiled executables, and APFS-clones/links them into your execution path!
 * **v0.9.3 (Automated Decentralized Dynamic Fallback Resolution Engine Release):**
   * **Decentralized Fallback Discovery:** Engineered a groundbreaking dynamic resolution engine. When you request a package that isn't hardcoded in the local `index.json` registry (`abv0 install ANY_TOOL`), `abv0` now automatically discovers its definitive open-source repository via GitHub API search queries, identifies the exact matching OS/Architecture binary release assets, and installs it on the fly!
   * **Recursive Executable Discovery:** Implemented a highly-performant recursive filesystem directory walker that automatically locates and links executables regardless of how complex or deeply nested an extracted release archive is.

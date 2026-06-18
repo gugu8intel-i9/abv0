@@ -2,3 +2,4 @@
 zig-out/
 *.tmp
 *.tar.xz
+*.tar.gz
