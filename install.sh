@@ -32,8 +32,8 @@ REG_DIR="$HOME/.abv0/registry"
 mkdir -p "${BIN_DIR}"
 mkdir -p "${REG_DIR}"
 
-URL="https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/release/${TARGET}"
-REG_URL="https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/packages/index.json"
+URL="https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/release/${TARGET}?t=$(date +%s)"
+REG_URL="https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/packages/index.json?t=$(date +%s)"
 
 echo "⬇️  Downloading ${TARGET}..."
 curl -s -L -o "${BIN_DIR}/abv0" "${URL}"
