@@ -76,16 +76,45 @@
           "bin_path": "bat-v0.24.0-x86_64-apple-darwin/bat"
         },
         "aarch64-macos": {
-          "url": "https://github.com/sharkdp/bat/releases/download/v0.24.0/bat-v0.24.0-aarch64-apple-darwin.tar.gz",
-          "sha256": "beac37fe435ca102bb1dc7b94d2ba05f0134f5aa0fdf1d97bc5f3325cdd0de67",
+          "url": "https://github.com/sharkdp/bat/releases/download/v0.24.0/bat-v0.24.0-x86_64-apple-darwin.tar.gz",
+          "sha256": "7032e4a4ea3c3b54e5a4d11db13859ddf75c3edd895e37fb02ddb7777afcc819",
           "archive_type": "tar.gz",
-          "bin_path": "bat-v0.24.0-aarch64-apple-darwin/bat"
+          "bin_path": "bat-v0.24.0-x86_64-apple-darwin/bat"
         },
         "x86_64-linux": {
           "url": "https://github.com/sharkdp/bat/releases/download/v0.24.0/bat-v0.24.0-x86_64-unknown-linux-musl.tar.gz",
           "sha256": "d39a21e3da57fe6a3e07184b3c1dc245f8dba379af569d3668b6dcdfe75e3052",
           "archive_type": "tar.gz",
           "bin_path": "bat-v0.24.0-x86_64-unknown-linux-musl/bat"
+        }
+      }
+    },
+    "btop": {
+      "name": "btop",
+      "version": "1.4.7",
+      "description": "A monitor of resources (CPU, Memory, Disks, Network, Processes) that looks stunning",
+      "homepage": "https://github.com/aristocratos/btop",
+      "license": "Apache-2.0",
+      "bin": ["btop"],
+      "app_bundles": [],
+      "platforms": {
+        "x86_64-macos": {
+          "url": "https://raw.githubusercontent.com/gugu8intel-i9/abv0/551641b/packages/btop-darwin-x86_64",
+          "sha256": "a3b1e900e90bfe058e74062f31646856212296f41279ae3644ee0799d5167709",
+          "archive_type": "raw",
+          "bin_path": "btop"
+        },
+        "aarch64-macos": {
+          "url": "https://raw.githubusercontent.com/gugu8intel-i9/abv0/551641b/packages/btop-darwin-arm64",
+          "sha256": "740bcbf28fc810cd99e699981f98cd1b613393781f41aaa8927c0f6a69e0733a",
+          "archive_type": "raw",
+          "bin_path": "btop"
+        },
+        "x86_64-linux": {
+          "url": "https://github.com/aristocratos/btop/releases/download/v1.4.7/btop-x86_64-unknown-linux-musl.tar.gz",
+          "sha256": "5099054dd6a101bd12eb6ff3702a9a6a3f57aaa27923a0da478ae5b517faf335",
+          "archive_type": "tar.gz",
+          "bin_path": "btop-x86_64-unknown-linux-musl/bin/btop"
         }
       }
     },
