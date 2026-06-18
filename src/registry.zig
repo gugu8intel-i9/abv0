@@ -14,6 +14,7 @@ pub const Package = struct {
     homepage: []const u8,
     license: []const u8,
     bin: []const []const u8,
+    app_bundles: []const []const u8, // GUI app bundles to link into ~/Applications
     platforms: std.StringHashMap(PlatformInfo),
 };
 
@@ -50,9 +51,19 @@ pub const Registry = struct {
             const pkg_obj = entry.value_ptr.object;
 
             var bin_list = std.ArrayList([]const u8).init(alloc);
-            const bin_arr = pkg_obj.get("bin").?.array;
-            for (bin_arr.items) |bin_val| {
-                try bin_list.append(try alloc.dupe(u8, bin_val.string));
+            if (pkg_obj.get("bin")) |bin_val| {
+                const bin_arr = bin_val.array;
+                for (bin_arr.items) |b_val| {
+                    try bin_list.append(try alloc.dupe(u8, b_val.string));
+                }
+            }
+
+            var app_list = std.ArrayList([]const u8).init(alloc);
+            if (pkg_obj.get("app_bundles")) |app_val| {
+                const app_arr = app_val.array;
+                for (app_arr.items) |a_val| {
+                    try app_list.append(try alloc.dupe(u8, a_val.string));
+                }
             }
 
             var platforms_map = std.StringHashMap(PlatformInfo).init(alloc);
@@ -77,6 +88,7 @@ pub const Registry = struct {
                 .homepage = try alloc.dupe(u8, pkg_obj.get("homepage").?.string),
                 .license = try alloc.dupe(u8, pkg_obj.get("license").?.string),
                 .bin = try bin_list.toOwnedSlice(),
+                .app_bundles = try app_list.toOwnedSlice(),
                 .platforms = platforms_map,
             };
 

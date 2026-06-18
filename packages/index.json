@@ -114,6 +114,35 @@
         }
       }
     },
+    "mock-gui": {
+      "name": "mock-gui",
+      "version": "1.0.0",
+      "description": "A high-performance mock macOS GUI .app bundle for evaluating abv0 applications cloning",
+      "homepage": "https://github.com/gugu8intel-i9/abv0",
+      "license": "MIT",
+      "bin": [],
+      "app_bundles": ["MockApp.app"],
+      "platforms": {
+        "x86_64-linux": {
+          "url": "https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/packages/MockApp.app.tar.gz",
+          "sha256": "126e7af6c8ec5321ed55a83ab556fa57e703a90f86d48abd0b0da6f0845be435",
+          "archive_type": "tar.gz",
+          "bin_path": "MockApp.app/Contents/MacOS/mock_gui"
+        },
+        "x86_64-macos": {
+          "url": "https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/packages/MockApp.app.tar.gz",
+          "sha256": "126e7af6c8ec5321ed55a83ab556fa57e703a90f86d48abd0b0da6f0845be435",
+          "archive_type": "tar.gz",
+          "bin_path": "MockApp.app/Contents/MacOS/mock_gui"
+        },
+        "aarch64-macos": {
+          "url": "https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/packages/MockApp.app.tar.gz",
+          "sha256": "126e7af6c8ec5321ed55a83ab556fa57e703a90f86d48abd0b0da6f0845be435",
+          "archive_type": "tar.gz",
+          "bin_path": "MockApp.app/Contents/MacOS/mock_gui"
+        }
+      }
+    },
     "threat-sample": {
       "name": "threat-sample",
       "version": "1.0.0",

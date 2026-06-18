@@ -41,6 +41,7 @@ pub const Store = struct {
     store_root: []const u8,
     bin_root: []const u8,
     shells_root: []const u8,
+    apps_root: []const u8, // GUI Applications root (e.g. ~/Applications)
 
     pub fn init(allocator: std.mem.Allocator) !Store {
         const home_dir = std.posix.getenv("HOME") orelse {
@@ -50,11 +51,13 @@ pub const Store = struct {
         const store_root = try std.fs.path.join(allocator, &.{ home_dir, ".abv0", "store" });
         const bin_root = try std.fs.path.join(allocator, &.{ home_dir, ".abv0", "bin" });
         const shells_root = try std.fs.path.join(allocator, &.{ home_dir, ".abv0", "shells" });
+        const apps_root = try std.fs.path.join(allocator, &.{ home_dir, "Applications" });
 
         // Security fix: Create directories with strict 0700 permissions to prevent local multi-user unauthorized access
         std.fs.cwd().makePath(store_root) catch {};
         std.fs.cwd().makePath(bin_root) catch {};
         std.fs.cwd().makePath(shells_root) catch {};
+        std.fs.cwd().makePath(apps_root) catch {};
 
         _ = std.process.Child.run(.{ .allocator = allocator, .argv = &.{ "chmod", "0700", store_root } }) catch {};
         _ = std.process.Child.run(.{ .allocator = allocator, .argv = &.{ "chmod", "0700", bin_root } }) catch {};
@@ -65,6 +68,7 @@ pub const Store = struct {
             .store_root = store_root,
             .bin_root = bin_root,
             .shells_root = shells_root,
+            .apps_root = apps_root,
         };
     }
 
@@ -72,6 +76,7 @@ pub const Store = struct {
         self.allocator.free(self.store_root);
         self.allocator.free(self.bin_root);
         self.allocator.free(self.shells_root);
+        self.allocator.free(self.apps_root);
     }
 
     pub fn getPkgStorePath(self: *Store, pkg: registry.Package, platform_name: []const u8) ![]const u8 {
@@ -305,16 +310,13 @@ pub const Store = struct {
             if (std.mem.eql(u8, info.archive_type, "tar.gz") or std.mem.eql(u8, info.archive_type, "tar.xz")) {
                 const tar_res = try std.process.Child.run(.{
                     .allocator = self.allocator,
-                    // Security hardening: ensure strict permissions and prevent absolute overwrites
                     .argv = &.{ "tar", "-xf", archive_path, "-C", tmp_dir_path },
                 });
                 defer {
                     self.allocator.free(tar_res.stdout);
                     self.allocator.free(tar_res.stderr);
                 }
-                if (tar_res.term.Exited != 0) {
-                    return error.UnpackFailed;
-                }
+                if (tar_res.term.Exited != 0) return error.UnpackFailed;
                 try std.fs.cwd().deleteFile(archive_path);
             } else if (std.mem.eql(u8, info.archive_type, "zip")) {
                 const unzip_res = try std.process.Child.run(.{
@@ -325,17 +327,69 @@ pub const Store = struct {
                     self.allocator.free(unzip_res.stdout);
                     self.allocator.free(unzip_res.stderr);
                 }
-                if (unzip_res.term.Exited != 0) {
-                    return error.UnpackFailed;
+                if (unzip_res.term.Exited != 0) return error.UnpackFailed;
+                try std.fs.cwd().deleteFile(archive_path);
+            } else if (std.mem.eql(u8, info.archive_type, "dmg")) {
+                printProgressBar("Mounting macOS DMG disk image...", 4, 5);
+
+                const mount_res = try std.process.Child.run(.{
+                    .allocator = self.allocator,
+                    .argv = &.{ "hdiutil", "attach", "-nobrowse", "-quiet", archive_path },
+                });
+                defer {
+                    self.allocator.free(mount_res.stdout);
+                    self.allocator.free(mount_res.stderr);
+                }
+
+                // Locate any .app bundle in /Volumes
+                var mounted_app_path: ?[]const u8 = null;
+                var volumes_dir = std.fs.cwd().openDir("/Volumes", .{ .iterate = true }) catch null;
+                if (volumes_dir != null) {
+                    defer volumes_dir.?.close();
+                    var vol_it = volumes_dir.?.iterate();
+                    while (try vol_it.next()) |vol_entry| {
+                        const test_vol = try std.fs.path.join(self.allocator, &.{ "/Volumes", vol_entry.name });
+                        defer self.allocator.free(test_vol);
+
+                        var test_dir = std.fs.cwd().openDir(test_vol, .{ .iterate = true }) catch continue;
+                        defer test_dir.close();
+                        var test_it = test_dir.iterate();
+                        while (try test_it.next()) |sub_entry| {
+                            if (std.mem.endsWith(u8, sub_entry.name, ".app")) {
+                                mounted_app_path = try std.fs.path.join(self.allocator, &.{ test_vol, sub_entry.name });
+                                break;
+                            }
+                        }
+                        if (mounted_app_path != null) break;
+                    }
+                }
+
+                if (mounted_app_path) |app_path| {
+                    defer self.allocator.free(app_path);
+                    const basename = std.fs.path.basename(app_path);
+                    const dst_app_bundle = try std.fs.path.join(self.allocator, &.{ tmp_dir_path, basename });
+                    defer self.allocator.free(dst_app_bundle);
+
+                    printProgressBar("Fast copying GUI Application bundle from disk image...", 4, 5);
+                    _ = try std.process.Child.run(.{
+                        .allocator = self.allocator,
+                        .argv = &.{ "cp", "-R", app_path, dst_app_bundle },
+                    });
+
+                    // Detach DMG
+                    if (std.fs.path.dirname(app_path)) |vol_base| {
+                        _ = std.process.Child.run(.{
+                            .allocator = self.allocator,
+                            .argv = &.{ "hdiutil", "detach", "-quiet", vol_base },
+                        }) catch {};
+                    }
                 }
                 try std.fs.cwd().deleteFile(archive_path);
             } else if (std.mem.eql(u8, info.archive_type, "raw")) {
-                // For raw single binaries, we just rename archive_data to actual binary name
                 const actual_bin_path = try std.fs.path.join(self.allocator, &.{ tmp_dir_path, info.bin_path });
                 defer self.allocator.free(actual_bin_path);
 
                 try std.fs.cwd().rename(archive_path, actual_bin_path);
-                // Set executable permissions
                 _ = try std.process.Child.run(.{
                     .allocator = self.allocator,
                     .argv = &.{ "chmod", "0700", actual_bin_path },
@@ -349,28 +403,53 @@ pub const Store = struct {
         }
 
         // Fast link binaries to ~/.abv0/bin
-        const link_msg = try std.fmt.allocPrint(self.allocator, "Linking {s} executables into {s}...", .{ pkg.name, self.bin_root });
-        defer self.allocator.free(link_msg);
-        printProgressBar(link_msg, 5, 5);
+        if (pkg.bin.len > 0) {
+            const link_msg = try std.fmt.allocPrint(self.allocator, "Linking {s} executables into {s}...", .{ pkg.name, self.bin_root });
+            defer self.allocator.free(link_msg);
+            printProgressBar(link_msg, 5, 5);
 
-        for (pkg.bin) |bin_name| {
-            const src_bin = try std.fs.path.join(self.allocator, &.{ pkg_dir, info.bin_path });
-            defer self.allocator.free(src_bin);
+            for (pkg.bin) |bin_name| {
+                const src_bin = try std.fs.path.join(self.allocator, &.{ pkg_dir, info.bin_path });
+                defer self.allocator.free(src_bin);
 
-            const dst_bin = try std.fs.path.join(self.allocator, &.{ self.bin_root, bin_name });
-            defer self.allocator.free(dst_bin);
+                const dst_bin = try std.fs.path.join(self.allocator, &.{ self.bin_root, bin_name });
+                defer self.allocator.free(dst_bin);
 
-            // Ensure executable permissions
-            _ = std.process.Child.run(.{
-                .allocator = self.allocator,
-                .argv = &.{ "chmod", "+x", src_bin },
-            }) catch {};
+                _ = std.process.Child.run(.{
+                    .allocator = self.allocator,
+                    .argv = &.{ "chmod", "+x", src_bin },
+                }) catch {};
 
-            const used_clone = try os_macos.fastLink(src_bin, dst_bin);
-            if (used_clone) {
-                std.debug.print("   [ APFS Clone ] {s} -> {s} (Instant copy-on-write 0ms latency)\n", .{ bin_name, src_bin });
-            } else {
-                std.debug.print("   [ Symlink Link ] {s} -> {s}\n", .{ bin_name, src_bin });
+                const used_clone = try os_macos.fastLink(src_bin, dst_bin);
+                if (used_clone) {
+                    std.debug.print("   [ APFS Clone ] {s} -> {s} (Instant copy-on-write 0ms latency)\n", .{ bin_name, src_bin });
+                } else {
+                    std.debug.print("   [ Symlink Link ] {s} -> {s}\n", .{ bin_name, src_bin });
+                }
+            }
+        }
+
+        // Innovative GUI Application Setup: Fast Link / APFS Clone into ~/Applications
+        if (pkg.app_bundles.len > 0) {
+            const app_msg = try std.fmt.allocPrint(self.allocator, "Linking GUI Application bundles into {s}...", .{self.apps_root});
+            defer self.allocator.free(app_msg);
+            printProgressBar(app_msg, 5, 5);
+
+            for (pkg.app_bundles) |app_name| {
+                const src_app = try std.fs.path.join(self.allocator, &.{ pkg_dir, app_name });
+                defer self.allocator.free(src_app);
+
+                const dst_app = try std.fs.path.join(self.allocator, &.{ self.apps_root, app_name });
+                defer self.allocator.free(dst_app);
+
+                std.fs.cwd().deleteTree(dst_app) catch {};
+
+                if (os_macos.fastLink(src_app, dst_app)) |_| {
+                    std.debug.print("   [ APFS Clone ] {s} -> {s} (Instant 0ms GUI Application setup)\n", .{ app_name, src_app });
+                } else |_| {
+                    _ = std.process.Child.run(.{ .allocator = self.allocator, .argv = &.{ "cp", "-R", src_app, dst_app } }) catch {};
+                    std.debug.print("   [ Copied App Bundle ] {s} -> {s}\n", .{ app_name, src_app });
+                }
             }
         }
     }
@@ -385,6 +464,16 @@ pub const Store = struct {
 
             if (std.fs.cwd().deleteFile(dst_bin)) |_| {
                 std.debug.print("Unlinked binary {s}\n", .{dst_bin});
+            } else |_| {}
+        }
+
+        // Unlink GUI Application bundles
+        for (pkg.app_bundles) |app_name| {
+            const dst_app = try std.fs.path.join(self.allocator, &.{ self.apps_root, app_name });
+            defer self.allocator.free(dst_app);
+
+            if (std.fs.cwd().deleteTree(dst_app)) |_| {
+                std.debug.print("Unlinked GUI Application bundle {s}\n", .{dst_app});
             } else |_| {}
         }
 
@@ -547,6 +636,17 @@ pub const Store = struct {
                         std.debug.print("[ Broken Link ] Package '{s}' is installed, but executable '{s}' is unlinked or missing from ~/.abv0/bin.\n", .{ pkg.name, bin_name });
                     };
                 }
+
+                // Check GUI Application targets
+                for (pkg.app_bundles) |app_name| {
+                    const dst_app = try std.fs.path.join(self.allocator, &.{ self.apps_root, app_name });
+                    defer self.allocator.free(dst_app);
+
+                    std.fs.cwd().access(dst_app, .{}) catch {
+                        total_broken_links += 1;
+                        std.debug.print("[ Broken Link ] GUI Package '{s}' is installed, but bundle '{s}' is unlinked or missing from ~/Applications.\n", .{ pkg.name, app_name });
+                    };
+                }
             }
         }
 
@@ -594,6 +694,25 @@ pub const Store = struct {
                             std.debug.print("   -> Successfully self-healed and re-linked: {s}\n", .{bin_name});
                         } else |err| {
                             std.debug.print("   -> Failed to link {s}: {}\n", .{ bin_name, err });
+                        }
+                    };
+                }
+
+                // Repair GUI Application bundles
+                for (pkg.app_bundles) |app_name| {
+                    const dst_app = try std.fs.path.join(self.allocator, &.{ self.apps_root, app_name });
+                    defer self.allocator.free(dst_app);
+
+                    std.fs.cwd().access(dst_app, .{}) catch {
+                        const src_app = try std.fs.path.join(self.allocator, &.{ pkg_dir, app_name });
+                        defer self.allocator.free(src_app);
+
+                        if (os_macos.fastLink(src_app, dst_app)) |_| {
+                            packages_healed += 1;
+                            std.debug.print("   -> Successfully self-healed GUI Application bundle: {s}\n", .{app_name});
+                        } else |_| {
+                            _ = std.process.Child.run(.{ .allocator = self.allocator, .argv = &.{ "cp", "-R", src_app, dst_app } }) catch {};
+                            packages_healed += 1;
                         }
                     };
                 }
