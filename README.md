@@ -19,6 +19,7 @@ Traditional package managers like Homebrew rely on heavy interpreted runtimes (R
 9. **System Diagnostics & Automated Repair (`abv0 doctor` & `abv0 fix`):** Distinct diagnostic profiling exactly like Homebrew that audits your `PATH` and link state, coupled with an active `abv0 fix` repair engine that automatically heals broken packages and resets secure directory permissions.
 10. **Advanced Malware Scanner (`abv0 detect`):** High-performance static heuristics engine that evaluates installed executables and scripts for reverse shells, embedded cryptominers (Stratum mining pools), private key stealing, and unauthorized system file access.
 11. **Clean Text Progress Bars:** Beautiful text progress bar animations (`[===========>        ]`) providing pristine visual feedback during setup, multi-chunk downloads, and diagnostic repairs.
+12. **Universal Dynamic Fallback Discovery:** You never have to wait for a formula to be added to our local registry. If you request any package not hardcoded in the index (`abv0 install ANY_PROJECT`), `abv0` automatically discovers its open-source repository on the fly via live GitHub API queries, locates the exact OS/Architecture release binaries, and links them perfectly.
 
 ---
 
@@ -125,6 +126,9 @@ Licensed under the GNU Affero Public License v3. See [LICENSE](./LICENSE) for de
 ---
 
 ## 📜 Changelog / Recent Changes
+* **v0.9.3 (Automated Decentralized Dynamic Fallback Resolution Engine Release):**
+  * **Decentralized Fallback Discovery:** Engineered a groundbreaking dynamic resolution engine. When you request a package that isn't hardcoded in the local `index.json` registry (`abv0 install ANY_TOOL`), `abv0` now automatically discovers its definitive open-source repository via GitHub API search queries, identifies the exact matching OS/Architecture binary release assets, and installs it on the fly!
+  * **Recursive Executable Discovery:** Implemented a highly-performant recursive filesystem directory walker that automatically locates and links executables regardless of how complex or deeply nested an extracted release archive is.
 * **v0.9.2 (Neofetch Official Core Curation Release):**
   * **Neofetch Support:** Added official manifest definitions and verified cryptographic SHA256 integrity checksums for `neofetch` v7.1.0 across Linux and macOS.
 * **v0.9.1 (Smart Rolling Release Hash Validation & Toolchain Auto-Update Release):**

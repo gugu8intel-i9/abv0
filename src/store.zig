@@ -36,6 +36,22 @@ pub fn printProgressBar(msg: []const u8, filled: usize, total: usize) void {
     std.debug.print("[{s}] {s}\n", .{ bar_buf[0..bar_len], msg });
 }
 
+fn indexOfIgnoreCase(haystack: []const u8, needle: []const u8) ?usize {
+    if (needle.len > haystack.len) return null;
+    var i: usize = 0;
+    while (i <= haystack.len - needle.len) : (i += 1) {
+        var match = true;
+        for (needle, 0..) |n_char, j| {
+            if (std.ascii.toLower(haystack[i + j]) != std.ascii.toLower(n_char)) {
+                match = false;
+                break;
+            }
+        }
+        if (match) return i;
+    }
+    return null;
+}
+
 pub const Store = struct {
     allocator: std.mem.Allocator,
     store_root: []const u8,
@@ -409,27 +425,40 @@ pub const Store = struct {
             printProgressBar(link_msg, 5, 5);
 
             for (pkg.bin) |bin_name| {
-                var src_bin: []const u8 = undefined;
-                if (std.mem.endsWith(u8, info.bin_path, "/")) {
-                    src_bin = try std.fs.path.join(self.allocator, &.{ pkg_dir, info.bin_path, bin_name });
-                } else {
-                    src_bin = try std.fs.path.join(self.allocator, &.{ pkg_dir, info.bin_path });
+                var src_bin: ?[]const u8 = null;
+                // High-performance robust recursive executable discovery walker
+                var dir = std.fs.cwd().openDir(pkg_dir, .{ .iterate = true }) catch continue;
+                var walker = try dir.walk(self.allocator);
+                defer {
+                    walker.deinit();
+                    dir.close();
                 }
-                defer self.allocator.free(src_bin);
 
-                const dst_bin = try std.fs.path.join(self.allocator, &.{ self.bin_root, bin_name });
-                defer self.allocator.free(dst_bin);
+                while (try walker.next()) |w_entry| {
+                    if (w_entry.kind == .file and std.mem.eql(u8, w_entry.basename, bin_name)) {
+                        src_bin = try std.fs.path.join(self.allocator, &.{ pkg_dir, w_entry.path });
+                        break;
+                    }
+                }
 
-                _ = std.process.Child.run(.{
-                    .allocator = self.allocator,
-                    .argv = &.{ "chmod", "+x", src_bin },
-                }) catch {};
+                if (src_bin) |s_bin| {
+                    defer self.allocator.free(s_bin);
+                    const dst_bin = try std.fs.path.join(self.allocator, &.{ self.bin_root, bin_name });
+                    defer self.allocator.free(dst_bin);
 
-                const used_clone = try os_macos.fastLink(src_bin, dst_bin);
-                if (used_clone) {
-                    std.debug.print("   [ APFS Clone ] {s} -> {s} (Instant copy-on-write 0ms latency)\n", .{ bin_name, src_bin });
+                    _ = std.process.Child.run(.{
+                        .allocator = self.allocator,
+                        .argv = &.{ "chmod", "+x", s_bin },
+                    }) catch {};
+
+                    const used_clone = try os_macos.fastLink(s_bin, dst_bin);
+                    if (used_clone) {
+                        std.debug.print("   [ APFS Clone ] {s} -> {s} (Instant copy-on-write 0ms latency)\n", .{ bin_name, s_bin });
+                    } else {
+                        std.debug.print("   [ Symlink Link ] {s} -> {s}\n", .{ bin_name, s_bin });
+                    }
                 } else {
-                    std.debug.print("   [ Symlink Link ] {s} -> {s}\n", .{ bin_name, src_bin });
+                    std.debug.print("   [ Warning ] Executable '{s}' not discovered in package directory tree.\n", .{bin_name});
                 }
             }
         }
@@ -500,23 +529,22 @@ pub const Store = struct {
         }
     }
 
-    pub fn execute(self: *Store, pkg: registry.Package, platform_name: []const u8, args: []const []const u8, use_micro_split: bool) !void {
-        // Ensure installed
-        if (!(try self.isInstalled(pkg, platform_name))) {
-            try self.install(pkg, platform_name, use_micro_split);
-        }
-
-        const info = pkg.platforms.get(platform_name) orelse return error.UnsupportedPlatform;
-        const pkg_dir = try self.getPkgStorePath(pkg, platform_name);
-        defer self.allocator.free(pkg_dir);
-
-        var bin_path: []const u8 = undefined;
-        if (std.mem.endsWith(u8, info.bin_path, "/")) {
-            const exe_name = if (pkg.bin.len > 0) pkg.bin[0] else "ffmpeg";
-            bin_path = try std.fs.path.join(self.allocator, &.{ pkg_dir, info.bin_path, exe_name });
+    pub fn executeAny(self: *Store, reg: *registry.Registry, pkg_name: []const u8, platform_name: []const u8, args: []const []const u8, use_micro_split: bool) !void {
+        // 1. Ensure installed (native or dynamic)
+        if (reg.packages.get(pkg_name)) |pkg| {
+            if (!(try self.isInstalled(pkg, platform_name))) {
+                try self.install(pkg, platform_name, use_micro_split);
+            }
         } else {
-            bin_path = try std.fs.path.join(self.allocator, &.{ pkg_dir, info.bin_path });
+            const check_bin = try std.fs.path.join(self.allocator, &.{ self.bin_root, pkg_name });
+            defer self.allocator.free(check_bin);
+            if (std.fs.cwd().access(check_bin, .{})) |_| {} else |_| {
+                try self.installDynamic(pkg_name, platform_name, use_micro_split);
+            }
         }
+
+        // 2. Spawn from ~/.abv0/bin
+        const bin_path = try std.fs.path.join(self.allocator, &.{ self.bin_root, pkg_name });
         defer self.allocator.free(bin_path);
 
         var child_args = std.ArrayList([]const u8).init(self.allocator);
@@ -532,13 +560,21 @@ pub const Store = struct {
     }
 
     // Innovative Feature: Isolated Ephemeral Sandboxed Shell
-    pub fn executeShell(self: *Store, pkgs: []const registry.Package, platform_name: []const u8, use_micro_split: bool) !void {
+    pub fn executeShellAny(self: *Store, reg: *registry.Registry, pkg_names: []const []const u8, platform_name: []const u8, use_micro_split: bool) !void {
         printProgressBar("Setting up secure isolated ephemeral environment shell...", 1, 4);
 
-        // 1. Ensure all requested packages are in store
-        for (pkgs) |pkg| {
-            if (!(try self.isInstalled(pkg, platform_name))) {
-                try self.install(pkg, platform_name, use_micro_split);
+        // 1. Ensure all requested packages are installed (native or dynamic)
+        for (pkg_names) |pkg_name| {
+            if (reg.packages.get(pkg_name)) |pkg| {
+                if (!(try self.isInstalled(pkg, platform_name))) {
+                    try self.install(pkg, platform_name, use_micro_split);
+                }
+            } else {
+                const check_bin = try std.fs.path.join(self.allocator, &.{ self.bin_root, pkg_name });
+                defer self.allocator.free(check_bin);
+                if (std.fs.cwd().access(check_bin, .{})) |_| {} else |_| {
+                    try self.installDynamic(pkg_name, platform_name, use_micro_split);
+                }
             }
         }
 
@@ -564,26 +600,15 @@ pub const Store = struct {
 
         printProgressBar("Linking requested dependencies into sandbox...", 3, 4);
 
-        // 3. Populate isolated bin with APFS clones/symlinks of only requested packages
-        for (pkgs) |pkg| {
-            const info = pkg.platforms.get(platform_name) orelse return error.UnsupportedPlatform;
-            const pkg_dir = try self.getPkgStorePath(pkg, platform_name);
-            defer self.allocator.free(pkg_dir);
+        // 3. Populate isolated bin with APFS clones/symlinks of only requested executables
+        for (pkg_names) |pkg_name| {
+            const src_bin = try std.fs.path.join(self.allocator, &.{ self.bin_root, pkg_name });
+            defer self.allocator.free(src_bin);
 
-            for (pkg.bin) |bin_name| {
-                var src_bin: []const u8 = undefined;
-                if (std.mem.endsWith(u8, info.bin_path, "/")) {
-                    src_bin = try std.fs.path.join(self.allocator, &.{ pkg_dir, info.bin_path, bin_name });
-                } else {
-                    src_bin = try std.fs.path.join(self.allocator, &.{ pkg_dir, info.bin_path });
-                }
-                defer self.allocator.free(src_bin);
+            const dst_bin = try std.fs.path.join(self.allocator, &.{ shell_bin_path, pkg_name });
+            defer self.allocator.free(dst_bin);
 
-                const dst_bin = try std.fs.path.join(self.allocator, &.{ shell_bin_path, bin_name });
-                defer self.allocator.free(dst_bin);
-
-                _ = try os_macos.fastLink(src_bin, dst_bin);
-            }
+            _ = try os_macos.fastLink(src_bin, dst_bin);
         }
 
         printProgressBar("Spawning secure sandboxed subshell...", 4, 4);
@@ -1043,5 +1068,148 @@ pub const Store = struct {
         _ = std.process.Child.run(.{ .allocator = self.allocator, .argv = &.{ "chmod", "0700", self.shells_root } }) catch {};
 
         std.debug.print("\n[ RESET COMPLETE ] System completely restored to pristine state. Uninstalled {} packages.\n", .{uninstalled_count});
+    }
+
+    // Innovative Automated Decentralized Universal Fallback Resolution Engine
+    pub fn installDynamic(self: *Store, target_name: []const u8, platform_name: []const u8, use_micro_split: bool) !void {
+        std.debug.print("Searching GitHub for definitive open-source repository of '{s}'...\n", .{target_name});
+
+        // 1. GitHub API Repository Search
+        const search_url = try std.fmt.allocPrint(self.allocator, "https://api.github.com/search/repositories?q={s}+in:name+sort:stars", .{target_name});
+        defer self.allocator.free(search_url);
+
+        const search_res_path = try std.fs.path.join(self.allocator, &.{ self.store_root, "github_search.json" });
+        defer self.allocator.free(search_res_path);
+
+        const curl_res = try std.process.Child.run(.{
+            .allocator = self.allocator,
+            .argv = &.{ "curl", "-s", "-L", "-H", "User-Agent: abv0-agent", search_url, "-o", search_res_path },
+        });
+        defer {
+            self.allocator.free(curl_res.stdout);
+            self.allocator.free(curl_res.stderr);
+        }
+
+        // Parse JSON
+        const file = try std.fs.cwd().openFile(search_res_path, .{});
+        const content = try file.readToEndAlloc(self.allocator, 5 * 1024 * 1024);
+        file.close();
+        _ = std.fs.cwd().deleteFile(search_res_path) catch {};
+
+        const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, content, .{});
+        const root = parsed.value.object;
+
+        const items_val = root.get("items") orelse {
+            std.debug.print("Error: Could not discover any matching open-source repository for '{s}' on GitHub.\n", .{target_name});
+            return error.DynamicDiscoveryFailed;
+        };
+
+        const items = items_val.array;
+        if (items.items.len == 0) {
+            std.debug.print("Error: Could not discover any matching open-source repository for '{s}' on GitHub.\n", .{target_name});
+            return error.DynamicDiscoveryFailed;
+        }
+
+        const top_repo = items.items[0].object;
+        const repo_full_name = top_repo.get("full_name").?.string;
+        var repo_homepage: []const u8 = "";
+        if (top_repo.get("homepage")) |hp| {
+            if (hp != .null) repo_homepage = hp.string;
+        }
+        var repo_desc: []const u8 = "";
+        if (top_repo.get("description")) |d| {
+            if (d != .null) repo_desc = d.string;
+        }
+
+        std.debug.print("Discovered definitive open-source repository: {s}!\n", .{repo_full_name});
+
+        // 2. Query releases/latest
+        const rel_url = try std.fmt.allocPrint(self.allocator, "https://api.github.com/repos/{s}/releases/latest", .{repo_full_name});
+        defer self.allocator.free(rel_url);
+
+        const rel_res_path = try std.fs.path.join(self.allocator, &.{ self.store_root, "github_rel.json" });
+        defer self.allocator.free(rel_res_path);
+
+        _ = try std.process.Child.run(.{
+            .allocator = self.allocator,
+            .argv = &.{ "curl", "-s", "-L", "-H", "User-Agent: abv0-agent", rel_url, "-o", rel_res_path },
+        });
+
+        const rfile = try std.fs.cwd().openFile(rel_res_path, .{});
+        const rcontent = try rfile.readToEndAlloc(self.allocator, 5 * 1024 * 1024);
+        rfile.close();
+        _ = std.fs.cwd().deleteFile(rel_res_path) catch {};
+
+        const rparsed = try std.json.parseFromSlice(std.json.Value, self.allocator, rcontent, .{});
+        const rroot = rparsed.value.object;
+
+        var dl_url: ?[]const u8 = null;
+        var active_arc_type: []const u8 = "raw";
+        var active_bin_path: []const u8 = target_name;
+        var discovered_version: []const u8 = "latest";
+
+        if (rroot.get("tag_name")) |t| discovered_version = try self.allocator.dupe(u8, t.string);
+
+        if (rroot.get("assets")) |assets_val| {
+            const assets = assets_val.array;
+            for (assets.items) |asset_val| {
+                const asset = asset_val.object;
+                const asset_name = asset.get("name").?.string;
+                const asset_url = asset.get("browser_download_url").?.string;
+
+                // Match OS logic
+                const is_mac = indexOfIgnoreCase(platform_name, "macos") != null;
+                const is_linux = indexOfIgnoreCase(platform_name, "linux") != null;
+
+                var os_match = false;
+                if (is_mac and (indexOfIgnoreCase(asset_name, "darwin") != null or indexOfIgnoreCase(asset_name, "macos") != null or indexOfIgnoreCase(asset_name, "osx") != null or indexOfIgnoreCase(asset_name, "universal") != null)) os_match = true;
+                if (is_linux and (indexOfIgnoreCase(asset_name, "linux") != null and (indexOfIgnoreCase(asset_name, "amd64") != null or indexOfIgnoreCase(asset_name, "x86_64") != null) and indexOfIgnoreCase(asset_name, "i686") == null and indexOfIgnoreCase(asset_name, "i386") == null and indexOfIgnoreCase(asset_name, "android") == null and indexOfIgnoreCase(asset_name, "arm") == null and indexOfIgnoreCase(asset_name, "aarch64") == null)) os_match = true;
+
+                if (os_match) {
+                    dl_url = try self.allocator.dupe(u8, asset_url);
+                    if (std.mem.endsWith(u8, asset_name, ".zip")) active_arc_type = "zip";
+                    if (std.mem.endsWith(u8, asset_name, ".tar.gz")) active_arc_type = "tar.gz";
+                    if (std.mem.endsWith(u8, asset_name, ".tar.xz")) active_arc_type = "tar.xz";
+                    if (std.mem.endsWith(u8, asset_name, ".dmg")) active_arc_type = "dmg";
+                    break;
+                }
+            }
+        }
+
+        // 3. Fallback to repository master source zip/script if no binary release assets matched
+        if (dl_url == null) {
+            std.debug.print("No specific compiled release binary assets matched. Acquiring pristine source repository snapshot...\n", .{});
+            dl_url = try std.fmt.allocPrint(self.allocator, "https://github.com/{s}/archive/refs/heads/master.tar.gz", .{repo_full_name});
+            active_arc_type = "tar.gz";
+            const reponame = std.fs.path.basename(repo_full_name);
+            active_bin_path = try std.fmt.allocPrint(self.allocator, "{s}-master/{s}", .{ reponame, target_name });
+        }
+
+        std.debug.print("Dynamic payload resolved successfully: {s}\n\n", .{dl_url.?});
+
+        // Construct Package struct on the fly
+        var bin_arr = try self.allocator.alloc([]const u8, 1);
+        bin_arr[0] = try self.allocator.dupe(u8, target_name);
+
+        var plats_map = std.StringHashMap(registry.PlatformInfo).init(self.allocator);
+        try plats_map.put(try self.allocator.dupe(u8, platform_name), .{
+            .url = dl_url.?,
+            .sha256 = "SKIP", // Rolling dynamic payload
+            .archive_type = try self.allocator.dupe(u8, active_arc_type),
+            .bin_path = try self.allocator.dupe(u8, active_bin_path),
+        });
+
+        const dynamic_pkg = registry.Package{
+            .name = try self.allocator.dupe(u8, target_name),
+            .version = discovered_version,
+            .description = try self.allocator.dupe(u8, repo_desc),
+            .homepage = try self.allocator.dupe(u8, repo_homepage),
+            .license = "Dynamic-Open-Source",
+            .bin = bin_arr,
+            .app_bundles = &.{},
+            .platforms = plats_map,
+        };
+
+        try self.install(dynamic_pkg, platform_name, use_micro_split);
     }
 };

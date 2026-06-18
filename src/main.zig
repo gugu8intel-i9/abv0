@@ -108,14 +108,22 @@ fn writePackageJson(pkg: registry.Package, writer: anytype) !void {
 // Thread helper struct for parallel installations
 const InstallWorker = struct {
     pkg_store: *store.Store,
-    pkg: registry.Package,
+    reg: *registry.Registry,
+    pkg_name: []const u8,
     platform: []const u8,
     use_micro_split: bool,
 
     pub fn execute(self: *InstallWorker) void {
-        self.pkg_store.install(self.pkg, self.platform, self.use_micro_split) catch |err| {
-            std.debug.print("Error installing {s}: {}\n", .{ self.pkg.name, err });
-        };
+        if (self.reg.packages.get(self.pkg_name)) |pkg| {
+            self.pkg_store.install(pkg, self.platform, self.use_micro_split) catch |err| {
+                std.debug.print("Error installing {s}: {}\n", .{ self.pkg_name, err });
+            };
+        } else {
+            std.debug.print("[ Dynamic Resolution ] Package '{s}' not found in static registry. Activating Universal Automated Fallback Discovery...\n", .{self.pkg_name});
+            self.pkg_store.installDynamic(self.pkg_name, self.platform, self.use_micro_split) catch |err| {
+                std.debug.print("Error dynamically resolving and installing {s}: {}\n", .{ self.pkg_name, err });
+            };
+        }
     }
 };
 
@@ -327,18 +335,15 @@ pub fn main() !void {
             return;
         }
 
-        // Innovative Feature: Parallel Batch Installations
+        // Innovative Feature: Parallel Batch Installations with Dynamic Decentralized Discovery Fallback
         var workers = std.ArrayList(InstallWorker).init(allocator);
         var threads = std.ArrayList(std.Thread).init(allocator);
 
         for (cmd_args.items) |pkg_name| {
-            const pkg = reg.packages.get(pkg_name) orelse {
-                std.debug.print("Error: Package '{s}' not found in registry. Skipping...\n", .{pkg_name});
-                continue;
-            };
             try workers.append(.{
                 .pkg_store = &pkg_store,
-                .pkg = pkg,
+                .reg = &reg,
+                .pkg_name = pkg_name,
                 .platform = platform,
                 .use_micro_split = use_micro_split,
             });
@@ -359,7 +364,7 @@ pub fn main() !void {
 
         const elapsed_ns = timer.read();
         const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
-        std.debug.print(ANSI_GREEN ++ ANSI_BOLD ++ "\n[ COMPLETED ] Successfully finished secure setup for {} packages in {d:.2}ms!\n" ++ ANSI_RESET, .{ workers.items.len, elapsed_ms });
+        std.debug.print(ANSI_GREEN ++ ANSI_BOLD ++ "\n[ COMPLETED ] Successfully finished setup for {} packages in {d:.2}ms!\n" ++ ANSI_RESET, .{ workers.items.len, elapsed_ms });
         std.debug.print("Note: Make sure to add {s} to your PATH!\n", .{pkg_store.bin_root});
     } else if (std.mem.eql(u8, cmd, "bundle")) {
         // Brewfile / Abvfile Orchestrator
@@ -415,17 +420,13 @@ pub fn main() !void {
             return;
         }
         const pkg_name = cmd_args.items[0];
-        const pkg = reg.packages.get(pkg_name) orelse {
-            std.debug.print("Error: Package '{s}' not found in registry.\n", .{pkg_name});
-            return;
-        };
 
         var actual_run_args = cmd_args.items[1..];
         if (actual_run_args.len > 0 and std.mem.eql(u8, actual_run_args[0], "--")) {
             actual_run_args = actual_run_args[1..];
         }
 
-        try pkg_store.execute(pkg, platform, actual_run_args, use_micro_split);
+        try pkg_store.executeAny(&reg, pkg_name, platform, actual_run_args, use_micro_split);
     } else if (std.mem.eql(u8, cmd, "shell")) {
         // Ephemeral Sandboxed Shell
         if (cmd_args.items.len == 0) {
@@ -433,16 +434,7 @@ pub fn main() !void {
             return;
         }
 
-        var req_pkgs = std.ArrayList(registry.Package).init(allocator);
-        for (cmd_args.items) |pkg_name| {
-            const pkg = reg.packages.get(pkg_name) orelse {
-                std.debug.print("Error: Package '{s}' not found in registry. Aborting shell creation.\n", .{pkg_name});
-                return;
-            };
-            try req_pkgs.append(pkg);
-        }
-
-        try pkg_store.executeShell(req_pkgs.items, platform, use_micro_split);
+        try pkg_store.executeShellAny(&reg, cmd_args.items, platform, use_micro_split);
     } else if (std.mem.eql(u8, cmd, "doctor")) {
         // Diagnostic Doctor
         try pkg_store.doctor(&reg, platform);
