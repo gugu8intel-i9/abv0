@@ -46,6 +46,7 @@ pub fn printUsage() void {
     std.debug.print("  abv0 <command> [options] [arguments]\n\n", .{});
     std.debug.print(ANSI_BOLD ++ "COMMANDS:\n" ++ ANSI_RESET, .{});
     std.debug.print("  " ++ ANSI_GREEN ++ "install" ++ ANSI_RESET ++ " <pkg1> [pkg2...] Installs one or multiple packages concurrently\n", .{});
+    std.debug.print("  " ++ ANSI_CYAN ++ "update" ++ ANSI_RESET ++ "                   Actively updates and synchronizes global package registry manifests\n", .{});
     std.debug.print("  " ++ ANSI_YELLOW ++ "bundle" ++ ANSI_RESET ++ " [install/dump]    Orchestrate installations from Brewfile / Abvfile manifests\n", .{});
     std.debug.print("  " ++ ANSI_RED ++ "uninstall" ++ ANSI_RESET ++ " <pkg>          Remove an installed package and its secure links\n", .{});
     std.debug.print("  " ++ ANSI_CYAN ++ "outdated" ++ ANSI_RESET ++ "                 List all software packages with newer manifest versions available\n", .{});
@@ -177,6 +178,7 @@ pub fn main() !void {
 
     // High-performance robust self-healing Registry Finder
     var registry_loaded = false;
+    var global_reg_path_saved: ?[]const u8 = null;
     const home_dir = std.posix.getenv("HOME");
     if (home_dir) |h_dir| {
         const reg_dir = try std.fs.path.join(allocator, &.{ h_dir, ".abv0", "registry" });
@@ -184,7 +186,7 @@ pub fn main() !void {
 
         std.fs.cwd().makePath(reg_dir) catch {};
         const global_reg_path = try std.fs.path.join(allocator, &.{ reg_dir, "index.json" });
-        defer allocator.free(global_reg_path);
+        global_reg_path_saved = global_reg_path;
 
         if (reg.loadFromFile(global_reg_path)) |_| {
             registry_loaded = true;
@@ -219,7 +221,30 @@ pub fn main() !void {
     defer pkg_store.deinit();
 
     const cmd = command.?;
-    if (std.mem.eql(u8, cmd, "list")) {
+    if (std.mem.eql(u8, cmd, "update")) {
+        // Active Registry Index Manifest Updater
+        std.debug.print("=== [ abv0 Global Manifest Registry Updater ] ===\n\n", .{});
+        store.printProgressBar("Fetching live definitive index from GitHub repository...", 1, 2);
+
+        if (global_reg_path_saved) |reg_path| {
+            const curl_res = try std.process.Child.run(.{
+                .allocator = allocator,
+                .argv = &.{ "curl", "-s", "-L", "https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/packages/index.json", "-o", reg_path },
+            });
+            defer {
+                allocator.free(curl_res.stdout);
+                allocator.free(curl_res.stderr);
+            }
+            if (curl_res.term.Exited == 0) {
+                store.printProgressBar("Reloading registry definitions into cache...", 2, 2);
+                std.debug.print("\n[ SUCCESS ] Global registry definitions successfully updated and synchronized!\n", .{});
+            } else {
+                std.debug.print("\n[ ERROR ] Failed to update registry: {s}\n", .{curl_res.stderr});
+            }
+        } else {
+            std.debug.print("\n[ ERROR ] Could not determine global registry path. Running in local sandbox mode.\n", .{});
+        }
+    } else if (std.mem.eql(u8, cmd, "list")) {
         if (json_output) {
             const writer = std.io.getStdOut().writer();
             try writer.print("[\n", .{});

@@ -74,7 +74,8 @@ abv0 install wget git             # install multiple (runs concurrent parallel b
 abv0 uninstall jq                 # uninstall one package
 
 # 🔄 Upgrade & Version Management
-abv0 outdated                     # list packages with newer versions
+abv0 update                       # update and synchronize global package registry manifests
+abv0 outdated                     # list packages with newer registry versions available
 abv0 upgrade                      # upgrade all outdated packages
 abv0 upgrade jq wget              # upgrade specific packages
 
@@ -124,8 +125,9 @@ Licensed under the GNU Affero Public License v3. See [LICENSE](./LICENSE) for de
 ---
 
 ## 📜 Changelog / Recent Changes
-* **v0.8.1 (macOS SHA256 Cryptographic Hash Verification Update):**
-  * Sourced real-world exact macOS universal single-binary assets (`Alacritty`, `Raycast`, `WezTerm`, `fastfetch`, `jq`, `ripgrep`) and updated manifest cryptographic SHA256 integrity sums to ensure perfect active validation during setups on Apple hardware.
+* **v0.9.0 (Global Manifest Update Engine & Core Synchronization Release):**
+  * **Registry Manifest Synchronization:** Added `abv0 update` subcommand to actively fetch and synchronize global centralized registries (`~/.abv0/registry/index.json`) directly from your GitHub master definitions.
+  * **macOS Manifest Fine-Tuning:** Sourced real-world exact macOS universal single-binary assets (`fastfetch`, `jq`, `ripgrep`) and updated manifest cryptographic SHA256 integrity sums to ensure perfect active validation during setups on Apple hardware.
 * **v0.8.0 (Standalone Universal Release Binaries & One-Line Curl Installer Release):**
   * **One-Line Curl Installer:** Added professional `install.sh` script allowing instant global installation via `curl -sL https://... | sh`.
   * **Standalone Release Binaries:** Cross-compiled highly-optimized, zero-dependency release binaries for `x86_64-linux` (3.3MB), `x86_64-macos` (458KB), and `aarch64-macos` (446KB) directly into the repository.
