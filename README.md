@@ -125,6 +125,8 @@ Licensed under the GNU Affero Public License v3. See [LICENSE](./LICENSE) for de
 ---
 
 ## 📜 Changelog / Recent Changes
+* **v0.9.2 (Neofetch Official Core Curation Release):**
+  * **Neofetch Support:** Added official manifest definitions and verified cryptographic SHA256 integrity checksums for `neofetch` v7.1.0 across Linux and macOS.
 * **v0.9.1 (Smart Rolling Release Hash Validation & Toolchain Auto-Update Release):**
   * **Dynamic Mismatch Bypass:** Re-engineered the cryptographic SHA256 integrity verification engine to intelligently accept rolling or daily rolling release assets (like `BtbN/FFmpeg-Builds`) under dynamic validation, completely eliminating false positive uninstallation errors.
   * **Toolchain Auto-Updater:** Upgraded `abv0 update` to automatically pull down and execute the definitive `install.sh` one-liner, upgrading your Mac's active `abv0` application and global package registries instantly.
