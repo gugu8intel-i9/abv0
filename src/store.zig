@@ -52,7 +52,7 @@ pub const Store = struct {
 
     pub fn install(self: *Store, pkg: registry.Package, platform_name: []const u8) !void {
         const info = pkg.platforms.get(platform_name) orelse {
-            std.debug.print("❌ Error: Platform '{s}' is not supported for package '{s}'.\n", .{ platform_name, pkg.name });
+            std.debug.print("Error: Platform '{s}' is not supported for package '{s}'.\n", .{ platform_name, pkg.name });
             return error.UnsupportedPlatform;
         };
 
@@ -61,10 +61,10 @@ pub const Store = struct {
 
         // Check if already in store
         if (try self.isInstalled(pkg, platform_name)) {
-            std.debug.print("⚡ Core package already in cache store ({s})\n", .{pkg_dir});
+            std.debug.print("Core package already in cache store ({s})\n", .{pkg_dir});
         } else {
-            std.debug.print("⬇️  Downloading {s} v{s} for {s}...\n", .{ pkg.name, pkg.version, platform_name });
-            std.debug.print("🌐 URL: {s}\n", .{info.url});
+            std.debug.print("Downloading {s} v{s} for {s}...\n", .{ pkg.name, pkg.version, platform_name });
+            std.debug.print("URL: {s}\n", .{info.url});
 
             // Create temporary work dir
             const tmp_dir_path = try std.fmt.allocPrint(self.allocator, "{s}.tmp", .{pkg_dir});
@@ -86,12 +86,12 @@ pub const Store = struct {
                 self.allocator.free(curl_result.stderr);
             }
             if (curl_result.term.Exited != 0) {
-                std.debug.print("❌ Download failed: {s}\n", .{curl_result.stderr});
+                std.debug.print("Download failed: {s}\n", .{curl_result.stderr});
                 return error.DownloadFailed;
             }
 
             // Verify SHA256 checksum
-            std.debug.print("🛡️  Verifying SHA256 integrity...\n", .{});
+            std.debug.print("Verifying SHA256 integrity...\n", .{});
             const file = try std.fs.cwd().openFile(archive_path, .{});
             var hasher = std.crypto.hash.sha2.Sha256.init(.{});
             var buf: [65536]u8 = undefined;
@@ -109,13 +109,13 @@ pub const Store = struct {
             defer self.allocator.free(computed_hash);
 
             if (!std.mem.eql(u8, computed_hash, info.sha256)) {
-                std.debug.print("❌ Checksum mismatch!\nExpected: {s}\nComputed: {s}\n", .{ info.sha256, computed_hash });
+                std.debug.print("Checksum mismatch!\nExpected: {s}\nComputed: {s}\n", .{ info.sha256, computed_hash });
                 return error.ChecksumMismatch;
             }
-            std.debug.print("✅ SHA256 checksum verified!\n", .{});
+            std.debug.print("SHA256 checksum verified!\n", .{});
 
             // Unpack archive
-            std.debug.print("📦 Unpacking ({s})...\n", .{info.archive_type});
+            std.debug.print("Unpacking ({s})...\n", .{info.archive_type});
             if (std.mem.eql(u8, info.archive_type, "tar.gz") or std.mem.eql(u8, info.archive_type, "tar.xz")) {
                 const tar_res = try std.process.Child.run(.{
                     .allocator = self.allocator,
@@ -166,7 +166,7 @@ pub const Store = struct {
         }
 
         // Fast link binaries to ~/.abv0/bin
-        std.debug.print("🔗 Linking executables into {s}...\n", .{self.bin_root});
+        std.debug.print("Linking executables into {s}...\n", .{self.bin_root});
         for (pkg.bin) |bin_name| {
             const src_bin = try std.fs.path.join(self.allocator, &.{ pkg_dir, info.bin_path });
             defer self.allocator.free(src_bin);
@@ -182,9 +182,9 @@ pub const Store = struct {
 
             const used_clone = try os_macos.fastLink(src_bin, dst_bin);
             if (used_clone) {
-                std.debug.print("   🚀 {s} -> {s} (Instant APFS Clone! 0ms latency)\n", .{ bin_name, src_bin });
+                std.debug.print("   {s} -> {s} (Instant APFS Clone! 0ms latency)\n", .{ bin_name, src_bin });
             } else {
-                std.debug.print("   ⚡ {s} -> {s} (Symlink link)\n", .{ bin_name, src_bin });
+                std.debug.print("   {s} -> {s} (Symlink link)\n", .{ bin_name, src_bin });
             }
         }
     }
@@ -198,7 +198,7 @@ pub const Store = struct {
             defer self.allocator.free(dst_bin);
 
             if (std.fs.cwd().deleteFile(dst_bin)) |_| {
-                std.debug.print("🗑️  Unlinked binary {s}\n", .{dst_bin});
+                std.debug.print("Unlinked binary {s}\n", .{dst_bin});
             } else |_| {}
         }
 
@@ -210,13 +210,13 @@ pub const Store = struct {
             defer self.allocator.free(pkg_dir);
 
             if (std.fs.cwd().deleteTree(pkg_dir)) |_| {
-                std.debug.print("🗑️  Removed package cache {s}\n", .{pkg_dir});
+                std.debug.print("Removed package cache {s}\n", .{pkg_dir});
                 uninstalled_any = true;
             } else |_| {}
         }
 
         if (!uninstalled_any) {
-            std.debug.print("⚠️  Package '{s}' was not installed.\n", .{pkg.name});
+            std.debug.print("Note: Package '{s}' was not installed.\n", .{pkg.name});
         }
     }
 

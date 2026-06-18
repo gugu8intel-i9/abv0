@@ -1,9 +1,9 @@
-# ⚡ abv0
+# abv0
 **A faster, high-performance, and lightweight Homebrew alternative built in pure Zig.**
 
 ---
 
-## 🚀 The Vision & Innovation
+## The Vision & Innovation
 Traditional package managers like Homebrew rely on heavy interpreted runtimes (Ruby), deeply recursive formula evaluation, and massive symlink farms in `/usr/local` or `/opt/homebrew`. Just booting the Ruby interpreter and resolving basic formula dependencies frequently takes 200–500ms before any real work even begins.
 
 **`abv0` re-architects macOS package management from the ground up:**
@@ -15,7 +15,7 @@ Traditional package managers like Homebrew rely on heavy interpreted runtimes (R
 
 ---
 
-## 🛠️ Installation & Getting Started
+## Installation & Getting Started
 
 ### 1. Build from Source
 Make sure you have [Zig 0.13.0+](https://ziglang.org/) installed:
@@ -37,38 +37,38 @@ export PATH="$HOME/.abv0/bin:$PATH"
 
 ---
 
-## ⚡ Command Line Interface
+## Command Line Interface
 
 ```bash
-# ℹ️ Display detailed help & documentation
+# Display detailed help & documentation
 abv0 help
 
-# 🔍 Search the ultra-fast registry for packages
+# Search the ultra-fast registry for packages
 abv0 search <query>
 # Example: abv0 search json
 
-# ℹ️ Inspect package metadata, dependencies, and SHA256 integrity sums
+# Inspect package metadata, dependencies, and SHA256 integrity sums
 abv0 info <package>
 # Example: abv0 info ripgrep
 
-# 📦 List all available official packages
+# List all available official packages
 abv0 list
 
-# ⚡ Install and instantly link a package (APFS microsecond clone)
+# Install and instantly link a package (APFS microsecond clone)
 abv0 install <package>
 # Example: abv0 install jq
 
-# 🗑️ Remove an installed package and clean its links
+# Remove an installed package and clean its links
 abv0 uninstall <package>
 
-# 🚀 Instantly execute a binary (auto-downloads in a flash if missing)
+# Instantly execute a binary (auto-downloads in a flash if missing)
 abv0 run <package> [-- <args...>]
 # Example: abv0 run jq -- -n '100 * 5'
 ```
 
 ---
 
-## 🌐 Advanced Multi-Architecture Support
+## Advanced Multi-Architecture Support
 By default, `abv0` detects your current Operating System and CPU Architecture. 
 
 However, you can override the target platform on any command—allowing Apple Silicon Macs to run Intel tools under Rosetta 2, or cross-testing Linux dependencies:
@@ -86,12 +86,14 @@ abv0 install jq --platform x86_64-linux
 
 ---
 
-## 🛡️ License
+## License
 Licensed under the GNU Affero Public License v3. See [LICENSE](./LICENSE) for details.
 
 ---
 
-## 📜 Changelog / Recent Changes
+## Changelog / Recent Changes
+* **v0.1.1 (Clean Professional Update):**
+  * Removed all emojis from source code, CLI output messages, and documentation for a clean, minimalist, professional terminal aesthetic.
 * **v0.1.0 (Foundation Release):**
   * Built foundational high-performance macOS package manager in pure Zig.
   * Implemented zero-latency `index.json` registry parsing and sub-10ms package setup guarantees.

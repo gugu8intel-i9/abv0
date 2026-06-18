@@ -110,7 +110,7 @@ pub fn main() !void {
     // In a real deployment, index.json might be installed in /opt/abv0/index.json or ~/.abv0/registry.json
     // For development and testing, we find it relative to current working directory or executable
     reg.loadFromFile("packages/index.json") catch |err| {
-        std.debug.print("❌ Failed to load package registry: {}\n", .{err});
+        std.debug.print("Error: Failed to load package registry: {}\n", .{err});
         return;
     };
 
@@ -119,7 +119,7 @@ pub fn main() !void {
 
     const cmd = command.?;
     if (std.mem.eql(u8, cmd, "list")) {
-        std.debug.print(ANSI_CYAN ++ ANSI_BOLD ++ "📦 Available Packages in abv0 Registry:\n\n" ++ ANSI_RESET, .{});
+        std.debug.print(ANSI_CYAN ++ ANSI_BOLD ++ "Available Packages in abv0 Registry:\n\n" ++ ANSI_RESET, .{});
         var it = reg.packages.iterator();
         while (it.next()) |entry| {
             const pkg = entry.value_ptr.*;
@@ -127,11 +127,11 @@ pub fn main() !void {
         }
     } else if (std.mem.eql(u8, cmd, "search")) {
         if (target_pkg == null) {
-            std.debug.print("❌ Please provide a search query. Example: abv0 search json\n", .{});
+            std.debug.print("Error: Please provide a search query. Example: abv0 search json\n", .{});
             return;
         }
         const query = target_pkg.?;
-        std.debug.print(ANSI_CYAN ++ ANSI_BOLD ++ "🔍 Search results for '{s}':\n\n" ++ ANSI_RESET, .{query});
+        std.debug.print(ANSI_CYAN ++ ANSI_BOLD ++ "Search results for '{s}':\n\n" ++ ANSI_RESET, .{query});
 
         var found = false;
         var it = reg.packages.iterator();
@@ -150,16 +150,16 @@ pub fn main() !void {
         }
     } else if (std.mem.eql(u8, cmd, "info")) {
         if (target_pkg == null) {
-            std.debug.print("❌ Please provide a package name. Example: abv0 info jq\n", .{});
+            std.debug.print("Error: Please provide a package name. Example: abv0 info jq\n", .{});
             return;
         }
         const pkg_name = target_pkg.?;
         const pkg = reg.packages.get(pkg_name) orelse {
-            std.debug.print("❌ Package '{s}' not found in registry.\n", .{pkg_name});
+            std.debug.print("Error: Package '{s}' not found in registry.\n", .{pkg_name});
             return;
         };
 
-        std.debug.print(ANSI_CYAN ++ ANSI_BOLD ++ "ℹ️  Information for {s}:\n" ++ ANSI_RESET, .{pkg.name});
+        std.debug.print(ANSI_CYAN ++ ANSI_BOLD ++ "Information for {s}:\n" ++ ANSI_RESET, .{pkg.name});
         std.debug.print("  " ++ ANSI_BOLD ++ "Version:" ++ ANSI_RESET ++ "     {s}\n", .{pkg.version});
         std.debug.print("  " ++ ANSI_BOLD ++ "Description:" ++ ANSI_RESET ++ " {s}\n", .{pkg.description});
         std.debug.print("  " ++ ANSI_BOLD ++ "Homepage:" ++ ANSI_RESET ++ "    {s}\n", .{pkg.homepage});
@@ -181,12 +181,12 @@ pub fn main() !void {
         }
     } else if (std.mem.eql(u8, cmd, "install")) {
         if (target_pkg == null) {
-            std.debug.print("❌ Please provide a package name. Example: abv0 install jq\n", .{});
+            std.debug.print("Error: Please provide a package name. Example: abv0 install jq\n", .{});
             return;
         }
         const pkg_name = target_pkg.?;
         const pkg = reg.packages.get(pkg_name) orelse {
-            std.debug.print("❌ Package '{s}' not found in registry.\n", .{pkg_name});
+            std.debug.print("Error: Package '{s}' not found in registry.\n", .{pkg_name});
             return;
         };
 
@@ -194,31 +194,31 @@ pub fn main() !void {
 
         const elapsed_ns = timer.read();
         const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
-        std.debug.print(ANSI_GREEN ++ ANSI_BOLD ++ "\n✨ Successfully setup {s} v{s} in {d:.2}ms!\n" ++ ANSI_RESET, .{ pkg.name, pkg.version, elapsed_ms });
-        std.debug.print("💡 Make sure to add {s} to your PATH!\n", .{pkg_store.bin_root});
+        std.debug.print(ANSI_GREEN ++ ANSI_BOLD ++ "\nSuccessfully setup {s} v{s} in {d:.2}ms!\n" ++ ANSI_RESET, .{ pkg.name, pkg.version, elapsed_ms });
+        std.debug.print("Note: Make sure to add {s} to your PATH!\n", .{pkg_store.bin_root});
     } else if (std.mem.eql(u8, cmd, "uninstall")) {
         if (target_pkg == null) {
-            std.debug.print("❌ Please provide a package name. Example: abv0 uninstall jq\n", .{});
+            std.debug.print("Error: Please provide a package name. Example: abv0 uninstall jq\n", .{});
             return;
         }
         const pkg_name = target_pkg.?;
         const pkg = reg.packages.get(pkg_name) orelse {
-            std.debug.print("❌ Package '{s}' not found in registry.\n", .{pkg_name});
+            std.debug.print("Error: Package '{s}' not found in registry.\n", .{pkg_name});
             return;
         };
 
         try pkg_store.uninstall(pkg);
         const elapsed_ns = timer.read();
         const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
-        std.debug.print(ANSI_GREEN ++ ANSI_BOLD ++ "\n✨ Uninstalled {s} in {d:.2}ms!\n" ++ ANSI_RESET, .{ pkg.name, elapsed_ms });
+        std.debug.print(ANSI_GREEN ++ ANSI_BOLD ++ "\nSuccessfully uninstalled {s} in {d:.2}ms!\n" ++ ANSI_RESET, .{ pkg.name, elapsed_ms });
     } else if (std.mem.eql(u8, cmd, "run")) {
         if (target_pkg == null) {
-            std.debug.print("❌ Please provide a package name to run. Example: abv0 run jq -- --version\n", .{});
+            std.debug.print("Error: Please provide a package name to run. Example: abv0 run jq -- --version\n", .{});
             return;
         }
         const pkg_name = target_pkg.?;
         const pkg = reg.packages.get(pkg_name) orelse {
-            std.debug.print("❌ Package '{s}' not found in registry.\n", .{pkg_name});
+            std.debug.print("Error: Package '{s}' not found in registry.\n", .{pkg_name});
             return;
         };
 
@@ -229,7 +229,7 @@ pub fn main() !void {
 
         try pkg_store.execute(pkg, platform, actual_run_args);
     } else {
-        std.debug.print("❌ Unknown command: {s}\n\n", .{cmd});
+        std.debug.print("Error: Unknown command: {s}\n\n", .{cmd});
         printUsage();
     }
 }
