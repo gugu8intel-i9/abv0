@@ -36,6 +36,16 @@ A real-world comparison installing **FFmpeg** (a complex multimedia suite with 3
 
 ---
 
+## 🏛️ Next-Generation Registry Architecture Roadmap
+As `abv0` scales to support thousands of official packages, we are actively evaluating next-generation decentralized and ultra-high-performance registry alternatives to replace single-file JSON streaming:
+
+1. **Dedicated Git Repository Registry (Homebrew / Cargo Style):** Maintaining an independent structured Git repository (`~/.abv0/registry`) where `abv0 update` executes an instant `git pull --rebase`. This provides complete offline history delta compression and zero CDN caching lag.
+2. **Zero-Copy Memory-Mapped Flat Custom Index (`.abv` Database):** A compiled flat binary database loaded into memory via OS `mmap()`. This completely eliminates parsing overhead, providing **0µs zero-allocation package lookups**.
+3. **Embedded Hybrid SQLite Single Store (`registry.db`):** Utilizing Apple and Linux native SQLite bindings to run microsecond relational queries, advanced dependency graphs, and multi-constraint search algorithms instantly.
+4. **Decentralized Flat CDN API Reconciler:** Shifting each software formula to independent flat immutable manifest URLs (`manifests/<pkg>.json`) to maximize CDN hit ratios and allow infinite concurrency during resolution.
+
+---
+
 ## 🛠️ Installation & Getting Started
 
 ### 1. Ultra-Fast One-Line Installer (Recommended)
@@ -126,6 +136,8 @@ Licensed under the GNU Affero Public License v3. See [LICENSE](./LICENSE) for de
 ---
 
 ## 📜 Changelog / Recent Changes
+* **v0.9.5 (Registry Architecture Roadmap & Roadmap Documentation Release):**
+  * **Registry Roadmap:** Authored comprehensive architectural roadmap comparing dedicated Git repository manifest structures, Memory-Mapped zero-copy flat binary stores (`.abv`), and embedded SQLite storage solutions.
 * **v0.9.4 (Universal Build-From-Source Automated Compiler Engine Release):**
   * **Automated Source Auto-Compilation:** Built a powerful compilation reconciler into the setup pipeline. When a specific software package has no pre-compiled binary release assets available on GitHub (like `btop` on macOS), `abv0` downloads the source repository snapshot, actively discovers the required build toolchain (`make`, `cmake`, `cargo build --release`, `go build`), actively compiles the application from source entirely on the fly, discovers the newly compiled executables, and APFS-clones/links them into your execution path!
 * **v0.9.3 (Automated Decentralized Dynamic Fallback Resolution Engine Release):**
