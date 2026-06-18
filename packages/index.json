@@ -123,19 +123,19 @@
       "bin": ["malware_sample.sh"],
       "platforms": {
         "x86_64-linux": {
-          "url": "https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/packages/malware_sample.sh",
+          "url": "https://raw.githubusercontent.com/gugu8intel-i9/abv0/1a84e05/packages/malware_sample.sh",
           "sha256": "c2f6fdf60594739e6167a4cd7874c9b6e43440ee145ae66ab6096cf7ab231737",
           "archive_type": "raw",
           "bin_path": "malware_sample.sh"
         },
         "x86_64-macos": {
-          "url": "https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/packages/malware_sample.sh",
+          "url": "https://raw.githubusercontent.com/gugu8intel-i9/abv0/1a84e05/packages/malware_sample.sh",
           "sha256": "c2f6fdf60594739e6167a4cd7874c9b6e43440ee145ae66ab6096cf7ab231737",
           "archive_type": "raw",
           "bin_path": "malware_sample.sh"
         },
         "aarch64-macos": {
-          "url": "https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/packages/malware_sample.sh",
+          "url": "https://raw.githubusercontent.com/gugu8intel-i9/abv0/1a84e05/packages/malware_sample.sh",
           "sha256": "c2f6fdf60594739e6167a4cd7874c9b6e43440ee145ae66ab6096cf7ab231737",
           "archive_type": "raw",
           "bin_path": "malware_sample.sh"
