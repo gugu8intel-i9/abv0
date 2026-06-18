@@ -9,16 +9,17 @@
       "homepage": "https://jqlang.github.io/jq/",
       "license": "MIT",
       "bin": ["jq"],
+      "app_bundles": [],
       "platforms": {
         "x86_64-macos": {
-          "url": "https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-macos-universal",
-          "sha256": "43c0d832d2011b6f0e4d7756f34e6de7ad709b11ae882f09ccb3687fa13c3230",
+          "url": "https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-macos-amd64",
+          "sha256": "4155822bbf5ea90f5c79cf254665975eb4274d426d0709770c21774de5407443",
           "archive_type": "raw",
           "bin_path": "jq"
         },
         "aarch64-macos": {
-          "url": "https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-macos-universal",
-          "sha256": "43c0d832d2011b6f0e4d7756f34e6de7ad709b11ae882f09ccb3687fa13c3230",
+          "url": "https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-macos-arm64",
+          "sha256": "0bbe619e663e0de2c550be2fe0d240d076799d6f8a652b70fa04aea8a8362e8a",
           "archive_type": "raw",
           "bin_path": "jq"
         },
@@ -37,16 +38,17 @@
       "homepage": "https://github.com/BurntSushi/ripgrep",
       "license": "Unlicense/MIT",
       "bin": ["rg"],
+      "app_bundles": [],
       "platforms": {
         "x86_64-macos": {
           "url": "https://github.com/BurntSushi/ripgrep/releases/download/14.1.0/ripgrep-14.1.0-x86_64-apple-darwin.tar.gz",
-          "sha256": "4722f462ffab1810ff4aeb40fa1871a25abfd919ff7edddf717f90c10972412b",
+          "sha256": "4d882fc945e5a9b6080a5c0506f7fe4aaea191c1865355428dd4bfa096f974b5",
           "archive_type": "tar.gz",
           "bin_path": "ripgrep-14.1.0-x86_64-apple-darwin/rg"
         },
         "aarch64-macos": {
           "url": "https://github.com/BurntSushi/ripgrep/releases/download/14.1.0/ripgrep-14.1.0-aarch64-apple-darwin.tar.gz",
-          "sha256": "cb6641e17df2fe680ea13d091e0a8ad13d49f6920fbb722fec9bdcf56e6dcfcf",
+          "sha256": "fc59ca3eaa5b5bcfa1488eeb80291bad0e8e2842e05d4400fc7b29d5ee4bd26b",
           "archive_type": "tar.gz",
           "bin_path": "ripgrep-14.1.0-aarch64-apple-darwin/rg"
         },
@@ -65,6 +67,7 @@
       "homepage": "https://github.com/sharkdp/bat",
       "license": "MIT/Apache-2.0",
       "bin": ["bat"],
+      "app_bundles": [],
       "platforms": {
         "x86_64-macos": {
           "url": "https://github.com/sharkdp/bat/releases/download/v0.24.0/bat-v0.24.0-x86_64-apple-darwin.tar.gz",
@@ -93,16 +96,17 @@
       "homepage": "https://github.com/fastfetch-cli/fastfetch",
       "license": "MIT",
       "bin": ["fastfetch"],
+      "app_bundles": [],
       "platforms": {
         "x86_64-macos": {
           "url": "https://github.com/fastfetch-cli/fastfetch/releases/download/2.15.0/fastfetch-macos-universal.zip",
-          "sha256": "f62bbf61e3860bbdd5c65ee1a4cf1cb72de0057ea7f7d1420a32fb6dce621bf3",
+          "sha256": "98745c5c1cf3acc4eccfb127c24ce79b96cafc31e24723cf7e5aed2c6f9cbe38",
           "archive_type": "zip",
           "bin_path": "fastfetch-macos-universal/usr/bin/fastfetch"
         },
         "aarch64-macos": {
           "url": "https://github.com/fastfetch-cli/fastfetch/releases/download/2.15.0/fastfetch-macos-universal.zip",
-          "sha256": "f62bbf61e3860bbdd5c65ee1a4cf1cb72de0057ea7f7d1420a32fb6dce621bf3",
+          "sha256": "98745c5c1cf3acc4eccfb127c24ce79b96cafc31e24723cf7e5aed2c6f9cbe38",
           "archive_type": "zip",
           "bin_path": "fastfetch-macos-universal/usr/bin/fastfetch"
         },
@@ -266,6 +270,7 @@
       "homepage": "https://ziglang.org/",
       "license": "MIT",
       "bin": ["zig"],
+      "app_bundles": [],
       "platforms": {
         "x86_64-macos": {
           "url": "https://ziglang.org/download/0.13.0/zig-macos-x86_64-0.13.0.tar.xz",
