@@ -41,22 +41,23 @@ fn indexOfIgnoreCase(haystack: []const u8, needle: []const u8) ?usize {
 }
 
 pub fn printUsage() void {
-    std.debug.print(ANSI_CYAN ++ ANSI_BOLD ++ "abv0" ++ ANSI_RESET ++ " - The Faster, Innovative Homebrew Alternative built in Zig\n\n", .{});
+    std.debug.print(ANSI_CYAN ++ ANSI_BOLD ++ "abv0" ++ ANSI_RESET ++ " - The Faster, Secure, Innovative Homebrew Alternative built in pure Zig\n\n", .{});
     std.debug.print(ANSI_BOLD ++ "USAGE:\n" ++ ANSI_RESET, .{});
     std.debug.print("  abv0 <command> [options] [arguments]\n\n", .{});
     std.debug.print(ANSI_BOLD ++ "COMMANDS:\n" ++ ANSI_RESET, .{});
-    std.debug.print("  " ++ ANSI_GREEN ++ "install" ++ ANSI_RESET ++ " <pkg1> [pkg2...] Installs and instantly APFS-links packages (Supports parallel batching)\n", .{});
-    std.debug.print("  " ++ ANSI_RED ++ "uninstall" ++ ANSI_RESET ++ " <pkg>          Remove an installed package and its links\n", .{});
+    std.debug.print("  " ++ ANSI_GREEN ++ "install" ++ ANSI_RESET ++ " <pkg1> [pkg2...] Installs and instantly APFS-links packages (Supports concurrent batching)\n", .{});
+    std.debug.print("  " ++ ANSI_RED ++ "uninstall" ++ ANSI_RESET ++ " <pkg>          Remove an installed package and its secure links\n", .{});
     std.debug.print("  " ++ ANSI_YELLOW ++ "run" ++ ANSI_RESET ++ " <pkg> [args...]       Run a package executable instantly (auto-installs if missing)\n", .{});
-    std.debug.print("  " ++ ANSI_MAGENTA ++ "shell" ++ ANSI_RESET ++ " <pkg1> [pkg2...]     Innovative Sandboxed Shell: Spawn a temporary subshell with only requested packages\n", .{});
-    std.debug.print("  " ++ ANSI_GREEN ++ "doctor" ++ ANSI_RESET ++ "                  Innovative Self-Healing Check: Instantly verifies and self-heals broken execution links\n", .{});
-    std.debug.print("  " ++ ANSI_YELLOW ++ "gc" ++ ANSI_RESET ++ "                      Instant Garbage Collector: Prunes abandoned temporary downloads and abandoned shells\n", .{});
+    std.debug.print("  " ++ ANSI_MAGENTA ++ "shell" ++ ANSI_RESET ++ " <pkg1> [pkg2...]     Innovative Sandboxed Shell: Spawn an ephemeral subshell with specific packages\n", .{});
+    std.debug.print("  " ++ ANSI_GREEN ++ "doctor" ++ ANSI_RESET ++ "                  Innovative Self-Healing Check: Securely verifies and self-heals broken execution links\n", .{});
+    std.debug.print("  " ++ ANSI_YELLOW ++ "gc" ++ ANSI_RESET ++ "                      Instant Garbage Collector: Prunes abandoned secure temp downloads and shells\n", .{});
     std.debug.print("  " ++ ANSI_MAGENTA ++ "search" ++ ANSI_RESET ++ " <query>           Search the lightning-fast abv0 registry\n", .{});
-    std.debug.print("  " ++ ANSI_CYAN ++ "list" ++ ANSI_RESET ++ "                     List all packages available in the registry\n", .{});
-    std.debug.print("  " ++ ANSI_GREEN ++ "info" ++ ANSI_RESET ++ " <pkg>                Show detailed package metadata and binary hashes\n\n", .{});
+    std.debug.print("  " ++ ANSI_CYAN ++ "list" ++ ANSI_RESET ++ "                     List all packages available in the secure registry\n", .{});
+    std.debug.print("  " ++ ANSI_GREEN ++ "info" ++ ANSI_RESET ++ " <pkg>                Show detailed package metadata and binary integrity hashes\n\n", .{});
     std.debug.print(ANSI_BOLD ++ "OPTIONS:\n" ++ ANSI_RESET, .{});
+    std.debug.print("  --micro-split            Enable high-performance range-split multi-chunk download mode\n", .{});
     std.debug.print("  --platform <name>        Override target platform (e.g. x86_64-macos, aarch64-macos, x86_64-linux)\n", .{});
-    std.debug.print("  --json                   Enable structured JSON output (supported on list, info)\n", .{});
+    std.debug.print("  --json                   Enable structured JSON machine-readable output (supported on list, info)\n", .{});
     std.debug.print("  --help, -h               Display this help message\n\n", .{});
     std.debug.print(ANSI_BOLD ++ "MAC-SPECIFIC INNOVATION:\n" ++ ANSI_RESET, .{});
     std.debug.print("  On macOS, abv0 bypasses traditional, fragile symlinking and file copying by invoking\n", .{});
@@ -100,9 +101,10 @@ const InstallWorker = struct {
     pkg_store: *store.Store,
     pkg: registry.Package,
     platform: []const u8,
+    use_micro_split: bool,
 
     pub fn execute(self: *InstallWorker) void {
-        self.pkg_store.install(self.pkg, self.platform) catch |err| {
+        self.pkg_store.install(self.pkg, self.platform, self.use_micro_split) catch |err| {
             std.debug.print("Error installing {s}: {}\n", .{ self.pkg.name, err });
         };
     }
@@ -125,6 +127,7 @@ pub fn main() !void {
     var command: ?[]const u8 = null;
     var override_platform: ?[]const u8 = null;
     var json_output = false;
+    var use_micro_split = false;
     var cmd_args = std.ArrayList([]const u8).init(allocator);
 
     while (args_it.next()) |arg| {
@@ -133,6 +136,8 @@ pub fn main() !void {
             return;
         } else if (std.mem.eql(u8, arg, "--json")) {
             json_output = true;
+        } else if (std.mem.eql(u8, arg, "--micro-split")) {
+            use_micro_split = true;
         } else if (std.mem.eql(u8, arg, "--platform")) {
             override_platform = args_it.next();
         } else if (command == null) {
@@ -178,7 +183,7 @@ pub fn main() !void {
             }
             try writer.print("\n]\n", .{});
         } else {
-            std.debug.print(ANSI_CYAN ++ ANSI_BOLD ++ "Available Packages in abv0 Registry:\n\n" ++ ANSI_RESET, .{});
+            std.debug.print(ANSI_CYAN ++ ANSI_BOLD ++ "Available Packages in secure abv0 Registry:\n\n" ++ ANSI_RESET, .{});
             var it = reg.packages.iterator();
             while (it.next()) |entry| {
                 const pkg = entry.value_ptr.*;
@@ -233,7 +238,7 @@ pub fn main() !void {
             for (pkg.bin) |b| {
                 std.debug.print("{s} ", .{b});
             }
-            std.debug.print("\n\n  " ++ ANSI_BOLD ++ "Supported Platforms & SHA256 Hashes:\n" ++ ANSI_RESET, .{});
+            std.debug.print("\n\n  " ++ ANSI_BOLD ++ "Supported Platforms & SHA256 Cryptographic Hashes:\n" ++ ANSI_RESET, .{});
 
             var plat_it = pkg.platforms.iterator();
             while (plat_it.next()) |plat_entry| {
@@ -264,25 +269,26 @@ pub fn main() !void {
                 .pkg_store = &pkg_store,
                 .pkg = pkg,
                 .platform = platform,
+                .use_micro_split = use_micro_split,
             });
         }
 
-        std.debug.print("Starting high-performance setup for {} packages...\n", .{workers.items.len});
+        std.debug.print("[ ⠋ ] Starting high-performance secure setup for {} packages...\n", .{workers.items.len});
 
-        // Spawn parallel execution threads
+        // Launch parallel worker execution threads
         for (workers.items) |*worker| {
             const thread = try std.Thread.spawn(.{}, InstallWorker.execute, .{worker});
             try threads.append(thread);
         }
 
-        // Wait for all worker threads to complete perfectly
+        // Join all worker threads safely
         for (threads.items) |thread| {
             thread.join();
         }
 
         const elapsed_ns = timer.read();
         const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
-        std.debug.print(ANSI_GREEN ++ ANSI_BOLD ++ "\nSuccessfully installed {} packages in {d:.2}ms!\n" ++ ANSI_RESET, .{ workers.items.len, elapsed_ms });
+        std.debug.print(ANSI_GREEN ++ ANSI_BOLD ++ "\n[ ✅ ] Successfully completed secure setup for {} packages in {d:.2}ms!\n" ++ ANSI_RESET, .{ workers.items.len, elapsed_ms });
         std.debug.print("Note: Make sure to add {s} to your PATH!\n", .{pkg_store.bin_root});
     } else if (std.mem.eql(u8, cmd, "uninstall")) {
         if (cmd_args.items.len == 0) {
@@ -298,7 +304,7 @@ pub fn main() !void {
         try pkg_store.uninstall(pkg);
         const elapsed_ns = timer.read();
         const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
-        std.debug.print(ANSI_GREEN ++ ANSI_BOLD ++ "\nSuccessfully uninstalled {s} in {d:.2}ms!\n" ++ ANSI_RESET, .{ pkg.name, elapsed_ms });
+        std.debug.print(ANSI_GREEN ++ ANSI_BOLD ++ "\n[ ✅ ] Successfully uninstalled {s} in {d:.2}ms!\n" ++ ANSI_RESET, .{ pkg.name, elapsed_ms });
     } else if (std.mem.eql(u8, cmd, "run")) {
         if (cmd_args.items.len == 0) {
             std.debug.print("Error: Please provide a package name to run. Example: abv0 run jq -- --version\n", .{});
@@ -315,9 +321,9 @@ pub fn main() !void {
             actual_run_args = actual_run_args[1..];
         }
 
-        try pkg_store.execute(pkg, platform, actual_run_args);
+        try pkg_store.execute(pkg, platform, actual_run_args, use_micro_split);
     } else if (std.mem.eql(u8, cmd, "shell")) {
-        // Innovative Feature: Instant Sandboxed Shell
+        // Innovative Feature: Ephemeral Sandboxed Shell
         if (cmd_args.items.len == 0) {
             std.debug.print("Error: Please provide at least one package name for your sandboxed shell. Example: abv0 shell jq ripgrep\n", .{});
             return;
@@ -332,7 +338,7 @@ pub fn main() !void {
             try req_pkgs.append(pkg);
         }
 
-        try pkg_store.executeShell(req_pkgs.items, platform);
+        try pkg_store.executeShell(req_pkgs.items, platform, use_micro_split);
     } else if (std.mem.eql(u8, cmd, "doctor")) {
         // Innovative Feature: Self-Healing Audit
         try pkg_store.doctor(&reg, platform);
@@ -344,7 +350,7 @@ pub fn main() !void {
         try pkg_store.gc();
         const elapsed_ns = timer.read();
         const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
-        std.debug.print("Completed garbage collection in {d:.2}ms.\n", .{elapsed_ms});
+        std.debug.print("Completed secure garbage collection in {d:.2}ms.\n", .{elapsed_ms});
     } else {
         std.debug.print("Error: Unknown command: {s}\n\n", .{cmd});
         printUsage();

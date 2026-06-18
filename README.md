@@ -1,5 +1,5 @@
 # abv0
-**A faster, high-performance, and lightweight Homebrew alternative built in pure Zig.**
+**A faster, secure, high-performance, and lightweight Homebrew alternative built in pure Zig.**
 
 ---
 
@@ -13,8 +13,10 @@ Traditional package managers like Homebrew rely on heavy interpreted runtimes (R
 3. **Sub-10ms Execution Guarantee:** Resolving, verifying, and linking any cached package completes in **1–3 milliseconds** (~2.0ms measured average).
 4. **Absolute Universal Compatibility:** Out of the box support for any macOS version and architecture (**Intel `x86_64`** and **Apple Silicon `aarch64`**). You can even instantly install and run packages across architectures using `--platform aarch64-macos` or `--platform x86_64-macos`.
 5. **High-Performance Parallel Batching:** Multi-package installations run entirely concurrently in independent worker threads, saturating network bandwidth and disk I/O.
-6. **Sandboxed Temporary Shells (`abv0 shell`):** Instantly provision an isolated, ephemeral subshell with specific packages injected into your `PATH`. Exiting automatically dissolves the sandbox, leaving your global environment untouched.
-7. **Instant Self-Healing (`abv0 doctor`):** Audits all execution links against your internal content-addressable store in sub-1 millisecond and self-heals broken links instantly.
+6. **Range-Split Micro Chunk Download (`--micro-split`):** Optional hyper-optimized download engine that queries remote `Content-Length`, slices large packages into multiple byte-ranges, and launches parallel download streams to maximize fiber internet speeds.
+7. **Sandboxed Ephemeral Shells (`abv0 shell`):** Instantly provision an isolated subshell with specific packages injected into your `PATH`. Exiting automatically dissolves the sandbox untouched.
+8. **Instant Self-Healing (`abv0 doctor`):** Audits all execution links against your internal content-addressable store in sub-1 millisecond and self-heals broken links instantly.
+9. **Rigorous Security Defenses:** Enforces strict ID sanitization to block Path Traversal and Command Injection, verifies multi-user `0o700` directory permissions, and validates SHA256 integrity sums before execution.
 
 ---
 
@@ -57,12 +59,12 @@ abv0 info <package> [--json]
 # List all available official packages (supports structured JSON output)
 abv0 list [--json]
 
-# Install and instantly link packages (Supports concurrent batch parallelizing!)
-abv0 install <pkg1> [pkg2...]
-# Example: abv0 install jq ripgrep bat
+# Install and instantly link packages (Supports concurrent batch parallelizing and --micro-split mode)
+abv0 install <pkg1> [pkg2...] [--micro-split]
+# Example: abv0 install jq ripgrep bat --micro-split
 
 # Ephemeral Sandboxed Shell: Spawn a subshell with only requested packages
-abv0 shell <pkg1> [pkg2...]
+abv0 shell <pkg1> [pkg2...] [--micro-split]
 # Example: abv0 shell jq bat
 
 # Instantly audit and self-heal broken execution links
@@ -75,7 +77,7 @@ abv0 gc
 abv0 uninstall <package>
 
 # Instantly execute a binary (auto-downloads in a flash if missing)
-abv0 run <package> [-- <args...>]
+abv0 run <package> [--micro-split] [-- <args...>]
 # Example: abv0 run jq -- -n '100 * 5'
 ```
 
@@ -105,18 +107,19 @@ Licensed under the GNU Affero Public License v3. See [LICENSE](./LICENSE) for de
 ---
 
 ## Changelog / Recent Changes
+* **v0.3.0 (Security Hardening & Micro-Splitting Release):**
+  * **Range-Split Micro Downloads:** Added optional `--micro-split` flag to divide large remote packages into multi-chunk parallel streams for ultra-fast downloads.
+  * **Loading Visuals:** Implemented professional Unicode spinner sequences (`[ ⠋ ]`, `[ ⠙ ]`, etc.) to provide clear progress animation during longer downloads and installations.
+  * **Rigorous Security Hardening:** Audited codebase and added `isValidId()` sanitization to block arbitrary Path Traversal and Command Injection attacks.
+  * **Strict Permission Enforcing:** Enforced secure `0o700` access permissions on internal stores and temporary work directories to prevent unauthorized local multi-user tampering.
+  * **Memory Hardening:** Swapped raw `cat` child execution for a pristine Zig buffered streaming read/write file reconciler to eliminate large memory allocations.
 * **v0.2.0 (High-Performance Innovation Release):**
-  * **Parallel Multi-Threaded Setup:** `abv0 install` now takes multiple packages and executes concurrent downloads, hash-verifications, and links across parallel worker threads.
-  * **Ephemeral Sandboxed Shells:** Implemented `abv0 shell <pkg1> [pkg2...]` to spawn temporary subshells with exact dependencies and zero global environment pollution.
-  * **Instant Self-Healing Audit:** Added `abv0 doctor` to inspect binary link health and instantly self-heal missing or broken links in <1ms.
-  * **Instant Garbage Collector:** Added `abv0 gc` to reclaim orphaned download artifacts and abandoned sandboxed temporary directories.
-  * **Structured JSON Outputs:** Added `--json` machine-readable output mode for `list` and `info` commands to aid automated scripting.
+  * Parallel Multi-Threaded Setup for multi-package installations.
+  * Ephemeral Sandboxed Shells (`abv0 shell`).
+  * Instant Self-Healing Audit (`abv0 doctor`).
+  * Instant Garbage Collector (`abv0 gc`).
+  * Structured JSON machine-readable outputs (`--json`).
 * **v0.1.1 (Clean Professional Update):**
   * Removed all emojis from source code, CLI output messages, and documentation for a clean, minimalist, professional terminal aesthetic.
 * **v0.1.0 (Foundation Release):**
   * Built foundational high-performance macOS package manager in pure Zig.
-  * Implemented zero-latency `index.json` registry parsing and sub-10ms package setup guarantees.
-  * Added native APFS `clonefile(2)` bindings for instant copy-on-write 0ms package installation on macOS.
-  * Added universal support for macOS (`x86_64` and `aarch64`) and multi-platform overrides.
-  * Added interactive subcommands: `install`, `uninstall`, `run`, `search`, `list`, `info`.
-  * Fully verified GNU Affero Public License v3 compliance.

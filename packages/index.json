@@ -52,7 +52,7 @@
         },
         "x86_64-linux": {
           "url": "https://github.com/BurntSushi/ripgrep/releases/download/14.1.0/ripgrep-14.1.0-x86_64-unknown-linux-musl.tar.gz",
-          "sha256": "2225a0422119bb142f1cf44c3c3a9f07fe7584144365313ecbc00bc87258079d",
+          "sha256": "f84757b07f425fe5cf11d87df6644691c644a5cd2348a2c670894272999d3ba7",
           "archive_type": "tar.gz",
           "bin_path": "ripgrep-14.1.0-x86_64-unknown-linux-musl/rg"
         }
