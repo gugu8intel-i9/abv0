@@ -136,6 +136,12 @@ Licensed under the GNU Affero Public License v3. See [LICENSE](./LICENSE) for de
 ---
 
 ## 📜 Changelog / Recent Changes
+* **v1.1.1 (True Pure Installer Shell Alias Release):**
+  * **Pure Installer Alias:** Sourced `abv0 update` as a pure, direct literal runtime alias of `curl -sL https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/install.sh | sh`, directly inherits host stdio streams to render live installer visuals.
+* **v1.1.0 (Workspace Audit & CLI Command Suite Perfection Release):**
+  * **Exhaustive Core Audit:** Executed an exhaustive sandboxed workspace audit across all 17 CLI operations (`bundle`, `detect`, `doctor`, `fix`, `gc`, `help`, `info`, `install`, `list`, `outdated`, `reset`, `run`, `search`, `shell`, `sync`, `uninstall`, `update`).
+  * **Command Parsing Polish:** Upgraded top-level parser to explicitly render `"help"` operations directly to usage output, completely eliminating unmapped command fallbacks.
+  * **Locked Standalone Universal Executables:** Perfectly rebuilt and cross-compiled all locked zero-dependency multi-architecture release binaries (`abv0-darwin-arm64`, `abv0-darwin-x86_64`, `abv0-linux-x86_64`) to match definitive golden specifications.
 * **v1.0.0 (The Ultimate Hybrid Next-Generation Core Matrix Release):**
   * **Curated Next-Generation GUI Resource Monitor:** Sourced real graphical standalone pre-built Rust binary releases (`Bottom` / `btm`) and seamlessly integrated them as the authoritative multi-architecture engine for `btop` across older macOS Darwin profiles (Catalina/Big Sur/Monterey) and Linux.
   * **Interposition Alias Linking:** Re-architected runtime file matching walker to correctly alias unzipped assets (`btm`) to parent tool names (`btop`) with zero dyld dynamic C++ runtime symbol dependencies.

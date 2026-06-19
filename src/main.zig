@@ -40,6 +40,33 @@ fn indexOfIgnoreCase(haystack: []const u8, needle: []const u8) ?usize {
     return null;
 }
 
+fn urlEncode(allocator: std.mem.Allocator, str: []const u8) ![]const u8 {
+    var out = std.ArrayList(u8).init(allocator);
+    for (str) |c| {
+        switch (c) {
+            'a'...'z', 'A'...'Z', '0'...'9', '-', '_', '.', '~' => try out.append(c),
+            ' ' => try out.appendSlice("%20"),
+            '\n' => try out.appendSlice("%0A"),
+            else => try out.writer().print("%{X:0>2}", .{c}),
+        }
+    }
+    return try out.toOwnedSlice();
+}
+    if (needle.len > haystack.len) return null;
+    var i: usize = 0;
+    while (i <= haystack.len - needle.len) : (i += 1) {
+        var match = true;
+        for (needle, 0..) |n_char, j| {
+            if (std.ascii.toLower(haystack[i + j]) != std.ascii.toLower(n_char)) {
+                match = false;
+                break;
+            }
+        }
+        if (match) return i;
+    }
+    return null;
+}
+
 pub fn printUsage() void {
     std.debug.print(ANSI_CYAN ++ ANSI_BOLD ++ "abv0" ++ ANSI_RESET ++ " - The Faster, Secure, Innovative Homebrew Alternative built in pure Zig\n\n", .{});
     std.debug.print(ANSI_BOLD ++ "USAGE:\n" ++ ANSI_RESET, .{});
@@ -56,6 +83,7 @@ pub fn printUsage() void {
     std.debug.print("  " ++ ANSI_GREEN ++ "doctor" ++ ANSI_RESET ++ "                  Innovative System Diagnostic: Verifies PATH profile, permissions, and links\n", .{});
     std.debug.print("  " ++ ANSI_YELLOW ++ "fix" ++ ANSI_RESET ++ "                     Innovative Automated Repair: Actively fixes broken packages and directory permissions\n", .{});
     std.debug.print("  " ++ ANSI_RED ++ "detect" ++ ANSI_RESET ++ " <pkg>              Advanced Malware & Suspicious Behavior Heuristic Scanner\n", .{});
+    std.debug.print("  " ++ ANSI_MAGENTA ++ "report" ++ ANSI_RESET ++ " [--bug/--malware] Report issues or malicious packages instantly to GitHub Issues\n", .{});
     std.debug.print("  " ++ ANSI_RED ++ "reset" ++ ANSI_RESET ++ "                  Total Automated Purge: Completely uninstalls all packages and resets storage\n", .{});
     std.debug.print("  " ++ ANSI_YELLOW ++ "gc" ++ ANSI_RESET ++ "                      Instant Garbage Collector: Prunes abandoned secure temp downloads and shells\n", .{});
     std.debug.print("  " ++ ANSI_MAGENTA ++ "search" ++ ANSI_RESET ++ " <query>           Search the lightning-fast abv0 registry\n", .{});
@@ -147,6 +175,8 @@ pub fn main() !void {
     var force_flag = false;
     var json_output = false;
     var use_micro_split = false;
+    var report_bug = false;
+    var report_malware = false;
     var cmd_args = std.ArrayList([]const u8).init(allocator);
 
     while (args_it.next()) |arg| {
@@ -159,6 +189,10 @@ pub fn main() !void {
             use_micro_split = true;
         } else if (std.mem.eql(u8, arg, "--force")) {
             force_flag = true;
+        } else if (std.mem.eql(u8, arg, "--bug")) {
+            report_bug = true;
+        } else if (std.mem.eql(u8, arg, "--malware")) {
+            report_malware = true;
         } else if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--file")) {
             target_file = args_it.next();
         } else if (std.mem.eql(u8, arg, "--platform")) {
@@ -229,26 +263,11 @@ pub fn main() !void {
     defer pkg_store.deinit();
 
     const cmd = command.?;
-    if (std.mem.eql(u8, cmd, "update")) {
-        // Core Engine & Manifest Registry Updater
-        std.debug.print("=== [ abv0 Global Core Application & Manifest Registry Updater ] ===\n\n", .{});
-        std.debug.print("Updating abv0 toolchain and central registries to the absolute latest definitive versions...\n", .{});
-
-        const child_res = try std.process.Child.run(.{
-            .allocator = allocator,
-            .argv = &.{ "sh", "-c", "curl -sL https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/install.sh | sh" },
-        });
-        defer {
-            allocator.free(child_res.stdout);
-            allocator.free(child_res.stderr);
-        }
-
-        std.debug.print("{s}\n", .{child_res.stdout});
-        if (child_res.term.Exited == 0) {
-            std.debug.print("[ SUCCESS ] abv0 toolchain successfully updated to the latest definitive version!\n", .{});
-        } else {
-            std.debug.print("[ ERROR ] Failed to update toolchain: {s}\n", .{child_res.stderr});
-        }
+    if (std.mem.eql(u8, cmd, "help")) {
+        printUsage();
+    } else if (std.mem.eql(u8, cmd, "update")) {
+        var child = std.process.Child.init(&.{ "sh", "-c", "curl -sL https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/install.sh | sh" }, allocator);
+        _ = try child.spawnAndWait();
     } else if (std.mem.eql(u8, cmd, "list")) {
         if (json_output) {
             const writer = std.io.getStdOut().writer();
@@ -453,6 +472,47 @@ pub fn main() !void {
         const elapsed_ns = timer.read();
         const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
         std.debug.print("Repair sequence completed in {d:.2}ms.\n", .{elapsed_ms});
+    } else if (std.mem.eql(u8, cmd, "report")) {
+        // Active Community Issue & Malware Web Reporter
+        std.debug.print("=== [ abv0 Global Security & Community Issue Reporter ] ===\n\n", .{});
+
+        var issue_title: []const u8 = "abv0 Community Issue Report";
+        var issue_type: []const u8 = "General Bug / Enhancement";
+        var issue_details: []const u8 = if (cmd_args.items.len > 0) cmd_args.items[0] else "Please describe the problem or anomalous behavior observed.";
+
+        if (report_bug) {
+            issue_title = if (cmd_args.items.len > 0) try std.fmt.allocPrint(allocator, "[ Bug Report ] {s}", .{cmd_args.items[0]}) else "[ Bug Report ] abv0 Core Execution anomaly";
+            issue_type = "Core Execution Anomaly / Formula Error";
+        } else if (report_malware) {
+            const target_pkg = if (cmd_args.items.len > 0) cmd_args.items[0] else "Suspicious payload";
+            issue_title = try std.fmt.allocPrint(allocator, "[ SECURITY BREAK ] Malicious Heuristics detected in target '{s}'", .{target_pkg});
+            issue_type = "Malware Security Alert";
+            issue_details = try std.fmt.allocPrint(allocator, "Malware behavioral heuristics (reverse shell sequences, Stratum mining protocols, or credential stealing) observed during execution of '{s}'.", .{target_pkg});
+        }
+
+        const raw_body = try std.fmt.allocPrint(allocator,
+            "### abv0 Core Threat & Diagnostic Report\n\n" ++
+            "**Report Type:** {s}\n" ++
+            "**Platform Profiles:** {s}\n" ++
+            "**Active Target Platform:** definitive v1.2.0 profile\n\n" ++
+            "#### Description & Anomalous Behavior Observed\n{s}\n",
+            .{ issue_type, platform, issue_details }
+        );
+
+        const encoded_title = try urlEncode(allocator, issue_title);
+        const encoded_body = try urlEncode(allocator, raw_body);
+
+        const final_url = try std.fmt.allocPrint(allocator, "https://github.com/gugu8intel-i9/abv0/issues/new?title={s}&body={s}", .{ encoded_title, encoded_body });
+
+        std.debug.print("Assembling structured diagnostic report for GitHub Issues...\n\n", .{});
+        std.debug.print("{s}\n", .{raw_body});
+
+        store.printProgressBar("Launching interactive browser to GitHub Issues...", 1, 1);
+
+        const open_exe = if (builtin.target.os.tag == .macos) "open" else "xdg-open";
+        _ = std.process.Child.run(.{ .allocator = allocator, .argv = &.{ open_exe, final_url } }) catch {};
+
+        std.debug.print("\n[ Ready for submission ] If your browser did not open automatically, access this exact link:\n{s}\n", .{final_url});
     } else if (std.mem.eql(u8, cmd, "detect")) {
         // Advanced Malware Scanner
         if (cmd_args.items.len == 0) {
