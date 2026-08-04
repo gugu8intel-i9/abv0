@@ -1,209 +1,313 @@
-# ⚡ abv0
-**A faster, secure, high-performance, and lightweight Homebrew alternative built in pure Zig.**
+# abv0
 
----
+**A fast, verifying package manager written in Zig. Linux, macOS and Windows.**
 
-## 🚀 The Vision & Innovation
-Traditional package managers like Homebrew rely on heavy interpreted runtimes (Ruby), deeply recursive formula evaluation, and massive symlink farms in `/usr/local` or `/opt/homebrew`. Just booting the Ruby interpreter and resolving basic formula dependencies frequently takes 200–500ms before any real work even begins.
-
-**`abv0` re-architects macOS package management from the ground up:**
-
-1. **APFS `clonefile(2)` Core (macOS Superpower):** Instead of fragile symlinks or slow file copying, `abv0` leverages Apple's APFS Copy-on-Write cloning (`clonefile`). Linking a binary from the content-addressable local store (`~/.abv0/store`) to your execution bin (`~/.abv0/bin`) takes literally **0 microseconds**, consumes **0 additional bytes on disk**, and bypasses inode symlink-following overhead during execution.
-2. **Zero-Allocation Unified Index:** Formulae and package definitions are kept in a highly optimized, single-file manifest (`index.json`), completely eliminating Git directory traversal and file I/O latency during resolution.
-3. **Sub-10ms Execution Guarantee:** Resolving, verifying, and linking any cached package completes in **1–3 milliseconds** (~2.0ms measured average).
-4. **Absolute Universal Compatibility:** Out of the box support for any macOS version and architecture (**Intel `x86_64`** and **Apple Silicon `aarch64`**). You can even instantly install and run packages across architectures using `--platform aarch64-macos` or `--platform x86_64-macos`.
-5. **Lightning GUI Application Engine:** Full GUI application installation capabilities (`abv0 install <gui_app>`). `abv0` automatically mounts DMG disk images (`hdiutil`) or decompresses application archives, placing the `.app` bundles directly into your local `~/Applications` folder via instant APFS copy-on-write cloning. Cached GUI app installations complete in **under 6 milliseconds**!
-6. **High-Performance Parallel Batching:** Multi-package installations run entirely concurrently in independent worker threads, saturating network bandwidth and disk I/O.
-7. **Range-Split Micro Chunk Download (`--micro-split`):** Optional hyper-optimized download engine that queries remote `Content-Length`, slices large packages into multiple byte-ranges, and launches parallel download streams to maximize fiber internet speeds.
-8. **Sandboxed Ephemeral Shells (`abv0 shell`):** Instantly provision an isolated subshell with specific packages injected into your `PATH`. Exiting automatically dissolves the sandbox untouched.
-9. **System Diagnostics & Automated Repair (`abv0 doctor` & `abv0 fix`):** Distinct diagnostic profiling exactly like Homebrew that audits your `PATH` and link state, coupled with an active `abv0 fix` repair engine that automatically heals broken packages and resets secure directory permissions.
-10. **Advanced Malware Scanner (`abv0 detect`):** High-performance static heuristics engine that evaluates installed executables and scripts for reverse shells, embedded cryptominers (Stratum mining pools), private key stealing, and unauthorized system file access.
-11. **Clean Text Progress Bars:** Beautiful text progress bar animations (`[===========>        ]`) providing pristine visual feedback during setup, multi-chunk downloads, and diagnostic repairs.
-12. **Universal Dynamic Fallback Discovery:** You never have to wait for a formula to be added to our local registry. If you request any package not hardcoded in the index (`abv0 install ANY_PROJECT`), `abv0` automatically discovers its open-source repository on the fly via live GitHub API queries, locates the exact OS/Architecture release binaries, and links them perfectly.
-
----
-
-## 📊 Performance Benchmarks vs Homebrew
-
-### FFmpeg Installation Benchmark
-A real-world comparison installing **FFmpeg** (a complex multimedia suite with 3 heavy executables: `ffmpeg`, `ffprobe`, `ffplay`):
-
-| Operation | Homebrew Typical Time | `abv0` Measured Time | `abv0` Advantage |
-| :--- | :--- | :--- | :--- |
-| **Clean Install (From Scratch)** | ~35–60 seconds | **8.70 seconds** | **~5x Faster** |
-| **Cached Setup / Active Re-Link** | ~1.5–3 seconds | **8.57 milliseconds** | **~250x Faster** |
-| **Virtual Execution (`abv0 run ffmpeg`)** | (Not supported) | **~50 milliseconds** | **Instant Exec** |
-
----
-
-## 🏛️ Next-Generation Registry Architecture Roadmap
-As `abv0` scales to support thousands of official packages, we are actively evaluating next-generation decentralized and ultra-high-performance registry alternatives to replace single-file JSON streaming:
-
-1. **Dedicated Git Repository Registry (Homebrew / Cargo Style):** Maintaining an independent structured Git repository (`~/.abv0/registry`) where `abv0 update` executes an instant `git pull --rebase`. This provides complete offline history delta compression and zero CDN caching lag.
-2. **Zero-Copy Memory-Mapped Flat Custom Index (`.abv` Database):** A compiled flat binary database loaded into memory via OS `mmap()`. This completely eliminates parsing overhead, providing **0µs zero-allocation package lookups**.
-3. **Embedded Hybrid SQLite Single Store (`registry.db`):** Utilizing Apple and Linux native SQLite bindings to run microsecond relational queries, advanced dependency graphs, and multi-constraint search algorithms instantly.
-4. **Decentralized Flat CDN API Reconciler:** Shifting each software formula to independent flat immutable manifest URLs (`manifests/<pkg>.json`) to maximize CDN hit ratios and allow infinite concurrency during resolution.
-
----
-
-## 🛠️ Installation & Getting Started
-
-### 1. Ultra-Fast One-Line Installer (Recommended)
-You can instantly install pre-built, lightning-fast release binaries of `abv0` (for macOS Intel/Silicon and Linux) using `curl`:
+`abv0` installs prebuilt release binaries from a signed-by-checksum manifest into a
+content-addressed store under `~/.abv0`, then links them onto your `PATH`. There is no
+interpreter to boot, no formula DSL to evaluate and no `git` clone in the hot path.
 
 ```bash
-curl -sL https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/install.sh | sh
+abv0 install ripgrep jq      # verified, parallel
+abv0 run ripgrep -- --help   # run without touching PATH
+abv0 shell ripgrep           # ephemeral subshell with just that package
 ```
 
-### 2. Build from Source
-Alternatively, make sure you have [Zig 0.13.0+](https://ziglang.org/) installed:
+---
+
+## Install
+
+**Linux / macOS**
 
 ```bash
-git clone https://github.com/gugu8intel-i9/abv0.git
+curl -fsSL https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/install.sh | sh
+```
+
+**Windows** (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/install.ps1 | iex
+```
+
+The installer downloads over HTTPS only, refuses protocol downgrades on redirect,
+verifies the published SHA-256 from `release/SHA256SUMS`, checks the payload is
+actually an executable, runs it once, and only then moves it into place. Any failure
+leaves nothing installed. Set `ABV0_ALLOW_UNVERIFIED=1` to bypass checksum
+verification (not recommended).
+
+**From source** — requires [Zig 0.13.0](https://ziglang.org/):
+
+```bash
+git clone https://github.com/gugu8intel-i9/abv0
 cd abv0
+zig build -Doptimize=ReleaseFast
+./zig-out/bin/abv0 --help
+```
+
+Add `~/.abv0/bin` to your `PATH` (`abv0 doctor` will tell you if it is missing).
+
+---
+
+## Platform support
+
+| Platform | Status | Linking strategy |
+| :--- | :--- | :--- |
+| macOS arm64 / x86_64 | supported | APFS `clonefile(2)`, falls back to hard link |
+| Linux x86_64 / aarch64 | supported (static musl) | hard link, falls back to symlink |
+| Windows x86_64 / arm64 | supported | `CreateHardLinkW`, falls back to copy |
+
+`zig build check` type-checks the whole codebase against all six targets, so a
+Windows-only or macOS-only compile error fails on any machine.
+
+---
+
+## Performance
+
+Measured on the development machine (2 vCPU, Linux x86_64, ReleaseFast static build).
+Reproduce with `abv0 benchmark`; the wall-clock figures below are 30-run averages of
+the whole process including spawn.
+
+| Command | v1.5.0 (previously shipped) | v2.0.0 | Change |
+| :--- | ---: | ---: | ---: |
+| `abv0 help` | 4.91 ms | **0.50 ms** | 9.8× faster |
+| `abv0 list` | 5.14 ms | **0.63 ms** | 8.2× faster |
+| `abv0 outdated` | 4.92 ms | **0.74 ms** | 6.7× faster (and it now works — see below) |
+| `abv0 install ripgrep jq` (cached) | — | **0.84 ms** | — |
+| `abv0 install ripgrep` (cold, 2.3 MB download) | — | **257–296 ms** | — |
+
+Internal micro-benchmarks (`abv0 benchmark`):
+
+```
+  registry lookup         100000 ops     1.119 ms       11.2 ns/op
+  index build                 13 pkgs    0.107 ms
+  index mmap load             13 pkgs    0.032 ms
+  fastLink (hard link)       500 ops     1.755 ms        3.5 us/op
+  sha256                       8 MiB     8.426 ms      949.5 MiB/s
+```
+
+Where the old startup time went: `Store.init` spawned three `chmod` subprocesses on
+*every* invocation, including `abv0 help`. Permissions are now set in-process with
+`fchmod`, the registry is only loaded by commands that need it, and the shipped Linux
+binary is a stripped `ReleaseFast` static build (679 KB) rather than an unstripped
+debug build (3.5 MB).
+
+Other performance work in 2.0.0:
+
+- **One pass over each archive.** Downloads used to be read three times (curl, then
+  SHA-256, then a "deduplicated block store" that wrote a full second copy of every
+  archive into `~/.abv0/blockstore` and never read it back). The block store is gone;
+  hashing is a single streaming pass.
+- **One directory walk per install**, not one per binary. Installing `ffmpeg`
+  (3 executables) previously ran three full recursive walks.
+- **Bounded worker pool.** Installs used to spawn one OS thread per package with no
+  limit; a 50-line Brewfile meant 50 threads fighting for bandwidth. Now
+  `min(CPUs, packages, 8)`.
+- **Buffered stdout.** Output went through unbuffered `std.debug.print` to *stderr*,
+  so `abv0 list | grep foo` printed nothing at all. Output is now buffered and on
+  stdout, with ANSI colour only when the destination is a TTY (`NO_COLOR` respected).
+- **No DOM parse of the manifest.** Loading used to build a full JSON `Value` tree and
+  then duplicate every string, keeping two copies of the registry alive and freeing
+  neither.
+
+---
+
+## How it actually works
+
+**Store layout**
+
+```
+~/.abv0/
+  bin/                     links onto your PATH
+  store/<pkg>-<ver>-<platform>/    unpacked package, read-only tree
+  store/states_wal/        write-ahead log for crash recovery
+  registry/index.json      the manifest
+  registry/index.abv       compiled binary index (mmap'ed)
+  locks/                   per-package install locks
+```
+
+**`index.abv` — a real memory-mapped index.** `abv0` compiles `index.json` into a flat
+binary file: a header with a content stamp, a sorted fixed-width record array, and a
+deduplicated string table. Lookups `mmap` the file and binary-search the records,
+slicing strings directly out of the mapping with no parsing and no allocation. The
+stamp (source size + mtime) is checked on load, so editing `index.json` transparently
+rebuilds the index. Every offset is bounds-checked against the mapping before use, and
+a truncated, corrupt or wrong-version file is rejected rather than dereferenced. On
+Windows, which has no `mmap` in the Zig standard library without libc, the same file is
+read into a heap buffer and used identically.
+
+*(Before: `index.abv` was a 24-byte header containing no data, written and never read.)*
+
+**Write-ahead log.** Each install appends fixed-width, CRC-32-checked records
+(`begin`, `downloaded`, `verified`, `unpacked`, `linked`, `complete`) to an append-only
+log. On the next run, an install that stopped before `complete` is detected and the
+partial tree is cleaned up before retrying. A record torn by a crash mid-write fails its
+CRC and is discarded, so recovery never reads half a record.
+
+*(Before: the "state machine" called `createFile` on every transition, which truncates —
+the log only ever held the most recent record, and nothing ever read it.)*
+
+**Bloom filter.** Dependency resolution uses a real bit-array Bloom filter (64 KiB,
+7 probes, Kirsch–Mitzenmacher double hashing) as a negative cache for the visited set,
+persisted with a CRC and loaded atomically.
+
+*(Before: a text file of `NODE_VISITED:` lines, truncated on every construction, queried
+by scanning the whole file for a substring — O(n) per lookup, and it could never retain
+state between runs.)*
+
+**SQLite export.** `abv0 sync` writes `registry.sql`, a portable SQL dump with properly
+escaped string literals, and materialises `registry.db` with the `sqlite3` CLI when one
+is installed. If it is not installed, it says so instead of pretending.
+
+*(Before: `registry.db` was a text file containing SQL statements, named `.db`.)*
+
+---
+
+## Security
+
+`abv0` treats the manifest and everything it downloads as hostile input. See
+[SECURITY.md](SECURITY.md) for the full list of vulnerabilities found and fixed in
+2.0.0, including three that previous releases claimed to have fixed but had not.
+
+Behaviour you can rely on:
+
+- **Checksums are enforced.** A SHA-256 mismatch aborts the install; nothing is
+  unpacked and nothing is linked. A package with no pinned hash for your platform is
+  refused. `--allow-unverified` opts out per invocation and says so loudly.
+- **Archives cannot escape the store.** Every tar/zip member name is validated before
+  extraction: `../` components, absolute paths, Windows drive letters, UNC prefixes and
+  embedded NUL bytes are rejected, and symlink targets that resolve outside the
+  extraction root are skipped.
+- **Manifests are validated on load.** Non-HTTPS URLs, path traversal in `name`,
+  `bin_path` or `bin[]`, and malformed records are dropped with the rest of the manifest
+  still usable. A corrupt or truncated `index.json` produces an error, not a panic.
+- **HTTPS only.** `curl` runs with `--fail --proto '=https' --proto-redir '=https'` and
+  bounded timeouts, so a 404 page can never be saved as a binary and a redirect cannot
+  downgrade to plaintext.
+- **Unverifiable dynamic installs are opt-in.** Installing a package that is not in the
+  registry searches GitHub and cannot check a checksum, so it now requires
+  `--allow-unverified`.
+
+Report a vulnerability by opening an issue, or use `abv0 report`.
+
+---
+
+## Commands
+
+```
+PACKAGES
+  install <pkg>...     Install packages (verified, in parallel)
+  uninstall <pkg>      Remove a package and its links
+  upgrade [pkg]...     Upgrade outdated packages
+  outdated             List packages with a newer version available
+  list                 List registry packages
+  search <query>       Search the registry
+  info <pkg>           Show package metadata
+
+EXECUTION
+  run <pkg> [-- args]  Run a package executable
+  shell <pkg>...       Ephemeral subshell with only those packages
+
+MANIFESTS
+  bundle [install]     Install from a Brewfile
+  bundle dump          Export installed packages to a Brewfile
+  update               Refresh the registry index
+  sync                 Recompile the local index and SQL export
+
+MAINTENANCE
+  doctor               Diagnose PATH, permissions and links
+  fix                  Repair broken links and permissions
+  detect <pkg>         Scan an installed package for malware patterns
+  benchmark            Measure local store and index performance
+  gc                   Remove temporary files and stale sandboxes
+  reset                Uninstall everything
+  report [--bug]       Open a prefilled GitHub issue
+
+OPTIONS
+  --platform <tag>     Target platform (default: x86_64-linux)
+  -f, --file <path>    Manifest path for bundle commands
+  -j, --jobs <n>       Parallel install workers
+  --allow-unverified   Permit installs without a verified checksum
+  --micro-split        Parallel ranged download for large assets
+  --force              Overwrite output files
+  --json               Machine-readable output (list, info, outdated)
+  --no-color           Disable colour
+  -h, --help           This message
+  -V, --version        Version
+```
+
+Cross-platform installs work from any host: `abv0 install --platform aarch64-macos jq`
+fetches and stores the macOS build without linking it into your `PATH`.
+
+---
+
+## Development
+
+```bash
+zig build                       # debug build
+zig build test                  # 61 unit tests
+zig build check                 # type-check Linux, macOS and Windows targets
+zig build release               # stripped ReleaseFast binaries for all 6 targets
 zig build -Doptimize=ReleaseFast
 ```
 
-### 3. Add to your PATH
-Add the `abv0` managed binary directory to your `PATH` in your `~/.zshrc` or `~/.bashrc`:
-
-```bash
-export PATH="$HOME/.abv0/bin:$PATH"
-```
+The test suite covers path-traversal and tar-slip rejection, symlink escape, hostile
+manifests, checksum enforcement, index corruption and truncation, WAL torn-record
+recovery, Bloom filter false-negative freedom, version comparison and argument parsing.
+`src/main.zig` imports every module at comptime, so `zig build test` runs all of them.
 
 ---
 
-## ⚡ Command Line Interface
+## Changelog
 
-```bash
-# ℹ️ Display detailed help & documentation
-abv0 help
+### v2.0.0 — correctness, security and cross-platform release
 
-# 📦 Complete Package Operations
-abv0 install jq                   # install one package
-abv0 install wget git             # install multiple (runs concurrent parallel batch threads!)
-abv0 uninstall jq                 # uninstall one package
+The tree did not compile before this release; `zig build` failed on a syntax error in
+`src/main.zig`, so none of the previously shipped binaries corresponded to the source.
 
-# 🔄 Upgrade & Version Management
-abv0 update                       # update and synchronize global package registry manifests
-abv0 outdated                     # list packages with newer registry versions available
-abv0 upgrade                      # upgrade all outdated packages
-abv0 upgrade jq wget              # upgrade specific packages
+* **Fixed: the build.** Removed an orphaned function body, added missing imports.
+* **Fixed: `abv0 outdated` never reported anything.** Its body was
+  `if (try self.isInstalled(...)) {}` — an empty block — so it always printed
+  "everything is up to date". It now compares installed versions against the registry
+  with numeric-aware version ordering.
+* **Fixed: `abv0 run` / `abv0 shell` for most packages.** Both looked for an executable
+  named after the *package* (`bin/ripgrep`) instead of the executables the package
+  actually provides (`bin/rg`).
+* **Fixed: data race in parallel installs.** Every worker thread shared one
+  `ArenaAllocator`, which is not thread-safe. Each install now gets its own arena over a
+  thread-safe base allocator, and installs are bounded to `min(CPUs, packages, 8)`.
+* **Fixed: crashes on malformed input.** Unchecked `.?` unwraps on parsed JSON panicked
+  on a truncated manifest or a GitHub rate-limit response.
+* **Fixed: concurrent first runs corrupted the registry.** Two `abv0` processes starting
+  on a fresh machine both wrote `index.json` in place; one read the other's partial
+  write. The manifest is now downloaded to a temporary file, parsed, and renamed into
+  place atomically.
+* **Fixed: `installDynamic` hardcoded `refs/heads/master`**, so it 404'd on every
+  repository that has since renamed its default branch.
+* **Security:** strict checksum enforcement, archive path-traversal and symlink-escape
+  rejection, manifest validation, HTTPS-only downloads, opt-in dynamic installs,
+  `hdiutil attach -readonly`, and removal of the `curl | sh` self-update. Details in
+  [SECURITY.md](SECURITY.md).
+* **Windows support**, plus Linux aarch64. The old code could not compile for Windows
+  at all (`std.posix.getenv` is a compile error there).
+* **Implemented the subsystems that were previously fictional**: memory-mapped binary
+  index, crash-recoverable WAL, real Bloom filter, genuine SQLite export.
+* **Performance:** 6–10× faster startup, single-pass hashing, one directory walk per
+  install, buffered stdout, bounded parallelism. Details above.
+* **Release binaries rebuilt.** `abv0-darwin-x86_64` was a 0-byte file and
+  `abv0-linux-x86_64` was an unstripped debug build. All six artifacts are now stripped
+  `ReleaseFast` builds published with `release/SHA256SUMS`.
+* **Installer hardened** and an `install.ps1` added for Windows.
+* **Documentation:** removed the unreproducible benchmark table and the descriptions of
+  subsystems that did not exist.
 
-# 📜 Brewfile Manifest Management
-abv0 bundle                       # install from default Brewfile
-abv0 bundle install -f myfile     # install from custom file
-abv0 bundle dump                  # export installed packages to default Brewfile
-abv0 bundle dump -f out --force   # export to custom file (overwrite actively)
+### Earlier releases
 
-# 🚀 Isolated Execution & Shells
-abv0 run jq -- -n '100 * 5'       # Instantly execute a binary (auto-downloads if missing)
-abv0 shell jq git                 # Ephemeral Sandboxed Shell: Spawn subshell with only requested tools
-
-# 🛡️ Diagnostics, Repairs, Threat Scanning & Benchmarks
-abv0 doctor                       # Diagnostic Check: Audits PATH profile, directory permissions, and broken link state
-abv0 fix                          # Automated Self-Healing: Actively fixes permissions and re-links broken packages
-abv0 detect threat-sample         # Advanced Malware Scanner: Evaluates code heuristics for reverse shells and Threat Scores
-abv0 report --malware threat-sample # Community Reporting: Formats and launches instant Markdown issue alerts in your web browser
-abv0 benchmark                    # High-Performance Systems Benchmark: Evaluates host hardware latency across link and lookup routines
-
-# 🧹 Total Purge & Garbage Collection
-abv0 reset                        # Total System Reset: Actively uninstalls everything and restores pristine profile
-abv0 gc                           # garbage collect unused store entries and residual temp downloads
-```
-
----
-
-## 🌐 Advanced Multi-Architecture Support
-By default, `abv0` detects your current Operating System and CPU Architecture. 
-
-However, you can override the target platform on any command—allowing Apple Silicon Macs to run Intel tools under Rosetta 2, or cross-testing Linux dependencies:
-
-```bash
-# Force macOS Apple Silicon Target
-abv0 install ripgrep --platform aarch64-macos
-
-# Force macOS Intel Target (Rosetta 2)
-abv0 install ripgrep --platform x86_64-macos
-
-# Fetch Linux single binary
-abv0 install ffmpeg --platform x86_64-linux
-```
+v1.5.0 and earlier claimed fixes for the memory-mapped uninitialized read, the archive
+path traversal and several performance features. Those claims did not match the code;
+the issues are genuinely fixed in 2.0.0. The historical changelog is preserved in the
+git history.
 
 ---
 
-## 🛡️ License
-Licensed under the GNU Affero Public License v3. See [LICENSE](./LICENSE) for details.
+## License
 
----
-
-## 📜 Changelog / Recent Changes
-* **v1.5.0 (Security & RAM Optimization Release):**
-  * **Path Traversal Security Fix:** Hardened package archive extraction pipeline by validating `info.bin_path` to strictly block `../` sequences and absolute paths, preventing arbitrary system file overwrites by malicious package manifests.
-  * **Memory-Mapped Uninitialized Read Fix:** Secured the Next-Generation `ColumnarRegistry` query engine by explicitly validating chunk sizes with `reader.readAll()` and bounding byte streams, definitively sealing potential heap memory data leakage in corrupt or malicious databases.
-  * **Streaming Zero-Allocation Bundle Parser:** Retrofitted the `bundleInstall` architecture to utilize Zig `std.io.bufferedReader` for streaming line-by-line bundle parsing. This entirely removes the arbitrary 2MB contiguous RAM buffering spikes during large automated setup tasks, effectively cutting orchestrator footprint by up to 90%.
-* **v1.4.0 (Definitive Next-Generation High-Performance Database Core Engine Release):**
-  * **Compressed Deduplicated Block Store:** Developed Content-Addressable physical block ingestion (`~/.abv0/blockstore`). Highly deduplicated chunks stream directly into decompressors without large RAM buffers.
-  * **Transactional On-Disk State Transitions:** Integrated fully atomic Write-Ahead Log (`<pkg>.wal`) installation state transitions (`FETCH`, `VERIFY`, `UNPACK`, `LINK`). Crashes never corrupt installation states, and parallel worker threads execute with lock-free file semaphores.
-  * **Paged Incremental Dependency Graph:** Upgraded join resolution to evaluate dependency nodes in paged 50-200 node working sets. Integrated 64KB on-disk Bloom Bitset filters (`bloom.bitset`) to definitively detect cyclic feedback loops in under 1KB RAM.
-  * **Binary Columnar Compressed Metadata Engine:** Created `ColumnarRegistry` array database arrays (`index.columnar.abv`). High-speed operational queries project highly efficient binary slice offsets rather than expensive JSON deserialization, cutting metadata RAM bloat by up to 90%.
-* **v1.3.0 (Community Reporting & High-Performance Systems Benchmark Release):**
-  * **Systems Benchmark Suite:** Authored definitive `abv0 benchmark` tool evaluating virtual memory arena lookups (~0.21µs), host APFS hardlinking speeds (~8.40µs), 4-in-1 hybrid sync operations, and sub-10ms package re-links on native active hardware.
-  * **Pure Installer Shell Alias:** Sourced `abv0 update` as a pure, direct literal runtime alias of `curl -sL https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/install.sh | sh`, directly inheriting host stdio streams to render live installer visuals.
-  * **Community Web Reporting:** Developed `abv0 report` (`--bug` / `--malware`) to automatically format RFC-compliant `%20`/`%0A` markdown templates and instantly execute native Operating System browser launchers (`open` / `xdg-open`) directly to GitHub Issues.
-* **v1.1.1 (True Pure Installer Shell Alias Release):**
-  * **Pure Installer Alias:** Sourced `abv0 update` as a pure, direct literal runtime alias of `curl -sL https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/install.sh | sh`, directly inherits host stdio streams to render live installer visuals.
-* **v1.1.0 (Workspace Audit & CLI Command Suite Perfection Release):**
-  * **Exhaustive Core Audit:** Executed an exhaustive sandboxed workspace audit across all 17 CLI operations (`bundle`, `detect`, `doctor`, `fix`, `gc`, `help`, `info`, `install`, `list`, `outdated`, `reset`, `run`, `search`, `shell`, `sync`, `uninstall`, `update`).
-  * **Command Parsing Polish:** Upgraded top-level parser to explicitly render `"help"` operations directly to usage output, completely eliminating unmapped command fallbacks.
-  * **Locked Standalone Universal Executables:** Perfectly rebuilt and cross-compiled all locked zero-dependency multi-architecture release binaries (`abv0-darwin-arm64`, `abv0-darwin-x86_64`, `abv0-linux-x86_64`) to match definitive golden specifications.
-* **v1.0.0 (The Ultimate Hybrid Next-Generation Core Matrix Release):**
-  * **Curated Next-Generation GUI Resource Monitor:** Sourced real graphical standalone pre-built Rust binary releases (`Bottom` / `btm`) and seamlessly integrated them as the authoritative multi-architecture engine for `btop` across older macOS Darwin profiles (Catalina/Big Sur/Monterey) and Linux.
-  * **Interposition Alias Linking:** Re-architected runtime file matching walker to correctly alias unzipped assets (`btm`) to parent tool names (`btop`) with zero dyld dynamic C++ runtime symbol dependencies.
-  * **Complete Hybrid Integration:** Fully consolidated all 4 definitive registry architectures (`Distributed Git Taps`, `Embedded SQLite Query Engine`, `Memory-Mapped .abv Flat Binary Cache`, `Decentralized Flat Manifest Gateways`) into the authoritative `abv0 sync` subcommand.
-* **v0.9.6 (4-in-1 Next-Generation Hybrid Registry Matrix Release):**
-  * **Hybrid Registry Reconciler:** Built the definitive `abv0 hybrid-sync` (or `abv0 sync`) architectural orchestrator. It seamlessly executes an authoritative offline Git pull on your master tap, auto-compiles parsed manifests into an embedded SQLite database (`registry.db`), serializes high-speed zero-copy Memory-Mapped indexes (`index.abv`), and readies Decentralized edge fallbacks globally.
-* **v0.9.5 (Registry Architecture Roadmap Release):**
-  * **Registry Roadmap:** Authored comprehensive architectural roadmap comparing dedicated Git repository manifest structures, Memory-Mapped zero-copy flat binary stores (`.abv`), and embedded SQLite storage solutions.
-* **v0.9.4 (Universal Build-From-Source Automated Compiler Engine Release):**
-  * **Automated Source Auto-Compilation:** Built a powerful compilation reconciler into the setup pipeline. When a specific software package has no pre-compiled binary release assets available on GitHub (like `btop` on macOS), `abv0` downloads the source repository snapshot, actively discovers the required build toolchain (`make`, `cmake`, `cargo build --release`, `go build`), actively compiles the application from source entirely on the fly, discovers the newly compiled executables, and APFS-clones/links them into your execution path!
-* **v0.9.3 (Automated Decentralized Dynamic Fallback Resolution Engine Release):**
-  * **Decentralized Fallback Discovery:** Engineered a groundbreaking dynamic resolution engine. When you request a package that isn't hardcoded in the local `index.json` registry (`abv0 install ANY_TOOL`), `abv0` now automatically discovers its definitive open-source repository via GitHub API search queries, identifies the exact matching OS/Architecture binary release assets, and installs it on the fly!
-  * **Recursive Executable Discovery:** Implemented a highly-performant recursive filesystem directory walker that automatically locates and links executables regardless of how complex or deeply nested an extracted release archive is.
-* **v0.9.2 (Neofetch Official Core Curation Release):**
-  * **Neofetch Support:** Added official manifest definitions and verified cryptographic SHA256 integrity checksums for `neofetch` v7.1.0 across Linux and macOS.
-* **v0.9.1 (Smart Rolling Release Hash Validation & Toolchain Auto-Update Release):**
-  * **Dynamic Mismatch Bypass:** Re-engineered the cryptographic SHA256 integrity verification engine to intelligently accept rolling or daily rolling release assets (like `BtbN/FFmpeg-Builds`) under dynamic validation, completely eliminating false positive uninstallation errors.
-  * **Toolchain Auto-Updater:** Upgraded `abv0 update` to automatically pull down and execute the definitive `install.sh` one-liner, upgrading your Mac's active `abv0` application and global package registries instantly.
-* **v0.9.0 (Global Manifest Update Engine & Core Synchronization Release):**
-  * **Registry Manifest Synchronization:** Added `abv0 update` subcommand to actively fetch and synchronize global centralized registries (`~/.abv0/registry/index.json`) directly from your GitHub master definitions.
-  * **macOS Manifest Fine-Tuning:** Sourced real-world exact macOS universal single-binary assets (`fastfetch`, `jq`, `ripgrep`) and updated manifest cryptographic SHA256 integrity sums to ensure perfect active validation during setups on Apple hardware.
-* **v0.8.0 (Standalone Universal Release Binaries & One-Line Curl Installer Release):**
-  * **One-Line Curl Installer:** Added professional `install.sh` script allowing instant global installation via `curl -sL https://... | sh`.
-  * **Standalone Release Binaries:** Cross-compiled highly-optimized, zero-dependency release binaries for `x86_64-linux` (3.3MB), `x86_64-macos` (458KB), and `aarch64-macos` (446KB) directly into the repository.
-* **v0.7.0 (Total Orchestration, Bundle Manifest & Upgrade Suite Release):**
-  * Sourced full `abv0 bundle` execution to install from default or custom (`-f`) manifests, coupled with `abv0 bundle dump` to export active environments.
-  * Added `abv0 outdated` to compare local profiles against active registries and `abv0 upgrade` to re-link all or target packages.
-  * Added `abv0 reset` to actively wipe all managed binaries, application bundles, and internal stores instantly.
-* **v0.6.0 (FFmpeg Multi-Binary Suite & Real-World Benchmark Release):**
-  * Added official manifest definitions for the entire FFmpeg multimedia suite (`ffmpeg`, `ffprobe`, `ffplay`).
-  * Upgraded internal link resolver to elegantly handle multi-binary directory base lookups (`bin/`) instantly.
-  * Executed live FFmpeg setup comparisons proving `abv0` downloads and sets up complex multi-binary suites in **8.7 seconds** from scratch (~5x faster than Homebrew) and **8.57 milliseconds** when cached (~250x faster than Homebrew).
-* **v0.5.0 (Sub-10ms GUI Application Engine Release):**
-  * Added complete GUI `.app` installation capabilities via `app_bundles` manifest fields.
-  * `abv0` now links `.app` directories from its secure content store directly into `~/Applications` using microsecond APFS `clonefile(2)` bindings.
-  * Added robust macOS `hdiutil` image attachment and silent extraction parsing for applications distributed as disk images.
-* **v0.4.0 (Malware Detection, Doctor Profiling & Progress Bar Release):**
-  * Updated loading visuals to clean text progress bars (`[===========>        ]`) across all download, slicing, unpacking, and repair operations.
-  * Separated `abv0 doctor` into an elegant analytical health tool exactly like Homebrew that audits your active `PATH` profile, permissions, and links.
-  * Added `abv0 fix` to actively self-heal fractured packages, enforce directory ownership, re-link unlinked binaries, and purge abandoned temporary items.
-  * Built `abv0 detect <pkg>` with static behavioral heuristics to calculate overall Security Threat Scores.
-* **v0.3.0 (Security Hardening & Micro-Splitting Release):**
-  * Range-Split Micro Chunk concurrent download streaming (`--micro-split`).
-  * Professional loading spinner animations.
-  * Security Path Traversal and Command Injection defenses (`isValidId()`).
-* **v0.2.0 (High-Performance Innovation Release):**
-  * Parallel Multi-Threaded Setup for multi-package installations.
-  * Ephemeral Sandboxed Shells (`abv0 shell`).
-* **v0.1.0 (Foundation Release):**
-  * Built foundational high-performance macOS package manager in pure Zig.
+See [LICENSE](LICENSE).
