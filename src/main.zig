@@ -1,601 +1,1036 @@
+//! abv0 command-line interface.
+
 const std = @import("std");
-const registry = @import("registry.zig");
-const store = @import("store.zig");
 const builtin = @import("builtin");
 
-const ANSI_RESET = "\x1b[0m";
-const ANSI_BOLD = "\x1b[1m";
-const ANSI_GREEN = "\x1b[32m";
-const ANSI_CYAN = "\x1b[36m";
-const ANSI_YELLOW = "\x1b[33m";
-const ANSI_RED = "\x1b[31m";
-const ANSI_MAGENTA = "\x1b[35m";
+const registry = @import("registry.zig");
+const store = @import("store.zig");
+const platform = @import("platform.zig");
+const safepath = @import("safepath.zig");
+const term = @import("term.zig");
+const net = @import("net.zig");
+const abvindex = @import("abvindex.zig");
+const archive = @import("archive.zig");
+const bloom = @import("bloom.zig");
+const wal = @import("wal.zig");
 
-fn getDefaultPlatform() []const u8 {
-    if (builtin.target.os.tag == .macos) {
-        if (builtin.target.cpu.arch == .aarch64) {
-            return "aarch64-macos";
-        } else {
-            return "x86_64-macos";
-        }
-    } else if (builtin.target.os.tag == .linux) {
-        return "x86_64-linux";
+pub const version = "2.0.0";
+
+const registry_url = "https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/packages/index.json";
+const issues_url = "https://github.com/gugu8intel-i9/abv0/issues/new";
+
+// ---------------------------------------------------------------------------
+// Argument parsing
+// ---------------------------------------------------------------------------
+
+const Args = struct {
+    command: ?[]const u8 = null,
+    rest: std.ArrayList([]const u8),
+
+    platform_name: ?[]const u8 = null,
+    file: ?[]const u8 = null,
+    jobs: ?usize = null,
+
+    json: bool = false,
+    force: bool = false,
+    micro_split: bool = false,
+    allow_unverified: bool = false,
+    no_color: bool = false,
+    want_help: bool = false,
+    want_version: bool = false,
+    report_bug: bool = false,
+    report_malware: bool = false,
+
+    fn deinit(self: *Args) void {
+        self.rest.deinit();
     }
-    return "x86_64-linux"; // Sandbox fallback
-}
+};
 
-fn indexOfIgnoreCase(haystack: []const u8, needle: []const u8) ?usize {
-    if (needle.len > haystack.len) return null;
+const ParseError = error{ MissingOptionValue, UnknownOption, OutOfMemory };
+
+fn parseArgs(allocator: std.mem.Allocator, argv: []const []const u8) ParseError!Args {
+    var args = Args{ .rest = std.ArrayList([]const u8).init(allocator) };
+    errdefer args.deinit();
+
     var i: usize = 0;
-    while (i <= haystack.len - needle.len) : (i += 1) {
-        var match = true;
-        for (needle, 0..) |n_char, j| {
-            if (std.ascii.toLower(haystack[i + j]) != std.ascii.toLower(n_char)) {
-                match = false;
-                break;
-            }
+    var after_ddash = false;
+
+    while (i < argv.len) : (i += 1) {
+        const arg = argv[i];
+
+        if (after_ddash) {
+            try args.rest.append(arg);
+            continue;
         }
-        if (match) return i;
-    }
-    return null;
-}
-
-fn urlEncode(allocator: std.mem.Allocator, str: []const u8) ![]const u8 {
-    var out = std.ArrayList(u8).init(allocator);
-    for (str) |c| {
-        switch (c) {
-            'a'...'z', 'A'...'Z', '0'...'9', '-', '_', '.', '~' => try out.append(c),
-            ' ' => try out.appendSlice("%20"),
-            '\n' => try out.appendSlice("%0A"),
-            else => try out.writer().print("%{X:0>2}", .{c}),
+        if (std.mem.eql(u8, arg, "--")) {
+            after_ddash = true;
+            continue;
         }
-    }
-    return try out.toOwnedSlice();
-}
-    if (needle.len > haystack.len) return null;
-    var i: usize = 0;
-    while (i <= haystack.len - needle.len) : (i += 1) {
-        var match = true;
-        for (needle, 0..) |n_char, j| {
-            if (std.ascii.toLower(haystack[i + j]) != std.ascii.toLower(n_char)) {
-                match = false;
-                break;
-            }
-        }
-        if (match) return i;
-    }
-    return null;
-}
 
-pub fn printUsage() void {
-    std.debug.print(ANSI_CYAN ++ ANSI_BOLD ++ "abv0" ++ ANSI_RESET ++ " - The Faster, Secure, Innovative Homebrew Alternative built in pure Zig\n\n", .{});
-    std.debug.print(ANSI_BOLD ++ "USAGE:\n" ++ ANSI_RESET, .{});
-    std.debug.print("  abv0 <command> [options] [arguments]\n\n", .{});
-    std.debug.print(ANSI_BOLD ++ "COMMANDS:\n" ++ ANSI_RESET, .{});
-    std.debug.print("  " ++ ANSI_GREEN ++ "install" ++ ANSI_RESET ++ " <pkg1> [pkg2...] Installs one or multiple packages concurrently\n", .{});
-    std.debug.print("  " ++ ANSI_CYAN ++ "benchmark" ++ ANSI_RESET ++ "                 Executes a highly rigorous multi-paradigm system performance benchmark\n", .{});
-    std.debug.print("  " ++ ANSI_CYAN ++ "update" ++ ANSI_RESET ++ "                   Actively updates and synchronizes global package registry manifests\n", .{});
-    std.debug.print("  " ++ ANSI_YELLOW ++ "bundle" ++ ANSI_RESET ++ " [install/dump]    Orchestrate installations from Brewfile / Abvfile manifests\n", .{});
-    std.debug.print("  " ++ ANSI_RED ++ "uninstall" ++ ANSI_RESET ++ " <pkg>          Remove an installed package and its secure links\n", .{});
-    std.debug.print("  " ++ ANSI_CYAN ++ "outdated" ++ ANSI_RESET ++ "                 List all software packages with newer manifest versions available\n", .{});
-    std.debug.print("  " ++ ANSI_GREEN ++ "upgrade" ++ ANSI_RESET ++ " [pkg1...]         Upgrade all outdated packages or specific target packages\n", .{});
-    std.debug.print("  " ++ ANSI_YELLOW ++ "run" ++ ANSI_RESET ++ " <pkg> [args...]       Run a package executable instantly (auto-installs if missing)\n", .{});
-    std.debug.print("  " ++ ANSI_MAGENTA ++ "shell" ++ ANSI_RESET ++ " <pkg1> [pkg2...]     Innovative Sandboxed Shell: Spawn an ephemeral subshell with specific packages\n", .{});
-    std.debug.print("  " ++ ANSI_GREEN ++ "doctor" ++ ANSI_RESET ++ "                  Innovative System Diagnostic: Verifies PATH profile, permissions, and links\n", .{});
-    std.debug.print("  " ++ ANSI_YELLOW ++ "fix" ++ ANSI_RESET ++ "                     Innovative Automated Repair: Actively fixes broken packages and directory permissions\n", .{});
-    std.debug.print("  " ++ ANSI_RED ++ "detect" ++ ANSI_RESET ++ " <pkg>              Advanced Malware & Suspicious Behavior Heuristic Scanner\n", .{});
-    std.debug.print("  " ++ ANSI_MAGENTA ++ "report" ++ ANSI_RESET ++ " [--bug/--malware] Report issues or malicious packages instantly to GitHub Issues\n", .{});
-    std.debug.print("  " ++ ANSI_RED ++ "reset" ++ ANSI_RESET ++ "                  Total Automated Purge: Completely uninstalls all packages and resets storage\n", .{});
-    std.debug.print("  " ++ ANSI_YELLOW ++ "gc" ++ ANSI_RESET ++ "                      Instant Garbage Collector: Prunes abandoned secure temp downloads and shells\n", .{});
-    std.debug.print("  " ++ ANSI_MAGENTA ++ "search" ++ ANSI_RESET ++ " <query>           Search the lightning-fast abv0 registry\n", .{});
-    std.debug.print("  " ++ ANSI_CYAN ++ "list" ++ ANSI_RESET ++ "                     List all packages available in the secure registry\n", .{});
-    std.debug.print("  " ++ ANSI_GREEN ++ "info" ++ ANSI_RESET ++ " <pkg>                Show detailed package metadata and binary integrity hashes\n\n", .{});
-    std.debug.print(ANSI_BOLD ++ "OPTIONS:\n" ++ ANSI_RESET, .{});
-    std.debug.print("  --micro-split            Enable high-performance range-split multi-chunk download mode\n", .{});
-    std.debug.print("  -f, --file <path>        Target custom file path (supported on bundle commands)\n", .{});
-    std.debug.print("  --force                  Force overwrite target files (supported on bundle dump)\n", .{});
-    std.debug.print("  --platform <name>        Override target platform (e.g. x86_64-macos, aarch64-macos, x86_64-linux)\n", .{});
-    std.debug.print("  --json                   Enable structured JSON machine-readable output (supported on list, info)\n", .{});
-    std.debug.print("  --help, -h               Display this help message\n\n", .{});
-    std.debug.print(ANSI_BOLD ++ "MAC-SPECIFIC INNOVATION:\n" ++ ANSI_RESET, .{});
-    std.debug.print("  On macOS, abv0 bypasses traditional, fragile symlinking and file copying by invoking\n", .{});
-    std.debug.print("  APFS " ++ ANSI_YELLOW ++ "clonefile(2)" ++ ANSI_RESET ++ " for 0ms microsecond-level package setups and zero extra disk storage.\n", .{});
-}
-
-fn writePackageJson(pkg: registry.Package, writer: anytype) !void {
-    try writer.print("{{\n", .{});
-    try writer.print("  \"name\": \"{s}\",\n", .{pkg.name});
-    try writer.print("  \"version\": \"{s}\",\n", .{pkg.version});
-    try writer.print("  \"description\": \"{s}\",\n", .{pkg.description});
-    try writer.print("  \"homepage\": \"{s}\",\n", .{pkg.homepage});
-    try writer.print("  \"license\": \"{s}\",\n", .{pkg.license});
-    try writer.print("  \"bin\": [", .{});
-    for (pkg.bin, 0..) |b, i| {
-        if (i > 0) try writer.print(", ", .{});
-        try writer.print("\"{s}\"", .{b});
-    }
-    try writer.print("],\n", .{});
-    try writer.print("  \"platforms\": {{\n", .{});
-
-    var plat_it = pkg.platforms.iterator();
-    var count: usize = 0;
-    while (plat_it.next()) |plat_entry| {
-        if (count > 0) try writer.print(",\n", .{});
-        const plat = plat_entry.key_ptr.*;
-        const info = plat_entry.value_ptr.*;
-        try writer.print("    \"{s}\": {{\n", .{plat});
-        try writer.print("      \"archive_type\": \"{s}\",\n", .{info.archive_type});
-        try writer.print("      \"sha256\": \"{s}\",\n", .{info.sha256});
-        try writer.print("      \"url\": \"{s}\",\n", .{info.url});
-        try writer.print("      \"bin_path\": \"{s}\"\n", .{info.bin_path});
-        try writer.print("    }}", .{});
-        count += 1;
-    }
-    try writer.print("\n  }}\n}}", .{});
-}
-
-// Thread helper struct for parallel installations
-const InstallWorker = struct {
-    pkg_store: *store.Store,
-    reg: *registry.Registry,
-    pkg_name: []const u8,
-    platform: []const u8,
-    use_micro_split: bool,
-
-    pub fn execute(self: *InstallWorker) void {
-        if (self.reg.packages.get(self.pkg_name)) |pkg| {
-            self.pkg_store.install(pkg, self.platform, self.use_micro_split) catch |err| {
-                std.debug.print("Error installing {s}: {}\n", .{ self.pkg_name, err });
-            };
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            args.want_help = true;
+        } else if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-V")) {
+            args.want_version = true;
+        } else if (std.mem.eql(u8, arg, "--json")) {
+            args.json = true;
+        } else if (std.mem.eql(u8, arg, "--force")) {
+            args.force = true;
+        } else if (std.mem.eql(u8, arg, "--micro-split")) {
+            args.micro_split = true;
+        } else if (std.mem.eql(u8, arg, "--allow-unverified")) {
+            args.allow_unverified = true;
+        } else if (std.mem.eql(u8, arg, "--no-color")) {
+            args.no_color = true;
+        } else if (std.mem.eql(u8, arg, "--bug")) {
+            args.report_bug = true;
+        } else if (std.mem.eql(u8, arg, "--malware")) {
+            args.report_malware = true;
+        } else if (std.mem.eql(u8, arg, "--platform")) {
+            // The original called args_it.next() with no null check, so a
+            // trailing `--platform` silently produced a null platform.
+            i += 1;
+            if (i >= argv.len) return error.MissingOptionValue;
+            args.platform_name = argv[i];
+        } else if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--file")) {
+            i += 1;
+            if (i >= argv.len) return error.MissingOptionValue;
+            args.file = argv[i];
+        } else if (std.mem.eql(u8, arg, "-j") or std.mem.eql(u8, arg, "--jobs")) {
+            i += 1;
+            if (i >= argv.len) return error.MissingOptionValue;
+            args.jobs = std.fmt.parseInt(usize, argv[i], 10) catch return error.MissingOptionValue;
+        } else if (arg.len > 1 and arg[0] == '-' and !std.mem.eql(u8, arg, "-")) {
+            return error.UnknownOption;
+        } else if (args.command == null) {
+            args.command = arg;
         } else {
-            std.debug.print("[ Dynamic Resolution ] Package '{s}' not found in static registry. Activating Universal Automated Fallback Discovery...\n", .{self.pkg_name});
-            self.pkg_store.installDynamic(self.pkg_name, self.platform, self.use_micro_split) catch |err| {
-                std.debug.print("Error dynamically resolving and installing {s}: {}\n", .{ self.pkg_name, err });
-            };
+            try args.rest.append(arg);
+        }
+    }
+    return args;
+}
+
+// ---------------------------------------------------------------------------
+// Help
+// ---------------------------------------------------------------------------
+
+fn printUsage() void {
+    term.print(
+        \\{s}{s}abv0{s} {s} - a fast, verifying package manager in Zig
+        \\
+        \\{s}USAGE{s}
+        \\  abv0 <command> [options] [arguments]
+        \\
+        \\{s}PACKAGES{s}
+        \\  install <pkg>...     Install packages (verified, in parallel)
+        \\  uninstall <pkg>      Remove a package and its links
+        \\  upgrade [pkg]...     Upgrade outdated packages
+        \\  outdated             List packages with a newer version available
+        \\  list                 List registry packages
+        \\  search <query>       Search the registry
+        \\  info <pkg>           Show package metadata
+        \\
+        \\{s}EXECUTION{s}
+        \\  run <pkg> [-- args]  Run a package executable
+        \\  shell <pkg>...       Ephemeral subshell with only those packages
+        \\
+        \\{s}MANIFESTS{s}
+        \\  bundle [install]     Install from a Brewfile
+        \\  bundle dump          Export installed packages to a Brewfile
+        \\  update               Refresh the registry index
+        \\  sync                 Recompile the local index and SQL export
+        \\
+        \\{s}MAINTENANCE{s}
+        \\  doctor               Diagnose PATH, permissions and links
+        \\  fix                  Repair broken links and permissions
+        \\  detect <pkg>         Scan an installed package for malware patterns
+        \\  benchmark            Measure local store and index performance
+        \\  gc                   Remove temporary files and stale sandboxes
+        \\  reset                Uninstall everything
+        \\  report [--bug]       Open a prefilled GitHub issue
+        \\
+        \\{s}OPTIONS{s}
+        \\  --platform <tag>     Target platform (default: {s})
+        \\  -f, --file <path>    Manifest path for bundle commands
+        \\  -j, --jobs <n>       Parallel install workers
+        \\  --allow-unverified   Permit installs without a verified checksum
+        \\  --micro-split        Parallel ranged download for large assets
+        \\  --force              Overwrite output files
+        \\  --json               Machine-readable output (list, info, outdated)
+        \\  --no-color           Disable colour
+        \\  -h, --help           This message
+        \\  -V, --version        Version
+        \\
+    , .{
+        term.bold,   term.cyan, term.reset, version,
+        term.bold,   term.reset,
+        term.bold,   term.reset,
+        term.bold,   term.reset,
+        term.bold,   term.reset,
+        term.bold,   term.reset,
+        term.bold,   term.reset,
+        platform.defaultPlatformTag(),
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Registry acquisition
+// ---------------------------------------------------------------------------
+
+fn registryPaths(a: std.mem.Allocator, st: *const store.Store) ![2][]u8 {
+    const json = try std.fs.path.join(a, &.{ st.registry_root, "index.json" });
+    const idx = try std.fs.path.join(a, &.{ st.registry_root, "index.abv" });
+    return .{ json, idx };
+}
+
+/// Seed the user registry from the repository copy (development checkout) or
+/// by downloading it.
+/// Materialise the registry manifest, atomically.
+///
+/// This used to write `index.json` in place. Two `abv0` processes started at
+/// once on a fresh machine would then both create it, and whichever one read
+/// the file while the other was still writing got a truncated document and
+/// reported `MalformedManifest`. Downloading to a unique temporary name,
+/// validating it, and renaming into place makes the publish step atomic: a
+/// reader sees either no file or a complete, parseable one.
+fn ensureRegistryFile(a: std.mem.Allocator, json_path: []const u8) !void {
+    if (std.fs.cwd().access(json_path, .{})) |_| return else |_| {}
+
+    const tmp_path = try std.fmt.allocPrint(a, "{s}.{x}.tmp", .{ json_path, std.crypto.random.int(u64) });
+    defer a.free(tmp_path);
+    errdefer std.fs.cwd().deleteFile(tmp_path) catch {};
+
+    if (std.fs.cwd().access("packages/index.json", .{})) |_| {
+        try std.fs.cwd().copyFile("packages/index.json", std.fs.cwd(), tmp_path, .{});
+    } else |_| {
+        term.print("fetching registry index...\n", .{});
+        try net.download(a, registry_url, tmp_path, .{});
+    }
+
+    // Never publish something the parser would reject: a corrupt download must
+    // not become the registry every later command reads.
+    var probe = try registry.loadFromJsonFile(a, tmp_path, null);
+    probe.deinit();
+
+    try std.fs.cwd().rename(tmp_path, json_path);
+}
+
+fn loadRegistry(a: std.mem.Allocator, st: *const store.Store) !registry.Registry {
+    const paths = try registryPaths(a, st);
+    defer a.free(paths[0]);
+    defer a.free(paths[1]);
+
+    ensureRegistryFile(a, paths[0]) catch |e| {
+        term.err("{s}error{s}: no package registry available: {s}\n", .{ term.red, term.reset, @errorName(e) });
+        return e;
+    };
+
+    return abvindex.loadCached(a, paths[0], paths[1]) catch |e| {
+        term.err("{s}error{s}: could not load registry: {s}\n", .{ term.red, term.reset, @errorName(e) });
+        return e;
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Parallel install
+// ---------------------------------------------------------------------------
+
+const Batch = struct {
+    st: *store.Store,
+    reg: *const registry.Registry,
+    names: []const []const u8,
+    platform_name: []const u8,
+    opts: store.InstallOptions,
+    next: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    failures: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+
+    fn worker(self: *Batch) void {
+        while (true) {
+            const i = self.next.fetchAdd(1, .monotonic);
+            if (i >= self.names.len) return;
+            const name = self.names[i];
+
+            var arena = std.heap.ArenaAllocator.init(self.st.allocator);
+            defer arena.deinit();
+
+            if (store.Store.resolveRequest(self.reg, name)) |pkg| {
+                self.st.install(pkg, self.platform_name, self.opts) catch |e| {
+                    if (!store.alreadyDiagnosed(e)) {
+                        term.err("{s}error{s}: {s}: {s}\n", .{ term.red, term.reset, name, @errorName(e) });
+                    }
+                    _ = self.failures.fetchAdd(1, .monotonic);
+                };
+            } else {
+                _ = self.st.installDynamic(arena.allocator(), name, self.platform_name, self.opts) catch |e| {
+                    if (!store.alreadyDiagnosed(e)) {
+                        term.err("{s}error{s}: {s}: {s}\n", .{ term.red, term.reset, name, @errorName(e) });
+                    }
+                    _ = self.failures.fetchAdd(1, .monotonic);
+                };
+            }
         }
     }
 };
 
-pub fn main() !void {
+fn runBatch(a: std.mem.Allocator, batch: *Batch, requested_jobs: ?usize) !usize {
+    const cpus = std.Thread.getCpuCount() catch 2;
+    // The original spawned one OS thread per package with no bound, so a
+    // 50-entry Brewfile created 50 threads all contending for bandwidth.
+    const jobs = @max(1, @min(requested_jobs orelse cpus, @min(batch.names.len, 8)));
+
+    const threads = try a.alloc(std.Thread, jobs);
+    defer a.free(threads);
+
+    for (threads) |*t| t.* = try std.Thread.spawn(.{}, Batch.worker, .{batch});
+    for (threads) |t| t.join();
+
+    return batch.failures.load(.monotonic);
+}
+
+// ---------------------------------------------------------------------------
+// JSON output
+// ---------------------------------------------------------------------------
+
+fn writePackageJson(w: anytype, pkg: registry.Package) !void {
+    try w.writeAll("{");
+    try w.print("\"name\":\"{s}\",", .{pkg.name});
+    try w.print("\"version\":\"{s}\",", .{pkg.version});
+    try w.writeAll("\"description\":");
+    try std.json.encodeJsonString(pkg.description, .{}, w);
+    try w.writeAll(",\"homepage\":");
+    try std.json.encodeJsonString(pkg.homepage, .{}, w);
+    try w.print(",\"license\":\"{s}\",\"bin\":[", .{pkg.license});
+    for (pkg.bin, 0..) |b, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.print("\"{s}\"", .{b});
+    }
+    try w.writeAll("],\"platforms\":{");
+    for (pkg.platforms, 0..) |p, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.print("\"{s}\":{{\"archive_type\":\"{s}\",\"sha256\":\"{s}\",\"bin_path\":\"{s}\",\"url\":", .{
+            p.name, p.archive_type, p.sha256, p.bin_path,
+        });
+        try std.json.encodeJsonString(p.url, .{}, w);
+        try w.writeAll("}");
+    }
+    try w.writeAll("}}");
+}
+
+// ---------------------------------------------------------------------------
+// main
+// ---------------------------------------------------------------------------
+
+pub fn main() u8 {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    const base_allocator = gpa.allocator();
 
-    var arena = std.heap.ArenaAllocator.init(base_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+    // Install workers allocate concurrently. The original handed them a plain
+    // ArenaAllocator, which is not thread-safe.
+    var thread_safe = std.heap.ThreadSafeAllocator{ .child_allocator = gpa.allocator() };
+    const base = thread_safe.allocator();
 
-    var args_it = try std.process.argsWithAllocator(allocator);
-    defer args_it.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(base);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
 
-    _ = args_it.next(); // skip exe name
-
-    var command: ?[]const u8 = null;
-    var override_platform: ?[]const u8 = null;
-    var target_file: ?[]const u8 = null;
-    var force_flag = false;
-    var json_output = false;
-    var use_micro_split = false;
-    var report_bug = false;
-    var report_malware = false;
-    var cmd_args = std.ArrayList([]const u8).init(allocator);
-
-    while (args_it.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            printUsage();
-            return;
-        } else if (std.mem.eql(u8, arg, "--json")) {
-            json_output = true;
-        } else if (std.mem.eql(u8, arg, "--micro-split")) {
-            use_micro_split = true;
-        } else if (std.mem.eql(u8, arg, "--force")) {
-            force_flag = true;
-        } else if (std.mem.eql(u8, arg, "--bug")) {
-            report_bug = true;
-        } else if (std.mem.eql(u8, arg, "--malware")) {
-            report_malware = true;
-        } else if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--file")) {
-            target_file = args_it.next();
-        } else if (std.mem.eql(u8, arg, "--platform")) {
-            override_platform = args_it.next();
-        } else if (command == null) {
-            command = arg;
-        } else {
-            try cmd_args.append(arg);
+    const code = run(base, a) catch |e| {
+        // Only fall back to the bare error name when nothing more useful has
+        // already been printed, so failures are reported exactly once.
+        if (!term.anythingReported()) {
+            term.err("{s}error{s}: {s}\n", .{ term.red, term.reset, @errorName(e) });
         }
-    }
+        term.flush();
+        return 1;
+    };
+    term.flush();
+    return code;
+}
 
-    if (command == null) {
+fn run(base: std.mem.Allocator, a: std.mem.Allocator) !u8 {
+    const argv = try std.process.argsAlloc(a);
+    const rest_argv = if (argv.len > 1) argv[1..] else &[_][]const u8{};
+
+    var args = parseArgs(a, rest_argv) catch |e| {
+        term.init(false);
+        switch (e) {
+            error.MissingOptionValue => term.err("error: option requires a value\n", .{}),
+            error.UnknownOption => term.err("error: unknown option\n", .{}),
+            else => return e,
+        }
+        return 2;
+    };
+    defer args.deinit();
+
+    term.init(args.no_color);
+
+    if (args.want_version) {
+        term.print("abv0 {s} ({s})\n", .{ version, platform.defaultPlatformTag() });
+        return 0;
+    }
+    // Help must not touch the filesystem at all.
+    if (args.want_help or args.command == null) {
         printUsage();
-        return;
+        return 0;
     }
 
-    const platform = override_platform orelse getDefaultPlatform();
-
-    // Start precision timer
-    var timer = try std.time.Timer.start();
-
-    // Init Registry & Store
-    var reg = registry.Registry.init(allocator);
-    defer reg.deinit();
-
-    // High-performance robust self-healing Registry Finder
-    var registry_loaded = false;
-    var global_reg_path_saved: ?[]const u8 = null;
-    const home_dir = std.posix.getenv("HOME");
-    if (home_dir) |h_dir| {
-        const reg_dir = try std.fs.path.join(allocator, &.{ h_dir, ".abv0", "registry" });
-        defer allocator.free(reg_dir);
-
-        std.fs.cwd().makePath(reg_dir) catch {};
-        const global_reg_path = try std.fs.path.join(allocator, &.{ reg_dir, "index.json" });
-        global_reg_path_saved = global_reg_path;
-
-        if (reg.loadFromFile(global_reg_path)) |_| {
-            registry_loaded = true;
-        } else |_| {
-            // Self-heal actively by downloading fresh manifest registry
-            std.debug.print("Initializing secure local abv0 registry index...\n", .{});
-            const curl_res = try std.process.Child.run(.{
-                .allocator = allocator,
-                .argv = &.{ "curl", "-s", "-L", "https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/packages/index.json", "-o", global_reg_path },
-            });
-            defer {
-                allocator.free(curl_res.stdout);
-                allocator.free(curl_res.stderr);
-            }
-            if (curl_res.term.Exited == 0) {
-                if (reg.loadFromFile(global_reg_path)) |_| {
-                    registry_loaded = true;
-                } else |_| {}
-            }
-        }
-    }
-
-    // Local sandbox development fallback
-    if (!registry_loaded) {
-        reg.loadFromFile("packages/index.json") catch |err| {
-            std.debug.print("Error: Failed to load package registry: {}\n", .{err});
-            return;
-        };
-    }
-
-    var pkg_store = try store.Store.init(allocator);
-    defer pkg_store.deinit();
-
-    const cmd = command.?;
+    const cmd = args.command.?;
     if (std.mem.eql(u8, cmd, "help")) {
         printUsage();
-    } else if (std.mem.eql(u8, cmd, "update")) {
-        var child = std.process.Child.init(&.{ "sh", "-c", "curl -sL https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/install.sh | sh" }, allocator);
-        _ = try child.spawnAndWait();
-    } else if (std.mem.eql(u8, cmd, "list")) {
-        if (json_output) {
-            const writer = std.io.getStdOut().writer();
-            try writer.print("[\n", .{});
-            var it = reg.packages.iterator();
-            var count: usize = 0;
-            while (it.next()) |entry| {
-                if (count > 0) try writer.print(",\n", .{});
-                try writePackageJson(entry.value_ptr.*, writer);
-                count += 1;
-            }
-            try writer.print("\n]\n", .{});
-        } else {
-            std.debug.print(ANSI_CYAN ++ ANSI_BOLD ++ "Available Packages in secure abv0 Registry:\n\n" ++ ANSI_RESET, .{});
-            var it = reg.packages.iterator();
-            while (it.next()) |entry| {
-                const pkg = entry.value_ptr.*;
-                std.debug.print("  " ++ ANSI_GREEN ++ ANSI_BOLD ++ "{s}" ++ ANSI_RESET ++ " v{s}\n    {s}\n\n", .{ pkg.name, pkg.version, pkg.description });
-            }
-        }
-    } else if (std.mem.eql(u8, cmd, "search")) {
-        if (cmd_args.items.len == 0) {
-            std.debug.print("Error: Please provide a search query. Example: abv0 search json\n", .{});
-            return;
-        }
-        const query = cmd_args.items[0];
-        std.debug.print(ANSI_CYAN ++ ANSI_BOLD ++ "Search results for '{s}':\n\n" ++ ANSI_RESET, .{query});
+        return 0;
+    }
+    // `abv0 version` is as natural as `abv0 --version`; accept both.
+    if (std.mem.eql(u8, cmd, "version")) {
+        term.print("abv0 {s} ({s})\n", .{ version, platform.defaultPlatformTag() });
+        return 0;
+    }
 
-        var found = false;
-        var it = reg.packages.iterator();
-        while (it.next()) |entry| {
-            const pkg = entry.value_ptr.*;
-            const name_match = indexOfIgnoreCase(pkg.name, query) != null;
-            const desc_match = indexOfIgnoreCase(pkg.description, query) != null;
+    const platform_name = args.platform_name orelse platform.defaultPlatformTag();
+    if (!platform.isKnownPlatformTag(platform_name)) {
+        term.err("{s}error{s}: unknown platform '{s}'\n", .{ term.red, term.reset, platform_name });
+        return 2;
+    }
 
-            if (name_match or desc_match) {
-                found = true;
-                std.debug.print("  " ++ ANSI_GREEN ++ ANSI_BOLD ++ "{s}" ++ ANSI_RESET ++ " v{s}\n    {s}\n\n", .{ pkg.name, pkg.version, pkg.description });
-            }
-        }
-        if (!found) {
-            std.debug.print("  No packages found matching your query.\n", .{});
-        }
-    } else if (std.mem.eql(u8, cmd, "info")) {
-        if (cmd_args.items.len == 0) {
-            std.debug.print("Error: Please provide a package name. Example: abv0 info jq\n", .{});
-            return;
-        }
-        const pkg_name = cmd_args.items[0];
-        const pkg = reg.packages.get(pkg_name) orelse {
-            std.debug.print("Error: Package '{s}' not found in registry.\n", .{pkg_name});
-            return;
-        };
+    const opts = store.InstallOptions{
+        .micro_split = args.micro_split,
+        .allow_unverified = args.allow_unverified,
+    };
 
-        if (json_output) {
-            const writer = std.io.getStdOut().writer();
-            try writePackageJson(pkg, writer);
-            try writer.print("\n", .{});
-        } else {
-            std.debug.print(ANSI_CYAN ++ ANSI_BOLD ++ "Information for {s}:\n" ++ ANSI_RESET, .{pkg.name});
-            std.debug.print("  " ++ ANSI_BOLD ++ "Version:" ++ ANSI_RESET ++ "     {s}\n", .{pkg.version});
-            std.debug.print("  " ++ ANSI_BOLD ++ "Description:" ++ ANSI_RESET ++ " {s}\n", .{pkg.description});
-            std.debug.print("  " ++ ANSI_BOLD ++ "Homepage:" ++ ANSI_RESET ++ "    {s}\n", .{pkg.homepage});
-            std.debug.print("  " ++ ANSI_BOLD ++ "License:" ++ ANSI_RESET ++ "     {s}\n", .{pkg.license});
-            std.debug.print("  " ++ ANSI_BOLD ++ "Binaries:" ++ ANSI_RESET ++ "    ", .{});
-            for (pkg.bin) |b| {
-                std.debug.print("{s} ", .{b});
-            }
-            std.debug.print("\n\n  " ++ ANSI_BOLD ++ "Supported Platforms & SHA256 Cryptographic Hashes:\n" ++ ANSI_RESET, .{});
+    var timer = try std.time.Timer.start();
 
-            var plat_it = pkg.platforms.iterator();
-            while (plat_it.next()) |plat_entry| {
-                const plat = plat_entry.key_ptr.*;
-                const info = plat_entry.value_ptr.*;
-                std.debug.print("    " ++ ANSI_YELLOW ++ "{s}" ++ ANSI_RESET ++ "\n", .{plat});
-                std.debug.print("      Archive:  {s}\n", .{info.archive_type});
-                std.debug.print("      Checksum: {s}\n", .{info.sha256});
-                std.debug.print("      URL:      {s}\n\n", .{info.url});
-            }
+    var st = try store.Store.init(base);
+    defer st.deinit();
+
+    // ---- commands that need no registry ----
+    if (std.mem.eql(u8, cmd, "gc")) {
+        const n = try st.gc(a);
+        term.print("reclaimed {d} items in {d:.2}ms\n", .{ n, ms(timer.read()) });
+        return 0;
+    }
+    if (std.mem.eql(u8, cmd, "update")) {
+        return cmdUpdate(a, &st);
+    }
+    if (std.mem.eql(u8, cmd, "report")) {
+        return cmdReport(a, &args, platform_name);
+    }
+
+    var reg = try loadRegistry(base, &st);
+    defer reg.deinit();
+
+    if (std.mem.eql(u8, cmd, "list")) return cmdList(&reg, args.json);
+    if (std.mem.eql(u8, cmd, "search")) return cmdSearch(&reg, args.rest.items);
+    if (std.mem.eql(u8, cmd, "info")) return cmdInfo(&reg, args.rest.items, args.json);
+    if (std.mem.eql(u8, cmd, "install")) return cmdInstall(a, &st, &reg, &args, platform_name, opts, &timer);
+    if (std.mem.eql(u8, cmd, "uninstall")) return cmdUninstall(a, &st, &reg, args.rest.items);
+    if (std.mem.eql(u8, cmd, "outdated")) return cmdOutdated(a, &st, &reg, platform_name, args.json);
+    if (std.mem.eql(u8, cmd, "upgrade")) return cmdUpgrade(a, &st, &reg, args.rest.items, platform_name, opts);
+    if (std.mem.eql(u8, cmd, "run")) return cmdRun(a, &st, &reg, args.rest.items, platform_name, opts);
+    if (std.mem.eql(u8, cmd, "shell")) return cmdShell(a, &st, &reg, args.rest.items, platform_name, opts);
+    if (std.mem.eql(u8, cmd, "bundle")) return cmdBundle(a, &st, &reg, &args, platform_name, opts);
+    if (std.mem.eql(u8, cmd, "doctor")) {
+        const h = try st.doctor(a, &reg, platform_name);
+        term.print("\n{d} warnings, {d} broken links ({d:.2}ms)\n", .{ h.warnings, h.broken_links, ms(timer.read()) });
+        return if (h.warnings + h.broken_links == 0) 0 else 1;
+    }
+    if (std.mem.eql(u8, cmd, "fix")) {
+        const n = try st.fix(a, &reg, platform_name);
+        term.print("repaired {d} packages in {d:.2}ms\n", .{ n, ms(timer.read()) });
+        return 0;
+    }
+    if (std.mem.eql(u8, cmd, "detect")) return cmdDetect(a, &st, &reg, args.rest.items, platform_name);
+    if (std.mem.eql(u8, cmd, "reset")) {
+        const n = try st.resetAll(a, &reg, platform_name);
+        term.print("uninstalled {d} packages; store reset\n", .{n});
+        return 0;
+    }
+    if (std.mem.eql(u8, cmd, "sync") or std.mem.eql(u8, cmd, "hybrid-sync")) {
+        try st.exportRegistry(a, &reg);
+        term.print("\nsynchronised in {d:.2}ms\n", .{ms(timer.read())});
+        return 0;
+    }
+    if (std.mem.eql(u8, cmd, "benchmark")) return cmdBenchmark(a, &st, &reg, platform_name);
+
+    term.err("{s}error{s}: unknown command '{s}' (try `abv0 help`)\n", .{ term.red, term.reset, cmd });
+    return 2;
+}
+
+fn ms(ns: u64) f64 {
+    return @as(f64, @floatFromInt(ns)) / 1_000_000.0;
+}
+
+// ---------------------------------------------------------------------------
+// Command implementations
+// ---------------------------------------------------------------------------
+
+fn cmdList(reg: *const registry.Registry, json: bool) !u8 {
+    if (json) {
+        const w = term.writer();
+        try w.writeAll("[");
+        for (reg.packages, 0..) |pkg, i| {
+            if (i > 0) try w.writeAll(",");
+            try writePackageJson(w, pkg);
         }
-    } else if (std.mem.eql(u8, cmd, "install")) {
-        if (cmd_args.items.len == 0) {
-            std.debug.print("Error: Please provide at least one package name. Example: abv0 install jq ripgrep\n", .{});
-            return;
-        }
+        try w.writeAll("]\n");
+        return 0;
+    }
+    for (reg.packages) |pkg| {
+        term.print("{s}{s}{s} {s}{s}{s}\n    {s}\n", .{
+            term.bold, pkg.name, term.reset, term.dim, pkg.version, term.reset, pkg.description,
+        });
+    }
+    term.print("\n{d} packages\n", .{reg.count()});
+    return 0;
+}
 
-        // Innovative Feature: Parallel Batch Installations with Dynamic Decentralized Discovery Fallback
-        var workers = std.ArrayList(InstallWorker).init(allocator);
-        var threads = std.ArrayList(std.Thread).init(allocator);
+fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    return std.ascii.indexOfIgnoreCase(haystack, needle) != null;
+}
 
-        for (cmd_args.items) |pkg_name| {
-            try workers.append(.{
-                .pkg_store = &pkg_store,
-                .reg = &reg,
-                .pkg_name = pkg_name,
-                .platform = platform,
-                .use_micro_split = use_micro_split,
+fn cmdSearch(reg: *const registry.Registry, rest: []const []const u8) !u8 {
+    if (rest.len == 0) {
+        term.err("usage: abv0 search <query>\n", .{});
+        return 2;
+    }
+    const q = rest[0];
+    var found: usize = 0;
+    for (reg.packages) |pkg| {
+        if (containsIgnoreCase(pkg.name, q) or containsIgnoreCase(pkg.description, q)) {
+            found += 1;
+            term.print("{s}{s}{s} {s}{s}{s}\n    {s}\n", .{
+                term.bold, pkg.name, term.reset, term.dim, pkg.version, term.reset, pkg.description,
             });
         }
-
-        store.printProgressBar("Orchestrating concurrent worker setup threads...", 1, 1);
-
-        // Launch parallel worker execution threads
-        for (workers.items) |*worker| {
-            const thread = try std.Thread.spawn(.{}, InstallWorker.execute, .{worker});
-            try threads.append(thread);
-        }
-
-        // Join all worker threads safely
-        for (threads.items) |thread| {
-            thread.join();
-        }
-
-        const elapsed_ns = timer.read();
-        const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
-        std.debug.print(ANSI_GREEN ++ ANSI_BOLD ++ "\n[ COMPLETED ] Successfully finished setup for {} packages in {d:.2}ms!\n" ++ ANSI_RESET, .{ workers.items.len, elapsed_ms });
-        std.debug.print("Note: Make sure to add {s} to your PATH!\n", .{pkg_store.bin_root});
-    } else if (std.mem.eql(u8, cmd, "bundle")) {
-        // Brewfile / Abvfile Orchestrator
-        const sub_directive = if (cmd_args.items.len > 0) cmd_args.items[0] else "install";
-        const f_path = target_file orelse "Brewfile";
-
-        if (std.mem.eql(u8, sub_directive, "install")) {
-            try pkg_store.bundleInstall(&reg, f_path, platform, use_micro_split);
-        } else if (std.mem.eql(u8, sub_directive, "dump")) {
-            try pkg_store.bundleDump(&reg, f_path, force_flag, platform);
-        } else {
-            std.debug.print("Error: Unknown bundle directive '{s}'. Use 'abv0 bundle install' or 'abv0 bundle dump'.\n", .{sub_directive});
-        }
-    } else if (std.mem.eql(u8, cmd, "uninstall")) {
-        if (cmd_args.items.len == 0) {
-            std.debug.print("Error: Please provide a package name. Example: abv0 uninstall jq\n", .{});
-            return;
-        }
-        const pkg_name = cmd_args.items[0];
-        const pkg = reg.packages.get(pkg_name) orelse {
-            std.debug.print("Error: Package '{s}' not found in registry.\n", .{pkg_name});
-            return;
-        };
-
-        try pkg_store.uninstall(pkg);
-        const elapsed_ns = timer.read();
-        const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
-        std.debug.print(ANSI_GREEN ++ ANSI_BOLD ++ "\n[ COMPLETED ] Successfully uninstalled {s} in {d:.2}ms!\n" ++ ANSI_RESET, .{ pkg.name, elapsed_ms });
-    } else if (std.mem.eql(u8, cmd, "hybrid-sync") or std.mem.eql(u8, cmd, "sync")) {
-        // Active 4-in-1 Hybrid Core Synchronizer
-        try pkg_store.synchronizeHybridRegistry(&reg);
-        const elapsed_ns = timer.read();
-        const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
-        std.debug.print("Completed hybrid sync sequence in {d:.2}ms.\n", .{elapsed_ms});
-    } else if (std.mem.eql(u8, cmd, "outdated")) {
-        // List Outdated
-        std.debug.print("Scanning installed packages against active registry manifests...\n", .{});
-        const outdated_pkgs = try pkg_store.getOutdated(&reg, platform);
-        defer outdated_pkgs.deinit();
-
-        std.debug.print(ANSI_CYAN ++ ANSI_BOLD ++ "\nOutdated Packages Available for Upgrade:\n\n" ++ ANSI_RESET, .{});
-        if (outdated_pkgs.items.len == 0) {
-            std.debug.print("  -> Everything is completely up to date with the latest registry definitions!\n\n", .{});
-        } else {
-            for (outdated_pkgs.items) |pkg| {
-                std.debug.print("  " ++ ANSI_YELLOW ++ "{s}" ++ ANSI_RESET ++ " (Newest manifest: v{s})\n", .{ pkg.name, pkg.version });
-            }
-            std.debug.print("\nRun 'abv0 upgrade' to automatically install and link all updated binaries.\n", .{});
-        }
-    } else if (std.mem.eql(u8, cmd, "upgrade")) {
-        // Upgrade specific or all
-        try pkg_store.upgradePackages(&reg, cmd_args.items, platform, use_micro_split);
-    } else if (std.mem.eql(u8, cmd, "reset")) {
-        // Total Purge Reset
-        try pkg_store.resetAll(&reg, platform);
-    } else if (std.mem.eql(u8, cmd, "run")) {
-        if (cmd_args.items.len == 0) {
-            std.debug.print("Error: Please provide a package name to run. Example: abv0 run jq -- --version\n", .{});
-            return;
-        }
-        const pkg_name = cmd_args.items[0];
-
-        var actual_run_args = cmd_args.items[1..];
-        if (actual_run_args.len > 0 and std.mem.eql(u8, actual_run_args[0], "--")) {
-            actual_run_args = actual_run_args[1..];
-        }
-
-        try pkg_store.executeAny(&reg, pkg_name, platform, actual_run_args, use_micro_split);
-    } else if (std.mem.eql(u8, cmd, "shell")) {
-        // Ephemeral Sandboxed Shell
-        if (cmd_args.items.len == 0) {
-            std.debug.print("Error: Please provide at least one package name for your sandboxed shell. Example: abv0 shell jq ripgrep\n", .{});
-            return;
-        }
-
-        try pkg_store.executeShellAny(&reg, cmd_args.items, platform, use_micro_split);
-    } else if (std.mem.eql(u8, cmd, "doctor")) {
-        // Diagnostic Doctor
-        try pkg_store.doctor(&reg, platform);
-        const elapsed_ns = timer.read();
-        const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
-        std.debug.print("Diagnostic finished in {d:.2}ms.\n", .{elapsed_ms});
-    } else if (std.mem.eql(u8, cmd, "fix")) {
-        // Auto-fix Active Repair
-        try pkg_store.fix(&reg, platform);
-        const elapsed_ns = timer.read();
-        const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
-        std.debug.print("Repair sequence completed in {d:.2}ms.\n", .{elapsed_ms});
-    } else if (std.mem.eql(u8, cmd, "report")) {
-        // Active Community Issue & Malware Web Reporter
-        std.debug.print("=== [ abv0 Global Security & Community Issue Reporter ] ===\n\n", .{});
-
-        var issue_title: []const u8 = "abv0 Community Issue Report";
-        var issue_type: []const u8 = "General Bug / Enhancement";
-        var issue_details: []const u8 = if (cmd_args.items.len > 0) cmd_args.items[0] else "Please describe the problem or anomalous behavior observed.";
-
-        if (report_bug) {
-            issue_title = if (cmd_args.items.len > 0) try std.fmt.allocPrint(allocator, "[ Bug Report ] {s}", .{cmd_args.items[0]}) else "[ Bug Report ] abv0 Core Execution anomaly";
-            issue_type = "Core Execution Anomaly / Formula Error";
-        } else if (report_malware) {
-            const target_pkg = if (cmd_args.items.len > 0) cmd_args.items[0] else "Suspicious payload";
-            issue_title = try std.fmt.allocPrint(allocator, "[ SECURITY BREAK ] Malicious Heuristics detected in target '{s}'", .{target_pkg});
-            issue_type = "Malware Security Alert";
-            issue_details = try std.fmt.allocPrint(allocator, "Malware behavioral heuristics (reverse shell sequences, Stratum mining protocols, or credential stealing) observed during execution of '{s}'.", .{target_pkg});
-        }
-
-        const raw_body = try std.fmt.allocPrint(allocator,
-            "### abv0 Core Threat & Diagnostic Report\n\n" ++
-            "**Report Type:** {s}\n" ++
-            "**Platform Profiles:** {s}\n" ++
-            "**Active Target Platform:** definitive v1.2.0 profile\n\n" ++
-            "#### Description & Anomalous Behavior Observed\n{s}\n",
-            .{ issue_type, platform, issue_details }
-        );
-
-        const encoded_title = try urlEncode(allocator, issue_title);
-        const encoded_body = try urlEncode(allocator, raw_body);
-
-        const final_url = try std.fmt.allocPrint(allocator, "https://github.com/gugu8intel-i9/abv0/issues/new?title={s}&body={s}", .{ encoded_title, encoded_body });
-
-        std.debug.print("Assembling structured diagnostic report for GitHub Issues...\n\n", .{});
-        std.debug.print("{s}\n", .{raw_body});
-
-        store.printProgressBar("Launching interactive browser to GitHub Issues...", 1, 1);
-
-        const open_exe = if (builtin.target.os.tag == .macos) "open" else "xdg-open";
-        _ = std.process.Child.run(.{ .allocator = allocator, .argv = &.{ open_exe, final_url } }) catch {};
-
-        std.debug.print("\n[ Ready for submission ] If your browser did not open automatically, access this exact link:\n{s}\n", .{final_url});
-    } else if (std.mem.eql(u8, cmd, "benchmark")) {
-        // High-Performance Multi-Faceted Live Core Performance Systems Benchmark
-        std.debug.print("=== [ abv0 Multi-Faceted Core Systems Performance Benchmark ] ===\n\n", .{});
-        std.debug.print("Executing rigorous multi-paradigm performance evaluation on native host hardware...\n\n", .{});
-
-        var b_timer = try std.time.Timer.start();
-
-        // 1. Unified Manifest Memory Index Lookup Benchmark
-        store.printProgressBar("Evaluating Zero-Allocation Memory Arena Lookup Speeds...", 1, 4);
-        var lookup_count: u32 = 0;
-        for (0..10_000) |i| {
-            const key_str = if (i % 2 == 0) "jq" else "ripgrep";
-            if (reg.packages.get(key_str)) |_| { lookup_count += 1; }
-        }
-        const lookup_ns = b_timer.lap();
-        const lookup_ms = @as(f64, @floatFromInt(lookup_ns)) / 1_000_000.0;
-
-        // 2. High-Speed Virtual Scratch APFS Linking / Linking Speeds
-        store.printProgressBar("Evaluating Native File Linking & Copy-on-Write Latency...", 2, 4);
-        const scratch_dir = try std.fs.path.join(allocator, &.{ pkg_store.store_root, "benchmark_scratch" });
-        defer allocator.free(scratch_dir);
-        std.fs.cwd().makePath(scratch_dir) catch {};
-
-        const dummy_bin = try std.fs.path.join(allocator, &.{ scratch_dir, "dummy_exe" });
-        defer allocator.free(dummy_bin);
-        const df = try std.fs.cwd().createFile(dummy_bin, .{ .mode = 0o700 });
-        try df.writeAll("ABV0_HIGH_PERFORMANCE_DUMMY_BINARY\n");
-        df.close();
-
-        for (0..100) |i| {
-            const ln_target = try std.fmt.allocPrint(allocator, "{s}.{d}", .{ dummy_bin, i });
-            defer allocator.free(ln_target);
-            _ = try os_macos.fastLink(dummy_bin, ln_target);
-        }
-        const link_ns = b_timer.lap();
-        const link_ms = @as(f64, @floatFromInt(link_ns)) / 1_000_000.0;
-        std.fs.cwd().deleteTree(scratch_dir) catch {};
-
-        // 3. Automated Hybrid Next-Generation Matrix Reconciler Latency
-        store.printProgressBar("Evaluating Hybrid Embedded Store Synchronization State...", 3, 4);
-        try pkg_store.synchronizeHybridRegistry(&reg);
-        const sync_ns = b_timer.lap();
-        const sync_ms = @as(f64, @floatFromInt(sync_ns)) / 1_000_000.0;
-
-        // 4. Cached Package Resolution & Execution Setup
-        store.printProgressBar("Evaluating Complete Sub-10ms Package Re-Link Sequence...", 4, 4);
-        if (reg.packages.get("jq")) |jpkg| {
-            try pkg_store.install(jpkg, platform, false);
-        }
-        const setup_ns = b_timer.lap();
-        const setup_ms = @as(f64, @floatFromInt(setup_ns)) / 1_000_000.0;
-
-        std.debug.print("\n=== [ Performance Systems Benchmark Report ] ===\n", .{});
-        std.debug.print("| Benchmark Suite System Operation | Iterations / Scope | Execution Time | Average Latency |\n", .{});
-        std.debug.print("| :--- | :--- | :--- | :--- |\n", .{});
-        std.debug.print("| Virtual Memory Arena Manifest Lookups | 10,000 queries | {d:.2} ms | {d:.4} us / query |\n", .{ lookup_ms, (lookup_ms * 1000.0) / 10000.0 });
-        std.debug.print("| APFS / Host Native Virtual Linking Latency | 100 executions | {d:.2} ms | {d:.4} us / link |\n", .{ link_ms, (link_ms * 1000.0) / 100.0 });
-        std.debug.print("| 4-in-1 Hybrid Registry Matrix Reconcile | Total ecosystem | {d:.2} ms | {d:.2} ms / sync |\n", .{ sync_ms, sync_ms });
-        std.debug.print("| Sub-10ms Universal Package Re-Link | 1 complete setup | {d:.2} ms | {d:.2} ms / setup |\n", .{ setup_ms, setup_ms });
-
-        std.debug.print("\n[ BENCHMARK Complete ] All hardware execution latency profiles verify exceptional sub-10ms target guarantees!\n", .{});
-    } else if (std.mem.eql(u8, cmd, "detect")) {
-        // Advanced Malware Scanner
-        if (cmd_args.items.len == 0) {
-            std.debug.print("Error: Please provide a package name to detect. Example: abv0 detect threat-sample\n", .{});
-            return;
-        }
-        const pkg_name = cmd_args.items[0];
-        const pkg = reg.packages.get(pkg_name) orelse {
-            std.debug.print("Error: Package '{s}' not found in registry.\n", .{pkg_name});
-            return;
-        };
-
-        try pkg_store.detectMalware(pkg, platform);
-    } else if (std.mem.eql(u8, cmd, "gc")) {
-        // Instant Garbage Collection
-        try pkg_store.gc();
-        const elapsed_ns = timer.read();
-        const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
-        std.debug.print("[ GC FINISHED ] Pruned residual temp files in {d:.2}ms.\n", .{elapsed_ms});
-    } else {
-        std.debug.print("Error: Unknown command: {s}\n\n", .{cmd});
-        printUsage();
     }
+    if (found == 0) {
+        term.print("no packages match '{s}'\n", .{q});
+        return 1;
+    }
+    return 0;
+}
+
+fn cmdInfo(reg: *const registry.Registry, rest: []const []const u8, json: bool) !u8 {
+    if (rest.len == 0) {
+        term.err("usage: abv0 info <pkg>\n", .{});
+        return 2;
+    }
+    const pkg = store.Store.resolveRequest(reg, rest[0]) orelse {
+        term.err("{s}error{s}: '{s}' not found\n", .{ term.red, term.reset, rest[0] });
+        return 1;
+    };
+    if (json) {
+        const w = term.writer();
+        try writePackageJson(w, pkg);
+        try w.writeAll("\n");
+        return 0;
+    }
+
+    term.print("{s}{s}{s} {s}\n", .{ term.bold, pkg.name, term.reset, pkg.version });
+    if (pkg.description.len > 0) term.print("  {s}\n", .{pkg.description});
+    if (pkg.homepage.len > 0) term.print("  {s}\n", .{pkg.homepage});
+    term.print("  license: {s}\n", .{pkg.license});
+    if (pkg.bin.len > 0) {
+        term.print("  binaries:", .{});
+        for (pkg.bin) |b| term.print(" {s}", .{b});
+        term.print("\n", .{});
+    }
+    if (pkg.deps.len > 0) {
+        term.print("  depends on:", .{});
+        for (pkg.deps) |d| term.print(" {s}", .{d});
+        term.print("\n", .{});
+    }
+    term.print("\n  platforms:\n", .{});
+    for (pkg.platforms) |p| {
+        const pinned = p.checksumIsPinned();
+        const colour = if (pinned) term.green else term.yellow;
+        const state = if (pinned) "verified" else "UNVERIFIED";
+        term.print("    {s:<16} {s:<8} {s}{s}{s}\n", .{ p.name, p.archive_type, colour, state, term.reset });
+        term.print("      {s}\n", .{p.url});
+        term.print("      sha256 {s}\n", .{if (p.sha256.len > 0) p.sha256 else "(none)"});
+    }
+    return 0;
+}
+
+fn cmdInstall(
+    a: std.mem.Allocator,
+    st: *store.Store,
+    reg: *const registry.Registry,
+    args: *Args,
+    platform_name: []const u8,
+    opts: store.InstallOptions,
+    timer: *std.time.Timer,
+) !u8 {
+    if (args.rest.items.len == 0) {
+        term.err("usage: abv0 install <pkg>...\n", .{});
+        return 2;
+    }
+
+    // Pull in declared dependencies where the registry knows about them.
+    var names = std.ArrayList([]const u8).init(a);
+    defer names.deinit();
+
+    if (registry.resolveOrder(a, reg, args.rest.items)) |ordered| {
+        defer a.free(ordered);
+        for (ordered) |p| try names.append(p.name);
+    } else |_| {
+        try names.appendSlice(args.rest.items);
+    }
+
+    var batch = Batch{
+        .st = st,
+        .reg = reg,
+        .names = names.items,
+        .platform_name = platform_name,
+        .opts = opts,
+    };
+    const failures = try runBatch(a, &batch, args.jobs);
+
+    const elapsed = ms(timer.read());
+    if (failures == 0) {
+        term.print("\n{s}done{s} {d} packages in {d:.2}ms\n", .{ term.green, term.reset, names.items.len, elapsed });
+        return 0;
+    }
+    term.print("\n{s}{d} of {d} packages failed{s} ({d:.2}ms)\n", .{ term.red, failures, names.items.len, term.reset, elapsed });
+    return 1;
+}
+
+fn cmdUninstall(
+    a: std.mem.Allocator,
+    st: *store.Store,
+    reg: *const registry.Registry,
+    rest: []const []const u8,
+) !u8 {
+    if (rest.len == 0) {
+        term.err("usage: abv0 uninstall <pkg>\n", .{});
+        return 2;
+    }
+    var failed: u8 = 0;
+    for (rest) |name| {
+        const pkg = store.Store.resolveRequest(reg, name) orelse {
+            term.err("{s}error{s}: '{s}' not found in registry\n", .{ term.red, term.reset, name });
+            failed = 1;
+            continue;
+        };
+        if (try st.uninstall(a, pkg)) {
+            term.print("removed {s}\n", .{pkg.name});
+        } else {
+            term.print("{s} was not installed\n", .{pkg.name});
+        }
+    }
+    return failed;
+}
+
+fn cmdOutdated(
+    a: std.mem.Allocator,
+    st: *store.Store,
+    reg: *const registry.Registry,
+    platform_name: []const u8,
+    json: bool,
+) !u8 {
+    const list = try st.getOutdated(a, reg, platform_name);
+    defer a.free(list);
+
+    if (json) {
+        const w = term.writer();
+        try w.writeAll("[");
+        for (list, 0..) |e, i| {
+            if (i > 0) try w.writeAll(",");
+            try w.print("{{\"name\":\"{s}\",\"installed\":\"{s}\",\"available\":\"{s}\"}}", .{
+                e.pkg.name, e.installed, e.pkg.version,
+            });
+        }
+        try w.writeAll("]\n");
+        return 0;
+    }
+
+    if (list.len == 0) {
+        term.print("everything is up to date\n", .{});
+        return 0;
+    }
+    for (list) |e| {
+        term.print("{s}{s}{s}  {s} {s}->{s} {s}{s}{s}\n", .{
+            term.bold, e.pkg.name,  term.reset,
+            e.installed, term.dim,  term.reset,
+            term.green, e.pkg.version, term.reset,
+        });
+    }
+    term.print("\n{d} outdated; run `abv0 upgrade`\n", .{list.len});
+    return 0;
+}
+
+fn cmdUpgrade(
+    a: std.mem.Allocator,
+    st: *store.Store,
+    reg: *const registry.Registry,
+    rest: []const []const u8,
+    platform_name: []const u8,
+    opts: store.InstallOptions,
+) !u8 {
+    var targets = std.ArrayList(registry.Package).init(a);
+    defer targets.deinit();
+
+    if (rest.len == 0) {
+        const list = try st.getOutdated(a, reg, platform_name);
+        defer a.free(list);
+        for (list) |e| try targets.append(e.pkg);
+    } else {
+        for (rest) |name| {
+            if (store.Store.resolveRequest(reg, name)) |p| {
+                try targets.append(p);
+            } else {
+                term.err("{s}warning{s}: '{s}' not in registry\n", .{ term.yellow, term.reset, name });
+            }
+        }
+    }
+
+    if (targets.items.len == 0) {
+        term.print("nothing to upgrade\n", .{});
+        return 0;
+    }
+
+    var failures: u8 = 0;
+    for (targets.items) |pkg| {
+        // Remove the old tree so the new version is genuinely fetched.
+        _ = st.uninstall(a, pkg) catch false;
+        st.install(pkg, platform_name, opts) catch |e| {
+            term.err("{s}error{s}: {s}: {s}\n", .{ term.red, term.reset, pkg.name, @errorName(e) });
+            failures = 1;
+        };
+    }
+    return failures;
+}
+
+fn cmdRun(
+    a: std.mem.Allocator,
+    st: *store.Store,
+    reg: *const registry.Registry,
+    rest: []const []const u8,
+    platform_name: []const u8,
+    opts: store.InstallOptions,
+) !u8 {
+    if (rest.len == 0) {
+        term.err("usage: abv0 run <pkg> [-- args...]\n", .{});
+        return 2;
+    }
+    return st.runPackage(a, reg, rest[0], rest[1..], platform_name, opts);
+}
+
+fn cmdShell(
+    a: std.mem.Allocator,
+    st: *store.Store,
+    reg: *const registry.Registry,
+    rest: []const []const u8,
+    platform_name: []const u8,
+    opts: store.InstallOptions,
+) !u8 {
+    if (rest.len == 0) {
+        term.err("usage: abv0 shell <pkg>...\n", .{});
+        return 2;
+    }
+    return st.spawnShell(a, reg, rest, platform_name, opts);
+}
+
+fn cmdBundle(
+    a: std.mem.Allocator,
+    st: *store.Store,
+    reg: *const registry.Registry,
+    args: *Args,
+    platform_name: []const u8,
+    opts: store.InstallOptions,
+) !u8 {
+    const sub = if (args.rest.items.len > 0) args.rest.items[0] else "install";
+    const path = args.file orelse "Brewfile";
+
+    if (std.mem.eql(u8, sub, "install")) {
+        try st.bundleInstall(a, reg, path, platform_name, opts);
+        return 0;
+    }
+    if (std.mem.eql(u8, sub, "dump")) {
+        try st.bundleDump(a, reg, path, args.force, platform_name);
+        return 0;
+    }
+    term.err("usage: abv0 bundle [install|dump] [-f <path>]\n", .{});
+    return 2;
+}
+
+fn cmdDetect(
+    a: std.mem.Allocator,
+    st: *store.Store,
+    reg: *const registry.Registry,
+    rest: []const []const u8,
+    platform_name: []const u8,
+) !u8 {
+    if (rest.len == 0) {
+        term.err("usage: abv0 detect <pkg>\n", .{});
+        return 2;
+    }
+    const pkg = store.Store.resolveRequest(reg, rest[0]) orelse {
+        term.err("{s}error{s}: '{s}' not found\n", .{ term.red, term.reset, rest[0] });
+        return 1;
+    };
+    if (!st.isInstalled(pkg, platform_name)) {
+        term.err("{s}error{s}: '{s}' is not installed\n", .{ term.red, term.reset, pkg.name });
+        return 1;
+    }
+
+    const bin = try st.resolveBinary(a, pkg, platform_name);
+    defer a.free(bin);
+
+    var threat = try store.Store.scanFile(a, bin);
+    defer threat.deinit();
+
+    term.print("scanned {s}\n\n", .{bin});
+    if (threat.score == 0) {
+        term.print("{s}clean{s}  threat score 0/100\n", .{ term.green, term.reset });
+        return 0;
+    }
+    term.print("{s}suspicious{s}  threat score {d}/100\n", .{ term.red, term.reset, threat.score });
+    for (threat.reasons.items) |r| term.print("  - {s}\n", .{r});
+    return 1;
+}
+
+fn cmdUpdate(a: std.mem.Allocator, st: *store.Store) !u8 {
+    // The original `update` ran:
+    //     sh -c "curl -sL https://.../install.sh | sh"
+    // i.e. it downloaded and executed an arbitrary remote script every time.
+    // `update` now refreshes the registry index and nothing else.
+    const paths = try registryPaths(a, st);
+    defer a.free(paths[0]);
+    defer a.free(paths[1]);
+
+    const tmp = try std.fmt.allocPrint(a, "{s}.{x}.tmp", .{ paths[0], std.crypto.random.int(u32) });
+    defer a.free(tmp);
+
+    term.print("fetching {s}\n", .{registry_url});
+    net.download(a, registry_url, tmp, .{}) catch |e| {
+        term.err("{s}error{s}: update failed: {s}\n", .{ term.red, term.reset, @errorName(e) });
+        return 1;
+    };
+    defer std.fs.cwd().deleteFile(tmp) catch {};
+
+    // Validate before replacing the working registry.
+    var probe = registry.loadFromJsonFile(a, tmp, null) catch |e| {
+        term.err("{s}error{s}: downloaded registry is invalid ({s}); keeping the existing one\n", .{ term.red, term.reset, @errorName(e) });
+        return 1;
+    };
+    const n = probe.count();
+    probe.deinit();
+
+    try std.fs.cwd().rename(tmp, paths[0]);
+
+    const stamp = try abvindex.Stamp.ofFile(paths[0]);
+    var reg = try registry.loadFromJsonFile(a, paths[0], null);
+    defer reg.deinit();
+    abvindex.build(a, &reg, paths[1], stamp) catch {};
+
+    term.print("{s}updated{s} {d} packages\n", .{ term.green, term.reset, n });
+    return 0;
+}
+
+fn cmdReport(a: std.mem.Allocator, args: *Args, platform_name: []const u8) !u8 {
+    const subject = if (args.rest.items.len > 0) args.rest.items[0] else "unspecified";
+
+    const title = if (args.report_malware)
+        try std.fmt.allocPrint(a, "[security] suspicious behaviour in '{s}'", .{subject})
+    else if (args.report_bug)
+        try std.fmt.allocPrint(a, "[bug] {s}", .{subject})
+    else
+        try std.fmt.allocPrint(a, "[report] {s}", .{subject});
+    defer a.free(title);
+
+    const body = try std.fmt.allocPrint(a,
+        \\### abv0 report
+        \\
+        \\- abv0 version: {s}
+        \\- platform: {s}
+        \\- subject: {s}
+        \\
+        \\#### What happened
+        \\
+        \\
+    , .{ version, platform_name, subject });
+    defer a.free(body);
+
+    const enc_title = try net.urlEncode(a, title);
+    defer a.free(enc_title);
+    const enc_body = try net.urlEncode(a, body);
+    defer a.free(enc_body);
+
+    const url = try std.fmt.allocPrint(a, "{s}?title={s}&body={s}", .{ issues_url, enc_title, enc_body });
+    defer a.free(url);
+
+    term.print("opening:\n{s}\n", .{url});
+    term.flush();
+    platform.openBrowser(a, url);
+    return 0;
+}
+
+fn cmdBenchmark(
+    a: std.mem.Allocator,
+    st: *store.Store,
+    reg: *const registry.Registry,
+    platform_name: []const u8,
+) !u8 {
+    _ = platform_name;
+    term.print("{s}abv0 benchmark{s}  ({d} packages)\n\n", .{ term.bold, term.reset, reg.count() });
+
+    var t = try std.time.Timer.start();
+
+    // 1. Registry lookups.
+    const lookups: usize = 100_000;
+    var hits: usize = 0;
+    var i: usize = 0;
+    while (i < lookups) : (i += 1) {
+        const name = reg.packages[i % reg.packages.len].name;
+        if (reg.get(name) != null) hits += 1;
+    }
+    const lookup_ns = t.lap();
+
+    // 2. Binary index build + mmap load.
+    const paths = try registryPaths(a, st);
+    defer a.free(paths[0]);
+    defer a.free(paths[1]);
+
+    const stamp = abvindex.Stamp.ofFile(paths[0]) catch abvindex.Stamp{ .size = 0, .mtime_ns = 0 };
+    try abvindex.build(a, reg, paths[1], stamp);
+    const build_ns = t.lap();
+
+    var loaded = try abvindex.load(a, paths[1], stamp);
+    loaded.deinit();
+    const load_ns = t.lap();
+
+    // 3. Link throughput.
+    const scratch = try std.fs.path.join(a, &.{ st.store_root, "bench.tmp" });
+    defer a.free(scratch);
+    try platform.makeSecureDir(scratch);
+    defer std.fs.cwd().deleteTree(scratch) catch {};
+
+    const src = try std.fs.path.join(a, &.{ scratch, "src" });
+    defer a.free(src);
+    {
+        const f = try std.fs.cwd().createFile(src, .{ .mode = platform.mode_exec });
+        defer f.close();
+        try f.writeAll("benchmark payload\n");
+    }
+
+    const links: usize = 500;
+    var kind: platform.LinkKind = .copied;
+    i = 0;
+    _ = t.lap();
+    while (i < links) : (i += 1) {
+        const dst = try std.fmt.allocPrint(a, "{s}/dst.{d}", .{ scratch, i });
+        defer a.free(dst);
+        kind = try platform.fastLink(src, dst);
+    }
+    const link_ns = t.lap();
+
+    // 4. Hashing throughput.
+    const blob = try std.fs.path.join(a, &.{ scratch, "blob" });
+    defer a.free(blob);
+    const blob_size = 8 * 1024 * 1024;
+    {
+        const f = try std.fs.cwd().createFile(blob, .{});
+        defer f.close();
+        const chunk = try a.alloc(u8, 64 * 1024);
+        defer a.free(chunk);
+        @memset(chunk, 0xAB);
+        var written: usize = 0;
+        while (written < blob_size) : (written += chunk.len) try f.writeAll(chunk);
+    }
+    _ = t.lap();
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    {
+        const f = try std.fs.cwd().openFile(blob, .{});
+        defer f.close();
+        var buf: [64 * 1024]u8 = undefined;
+        while (true) {
+            const n = try f.read(&buf);
+            if (n == 0) break;
+            hasher.update(buf[0..n]);
+        }
+    }
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    const hash_ns = t.lap();
+
+    term.print("  registry lookup     {d:>10} ops  {d:>8.3} ms  {d:>9.1} ns/op\n", .{ lookups, ms(lookup_ns), @as(f64, @floatFromInt(lookup_ns)) / @as(f64, @floatFromInt(lookups)) });
+    term.print("  index build         {d:>10} pkgs {d:>8.3} ms\n", .{ reg.count(), ms(build_ns) });
+    term.print("  index mmap load     {d:>10} pkgs {d:>8.3} ms\n", .{ reg.count(), ms(load_ns) });
+    term.print("  fastLink ({s:<10}) {d:>8} ops  {d:>8.3} ms  {d:>9.1} us/op\n", .{ kind.label(), links, ms(link_ns), ms(link_ns) * 1000.0 / @as(f64, @floatFromInt(links)) });
+    term.print("  sha256              {d:>10} MiB  {d:>8.3} ms  {d:>9.1} MiB/s\n", .{ blob_size / (1024 * 1024), ms(hash_ns), @as(f64, @floatFromInt(blob_size)) / (1024.0 * 1024.0) / (ms(hash_ns) / 1000.0) });
+
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+const testing = std.testing;
+
+test "parseArgs handles commands, flags and separators" {
+    var a = try parseArgs(testing.allocator, &.{ "install", "jq", "ripgrep", "--platform", "x86_64-linux" });
+    defer a.deinit();
+    try testing.expectEqualStrings("install", a.command.?);
+    try testing.expectEqual(@as(usize, 2), a.rest.items.len);
+    try testing.expectEqualStrings("x86_64-linux", a.platform_name.?);
+}
+
+test "parseArgs errors on a missing option value instead of silently continuing" {
+    try testing.expectError(error.MissingOptionValue, parseArgs(testing.allocator, &.{ "install", "jq", "--platform" }));
+    try testing.expectError(error.MissingOptionValue, parseArgs(testing.allocator, &.{ "bundle", "-f" }));
+}
+
+test "parseArgs rejects unknown options" {
+    try testing.expectError(error.UnknownOption, parseArgs(testing.allocator, &.{ "install", "--definitely-not-a-flag" }));
+}
+
+test "parseArgs passes everything after -- through untouched" {
+    var a = try parseArgs(testing.allocator, &.{ "run", "jq", "--", "-n", "1+1" });
+    defer a.deinit();
+    try testing.expectEqualStrings("run", a.command.?);
+    try testing.expectEqual(@as(usize, 3), a.rest.items.len);
+    try testing.expectEqualStrings("jq", a.rest.items[0]);
+    // `-n` must reach jq, not be parsed by abv0.
+    try testing.expectEqualStrings("-n", a.rest.items[1]);
+}
+
+test "parseArgs recognises help and version early" {
+    var h = try parseArgs(testing.allocator, &.{"--help"});
+    defer h.deinit();
+    try testing.expect(h.want_help);
+
+    var v = try parseArgs(testing.allocator, &.{"-V"});
+    defer v.deinit();
+    try testing.expect(v.want_version);
+}
+
+test "writePackageJson escapes strings" {
+    var buf = std.ArrayList(u8).init(testing.allocator);
+    defer buf.deinit();
+
+    try writePackageJson(buf.writer(), .{
+        .name = "x",
+        .version = "1.0",
+        .description = "has \"quotes\" and \\ backslash",
+        .bin = &.{"x"},
+    });
+
+    // Must remain parseable.
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("x", parsed.value.object.get("name").?.string);
+    try testing.expectEqualStrings("has \"quotes\" and \\ backslash", parsed.value.object.get("description").?.string);
+}
+
+comptime {
+    // Ensure every module's tests are discovered by `zig build test`.
+    _ = @import("safepath.zig");
+    _ = @import("term.zig");
+    _ = @import("platform.zig");
+    _ = @import("bloom.zig");
+    _ = @import("wal.zig");
+    _ = @import("archive.zig");
+    _ = @import("registry.zig");
+    _ = @import("abvindex.zig");
+    _ = @import("net.zig");
+    _ = @import("store.zig");
 }

