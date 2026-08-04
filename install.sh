@@ -1,79 +1,159 @@
 #!/bin/sh
-set -e
+# abv0 installer for Linux and macOS.
+#
+# Hardening notes (the previous version of this script had all of these bugs):
+#   * curl ran without --fail, so a 404 HTML page was saved as "abv0", made
+#     executable, and reported as a successful install;
+#   * it never checked that the download was non-empty, so the 0-byte
+#     abv0-darwin-x86_64 artifact installed "successfully";
+#   * it never verified a checksum;
+#   * it wrote directly to the final path, so an interrupted download left a
+#     truncated binary behind;
+#   * it allowed protocol downgrades on redirect.
+set -eu
 
-echo "⚡ Installing abv0 - The Faster, Secure, High-Performance Package Manager..."
+REPO="gugu8intel-i9/abv0"
+REF="${ABV0_REF:-main}"
+BASE="https://raw.githubusercontent.com/${REPO}/${REF}"
+
+BIN_DIR="${ABV0_BIN_DIR:-$HOME/.abv0/bin}"
+REG_DIR="${ABV0_REGISTRY_DIR:-$HOME/.abv0/registry}"
+
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+info() { printf '%s\n' "$*"; }
+
+command -v curl >/dev/null 2>&1 || die "curl is required"
 
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 
-TARGET=""
 case "${OS}" in
-    Linux*)
+    Linux)
         case "${ARCH}" in
-            x86_64*) TARGET="abv0-linux-x86_64" ;;
-            *) echo "Error: Unsupported Linux architecture '${ARCH}'"; exit 1 ;;
+            x86_64|amd64)   TARGET="abv0-linux-x86_64" ;;
+            aarch64|arm64)  TARGET="abv0-linux-aarch64" ;;
+            *) die "unsupported Linux architecture '${ARCH}'" ;;
         esac
         ;;
-    Darwin*)
+    Darwin)
         case "${ARCH}" in
-            x86_64*) TARGET="abv0-darwin-x86_64" ;;
-            arm64*|aarch64*) TARGET="abv0-darwin-arm64" ;;
-            *) echo "Error: Unsupported macOS architecture '${ARCH}'"; exit 1 ;;
+            x86_64)         TARGET="abv0-darwin-x86_64" ;;
+            arm64|aarch64)  TARGET="abv0-darwin-arm64" ;;
+            *) die "unsupported macOS architecture '${ARCH}'" ;;
         esac
+        ;;
+    MINGW*|MSYS*|CYGWIN*)
+        die "on Windows use install.ps1:
+    irm https://raw.githubusercontent.com/${REPO}/${REF}/install.ps1 | iex"
         ;;
     *)
-        echo "Error: Unsupported operating system '${OS}'"
-        exit 1
+        die "unsupported operating system '${OS}'"
         ;;
 esac
 
-BIN_DIR="$HOME/.abv0/bin"
-REG_DIR="$HOME/.abv0/registry"
-mkdir -p "${BIN_DIR}"
-mkdir -p "${REG_DIR}"
+info "installing abv0 (${TARGET})"
 
-URL="https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/release/${TARGET}?t=$(date +%s)"
-REG_URL="https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/packages/index.json?t=$(date +%s)"
+mkdir -p "${BIN_DIR}" "${REG_DIR}"
+chmod 0700 "$(dirname "${BIN_DIR}")" 2>/dev/null || true
 
-echo "⬇️  Downloading ${TARGET}..."
-curl -s -L -o "${BIN_DIR}/abv0" "${URL}"
-chmod 0700 "${BIN_DIR}/abv0"
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/abv0-install.XXXXXX")"
+cleanup() { rm -rf "${TMP_DIR}"; }
+trap cleanup EXIT INT TERM
 
-# Create super friendly alias symlink so that users who type 'abvo' (with an 'o') get redirected seamlessly
-ln -sf "${BIN_DIR}/abv0" "${BIN_DIR}/abvo"
+# --fail            : a 404 is an error, not a file full of HTML
+# --proto/=https    : refuse plaintext, including after a redirect
+# --retry           : survive a flaky connection instead of truncating
+fetch() {
+    curl --fail --location --silent --show-error \
+         --proto '=https' --proto-redir '=https' \
+         --retry 3 --retry-delay 1 --connect-timeout 20 --max-time 300 \
+         -o "$2" "$1"
+}
 
-echo "⬇️  Fetching active package registry index..."
-curl -s -L -o "${REG_DIR}/index.json" "${REG_URL}"
-chmod 0700 "${REG_DIR}/index.json"
+info "downloading binary"
+fetch "${BASE}/release/${TARGET}" "${TMP_DIR}/abv0" \
+    || die "download failed: ${BASE}/release/${TARGET}"
 
-echo ""
-echo "✅ abv0 installed successfully to ${BIN_DIR}/abv0"
+[ -s "${TMP_DIR}/abv0" ] || die "downloaded binary is empty"
 
-# Actively attempt to update shell profiles
-ADDED_PROFILE=0
-if [ -f "$HOME/.zshrc" ]; then
-    if ! grep -q "$BIN_DIR" "$HOME/.zshrc" 2>/dev/null; then
-        echo "export PATH=\"$BIN_DIR:\$PATH\"" >> "$HOME/.zshrc"
-        echo "🔗 Successfully added abv0 binary directory to your ~/.zshrc profile."
-        ADDED_PROFILE=1
+# Reject anything that is obviously not a program (an error page, an LFS
+# pointer, a rate-limit JSON body).
+case "$(head -c 4 "${TMP_DIR}/abv0" | od -An -c | tr -d ' \n')" in
+    177ELF*|\\312\\376\\272\\276*|\\317\\372\\355\\376*|MZ*) ;;
+    *) die "downloaded file is not an executable (the server may have returned an error page)" ;;
+esac
+
+info "verifying checksum"
+if fetch "${BASE}/release/SHA256SUMS" "${TMP_DIR}/SHA256SUMS"; then
+    EXPECTED="$(awk -v t="${TARGET}" '$2 == t {print $1}' "${TMP_DIR}/SHA256SUMS")"
+    [ -n "${EXPECTED}" ] || die "no checksum published for ${TARGET}"
+
+    if command -v sha256sum >/dev/null 2>&1; then
+        ACTUAL="$(sha256sum "${TMP_DIR}/abv0" | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+        ACTUAL="$(shasum -a 256 "${TMP_DIR}/abv0" | awk '{print $1}')"
+    else
+        ACTUAL=""
+        info "warning: no sha256 tool found; skipping verification"
     fi
-elif [ -f "$HOME/.bashrc" ]; then
-    if ! grep -q "$BIN_DIR" "$HOME/.bashrc" 2>/dev/null; then
-        echo "export PATH=\"$BIN_DIR:\$PATH\"" >> "$HOME/.bashrc"
-        echo "🔗 Successfully added abv0 binary directory to your ~/.bashrc profile."
-        ADDED_PROFILE=1
+
+    if [ -n "${ACTUAL}" ] && [ "${ACTUAL}" != "${EXPECTED}" ]; then
+        die "checksum mismatch
+  expected ${EXPECTED}
+  actual   ${ACTUAL}
+Refusing to install."
     fi
+elif [ "${ABV0_ALLOW_UNVERIFIED:-0}" = "1" ]; then
+    info "warning: SHA256SUMS unavailable and ABV0_ALLOW_UNVERIFIED=1; continuing unverified"
+else
+    die "could not fetch SHA256SUMS; refusing to install an unverified binary
+(set ABV0_ALLOW_UNVERIFIED=1 to override)"
 fi
 
-if [ $ADDED_PROFILE -eq 0 ]; then
-    echo "💡 Please add the managed binary path to your PATH environment variable (~/.zshrc or ~/.bashrc):"
-    echo "    export PATH=\"${BIN_DIR}:\$PATH\""
+chmod 0755 "${TMP_DIR}/abv0"
+
+# Sanity check before publishing: a binary that cannot report its own version
+# is not one we should put on the user's PATH.
+"${TMP_DIR}/abv0" version >/dev/null 2>&1 \
+    || die "the downloaded binary did not run on this machine"
+
+# Atomic publish: mv within the same filesystem replaces in one step, so a
+# concurrent shell never sees a half-written abv0.
+mv -f "${TMP_DIR}/abv0" "${BIN_DIR}/abv0"
+
+info "fetching registry index"
+if fetch "${BASE}/packages/index.json" "${TMP_DIR}/index.json" && [ -s "${TMP_DIR}/index.json" ]; then
+    chmod 0644 "${TMP_DIR}/index.json"
+    mv -f "${TMP_DIR}/index.json" "${REG_DIR}/index.json"
+else
+    info "warning: could not fetch the registry index; run 'abv0 update' later"
 fi
 
-echo ""
-echo "🔥 IMPORTANT: To use abv0 in your currently open terminal right now, you must run:"
-echo "    export PATH=\"${BIN_DIR}:\$PATH\""
-echo "    (or open a new terminal window / tab)."
-echo ""
-echo "🚀 Then try running your first brew command:"
-echo "    abv0 list"
+info ""
+info "abv0 installed to ${BIN_DIR}/abv0"
+"${BIN_DIR}/abv0" version
+
+# PATH advice. The old script edited ~/.zshrc *or* ~/.bashrc and claimed
+# success either way; this one updates every profile it finds and always tells
+# you what to do in the current shell.
+PROFILE_UPDATED=0
+for profile in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.profile"; do
+    [ -f "${profile}" ] || continue
+    if ! grep -q "\.abv0/bin" "${profile}" 2>/dev/null; then
+        printf '\n# added by the abv0 installer\nexport PATH="%s:$PATH"\n' "${BIN_DIR}" >> "${profile}"
+        info "added ${BIN_DIR} to ${profile}"
+        PROFILE_UPDATED=1
+    fi
+done
+
+info ""
+if [ "${PROFILE_UPDATED}" -eq 1 ]; then
+    info "open a new terminal, or run this in the current one:"
+else
+    info "add abv0 to your PATH:"
+fi
+info "    export PATH=\"${BIN_DIR}:\$PATH\""
+info ""
+info "then try:"
+info "    abv0 list"
+info "    abv0 install ripgrep"
