@@ -1,10 +1,56 @@
 const std = @import("std");
 
+/// Every artifact we publish. The Linux builds link musl statically so a single
+/// file runs on any distribution regardless of its glibc version; the previous
+/// release binary was a dynamically linked *debug* build, which is both slower
+/// and tied to the machine it happened to be compiled on.
+const ReleaseTarget = struct {
+    name: []const u8,
+    query: std.Target.Query,
+};
+
+const release_targets = [_]ReleaseTarget{
+    .{
+        .name = "abv0-linux-x86_64",
+        .query = .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .musl },
+    },
+    .{
+        .name = "abv0-linux-aarch64",
+        .query = .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .musl },
+    },
+    .{
+        .name = "abv0-darwin-x86_64",
+        .query = .{
+            .cpu_arch = .x86_64,
+            .os_tag = .macos,
+            // High Sierra 10.13 and newer.
+            .os_version_min = .{ .semver = .{ .major = 10, .minor = 13, .patch = 0 } },
+        },
+    },
+    .{
+        .name = "abv0-darwin-arm64",
+        .query = .{
+            .cpu_arch = .aarch64,
+            .os_tag = .macos,
+            // Big Sur 11.0 is the first macOS with Apple Silicon support.
+            .os_version_min = .{ .semver = .{ .major = 11, .minor = 0, .patch = 0 } },
+        },
+    },
+    .{
+        .name = "abv0-windows-x86_64.exe",
+        .query = .{ .cpu_arch = .x86_64, .os_tag = .windows },
+    },
+    .{
+        .name = "abv0-windows-aarch64.exe",
+        .query = .{ .cpu_arch = .aarch64, .os_tag = .windows },
+    },
+};
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Main executable
+    // ---- main executable ---------------------------------------------------
     const exe = b.addExecutable(.{
         .name = "abv0",
         .root_source_file = b.path("src/main.zig"),
@@ -13,55 +59,56 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
 
-    // Run step
+    // ---- run ---------------------------------------------------------------
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
-    const run_step = b.step("run", "Run the abv0 CLI");
-    run_step.dependOn(&run_cmd.step);
+    if (b.args) |args| run_cmd.addArgs(args);
+    b.step("run", "Run the abv0 CLI").dependOn(&run_cmd.step);
 
-    // Unit tests
-    const exe_unit_tests = b.addTest(.{
+    // ---- tests -------------------------------------------------------------
+    // main.zig pulls in every module with `comptime _ = @import(...)`, so this
+    // one test binary covers the whole codebase.
+    const unit_tests = b.addTest(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
-    const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
-    const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_exe_unit_tests.step);
+    const run_unit_tests = b.addRunArtifact(unit_tests);
+    b.step("test", "Run unit tests").dependOn(&run_unit_tests.step);
 
-    // Cross-compilation targets for macOS (Intel & ARM)
-    const macos_x86_target = b.resolveTargetQuery(.{
-        .cpu_arch = .x86_64,
-        .os_tag = .macos,
-        // Highly compatible older macOS target (High Sierra 10.13)
-        .os_version_min = .{ .semver = .{ .major = 10, .minor = 13, .patch = 0 } },
-    });
-    const macos_x86_exe = b.addExecutable(.{
-        .name = "abv0-x86_64-macos",
-        .root_source_file = b.path("src/main.zig"),
-        .target = macos_x86_target,
-        .optimize = .ReleaseFast, // High performance
-    });
-    const install_macos_x86 = b.addInstallArtifact(macos_x86_exe, .{});
+    // ---- compile check for every supported platform ------------------------
+    // Catches Windows-only and macOS-only compile errors without needing those
+    // machines. `std.posix.getenv`, `std.fs.File.Mode` and `std.posix.mmap` all
+    // behave differently there.
+    const check_step = b.step("check", "Type-check against Linux, macOS and Windows");
+    for (release_targets) |rt| {
+        const chk = b.addExecutable(.{
+            .name = b.fmt("check-{s}", .{rt.name}),
+            .root_source_file = b.path("src/main.zig"),
+            .target = b.resolveTargetQuery(rt.query),
+            .optimize = .Debug,
+        });
+        check_step.dependOn(&chk.step);
+    }
 
-    const macos_arm_target = b.resolveTargetQuery(.{
-        .cpu_arch = .aarch64,
-        .os_tag = .macos,
-        // macOS Big Sur 11.0 is the first macOS with Apple Silicon support
-        .os_version_min = .{ .semver = .{ .major = 11, .minor = 0, .patch = 0 } },
-    });
-    const macos_arm_exe = b.addExecutable(.{
-        .name = "abv0-aarch64-macos",
-        .root_source_file = b.path("src/main.zig"),
-        .target = macos_arm_target,
-        .optimize = .ReleaseFast, // High performance
-    });
-    const install_macos_arm = b.addInstallArtifact(macos_arm_exe, .{});
+    // ---- release artifacts -------------------------------------------------
+    const release_step = b.step("release", "Build stripped ReleaseFast binaries into release/");
+    for (release_targets) |rt| {
+        const rel = b.addExecutable(.{
+            .name = rt.name,
+            .root_source_file = b.path("src/main.zig"),
+            .target = b.resolveTargetQuery(rt.query),
+            .optimize = .ReleaseFast,
+            .strip = true,
+        });
+        const install = b.addInstallArtifact(rel, .{
+            .dest_dir = .{ .override = .{ .custom = "../release" } },
+            .dest_sub_path = rt.name,
+        });
+        release_step.dependOn(&install.step);
+    }
 
+    // ---- macOS-only convenience step (kept for backwards compatibility) ----
     const macos_step = b.step("macos", "Build release binaries for macOS (Intel and Apple Silicon)");
-    macos_step.dependOn(&install_macos_x86.step);
-    macos_step.dependOn(&install_macos_arm.step);
+    macos_step.dependOn(release_step);
 }
