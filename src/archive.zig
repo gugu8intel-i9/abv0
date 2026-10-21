@@ -59,6 +59,15 @@ pub const Kind = enum {
     }
 };
 
+/// Leading payload bytes that the sniff and error-page checks need. The tar
+/// magic sits at offset 257, so sniffing needs 262 of them.
+pub const head_len = 512;
+
+/// The error-page check looks at this many leading bytes and no further.
+const error_page_probe_len = 256;
+
+const error_page_markers = [_][]const u8{ "<!DOCTYPE", "<!doctype", "<html", "<HTML", "404: Not Found", "Not Found" };
+
 /// What the bytes on disk actually are, regardless of what the manifest claims.
 ///
 /// This catches the common failure where a CDN returns an HTML error page and
@@ -67,10 +76,14 @@ pub fn sniff(path: []const u8) ?Kind {
     const file = std.fs.cwd().openFile(path, .{}) catch return null;
     defer file.close();
 
-    var head: [512]u8 = undefined;
+    var head: [head_len]u8 = undefined;
     const n = file.readAll(&head) catch return null;
-    const buf = head[0..n];
+    return sniffBytes(head[0..n]);
+}
 
+/// `sniff` on the leading bytes of a payload that is already in memory.
+pub fn sniffBytes(buf: []const u8) ?Kind {
+    const n = buf.len;
     if (n >= 2 and buf[0] == 0x1f and buf[1] == 0x8b) return .tar_gz;
     if (n >= 6 and std.mem.eql(u8, buf[0..6], &.{ 0xFD, '7', 'z', 'X', 'Z', 0x00 })) return .tar_xz;
     if (n >= 4 and std.mem.eql(u8, buf[0..4], &.{ 0x28, 0xB5, 0x2F, 0xFD })) return .tar_zst;
@@ -85,13 +98,18 @@ pub fn looksLikeErrorPage(path: []const u8) bool {
     const file = std.fs.cwd().openFile(path, .{}) catch return false;
     defer file.close();
 
-    var head: [256]u8 = undefined;
+    var head: [head_len]u8 = undefined;
     const n = file.readAll(&head) catch return false;
-    if (n == 0) return true; // a zero-byte "binary" is never valid
+    return looksLikeErrorPageBytes(head[0..n]);
+}
 
-    const buf = head[0..n];
-    const markers = [_][]const u8{ "<!DOCTYPE", "<!doctype", "<html", "<HTML", "404: Not Found", "Not Found" };
-    for (markers) |m| {
+/// `looksLikeErrorPage` on the leading bytes of a payload already in memory.
+/// Only the first `error_page_probe_len` bytes are examined.
+pub fn looksLikeErrorPageBytes(head: []const u8) bool {
+    if (head.len == 0) return true; // a zero-byte "binary" is never valid
+
+    const buf = head[0..@min(head.len, error_page_probe_len)];
+    for (error_page_markers) |m| {
         if (std.mem.indexOf(u8, buf, m) != null) return true;
     }
     return false;
@@ -659,4 +677,20 @@ test "sniff identifies formats and rejects an HTML error page" {
     (try std.fs.cwd().createFile(empty, .{})).close();
     // A zero-byte download is exactly the shipped abv0-darwin-x86_64 bug.
     try testing.expect(looksLikeErrorPage(empty));
+}
+
+test "byte-slice checks agree with the path checks and probe 256 bytes" {
+    const html = "<!DOCTYPE html><html><body>404: Not Found</body></html>";
+    try testing.expect(looksLikeErrorPageBytes(html));
+    try testing.expect(sniffBytes(html) == null);
+    try testing.expect(looksLikeErrorPageBytes(""));
+
+    // A marker that starts past the probe window is not looked at.
+    var late = [_]u8{'x'} ** 300;
+    @memcpy(late[260..][0..6], "<html>");
+    try testing.expect(!looksLikeErrorPageBytes(&late));
+    @memcpy(late[200..][0..6], "<html>");
+    try testing.expect(looksLikeErrorPageBytes(&late));
+
+    try testing.expectEqual(Kind.tar_gz, sniffBytes(&.{ 0x1f, 0x8b, 0x08 }).?);
 }

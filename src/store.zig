@@ -240,6 +240,44 @@ pub const Store = struct {
         return out.toOwnedSlice();
     }
 
+    /// One store directory, as `scanStore` reports it.
+    const StoreEntry = struct {
+        platform: []const u8,
+        version: []const u8,
+        dir_name: []const u8,
+    };
+
+    /// Every package directory in the store root, grouped by package name.
+    const StoreIndex = std.StringHashMap(std.ArrayList(StoreEntry));
+
+    /// Read the store root once. Callers answer per package from the result,
+    /// where they used to re-scan the directory for each package. Everything
+    /// is allocated from `a`, so pass an arena that outlives the index.
+    fn scanStore(self: *const Store, a: std.mem.Allocator) !StoreIndex {
+        var index = StoreIndex.init(a);
+
+        var dir = std.fs.cwd().openDir(self.store_root, .{ .iterate = true }) catch return index;
+        defer dir.close();
+
+        var it = dir.iterate();
+        while (try it.next()) |entry| {
+            if (entry.kind != .directory) continue;
+            const parsed = parseStoreDirName(entry.name) orelse continue;
+
+            const gop = try index.getOrPut(parsed.name);
+            if (!gop.found_existing) {
+                gop.key_ptr.* = try a.dupe(u8, parsed.name);
+                gop.value_ptr.* = std.ArrayList(StoreEntry).init(a);
+            }
+            try gop.value_ptr.append(.{
+                .platform = try a.dupe(u8, parsed.platform),
+                .version = try a.dupe(u8, parsed.version),
+                .dir_name = try a.dupe(u8, entry.name),
+            });
+        }
+        return index;
+    }
+
     // -----------------------------------------------------------------------
     // Install
     // -----------------------------------------------------------------------
@@ -352,20 +390,24 @@ pub const Store = struct {
         try w.append(.fetch);
         if (!opts.quiet) term.print("  {s}fetch{s}    {s} {s}\n", .{ term.cyan, term.reset, pkg.name, pkg.version });
 
-        var fetched = false;
+        // The payload is read once after it lands, for its digest and its
+        // leading bytes. A micro-split download already has both from the pass
+        // that reassembled its parts, so it does not read the file again.
+        var fetched: ?Digest = null;
         if (opts.micro_split) {
-            fetched = self.microSplitDownload(a, info.url, archive_path, tmp_dir) catch false;
+            fetched = self.microSplitDownload(a, info.url, archive_path, tmp_dir) catch null;
         }
-        if (!fetched) {
+        var payload = fetched orelse blk: {
             net.download(a, info.url, archive_path, .{}) catch |e| {
                 term.err("{s}error{s}: download failed for {s}: {s}\n", .{ term.red, term.reset, pkg.name, @errorName(e) });
                 return StoreError.DownloadFailed;
             };
-        }
+            break :blk try digestFile(archive_path);
+        };
 
         // A CDN error page is not a package. curl without --fail used to let
         // these straight through into ~/.abv0/bin.
-        if (archive.looksLikeErrorPage(archive_path)) {
+        if (archive.looksLikeErrorPageBytes(payload.head())) {
             term.err(
                 "{s}error{s}: the server returned an error page, not an archive, for {s}\n  {s}\n",
                 .{ term.red, term.reset, pkg.name, info.url },
@@ -375,9 +417,9 @@ pub const Store = struct {
 
         // ---- verify ----
         try w.append(.verify);
-        const digest = try hashFile(archive_path);
+        const sum = payload.final();
         var digest_hex: [64]u8 = undefined;
-        _ = std.fmt.bufPrint(&digest_hex, "{s}", .{std.fmt.fmtSliceHexLower(&digest)}) catch unreachable;
+        _ = std.fmt.bufPrint(&digest_hex, "{s}", .{std.fmt.fmtSliceHexLower(&sum)}) catch unreachable;
 
         try self.verifyChecksum(pkg, info, &digest_hex, opts);
         if (!opts.quiet) term.print("  {s}verify{s}   {s}\n", .{ term.green, term.reset, digest_hex[0..16] });
@@ -391,7 +433,7 @@ pub const Store = struct {
 
         // Trust the bytes over the manifest: if the payload sniffs as a
         // different container, use what it actually is.
-        const actual = archive.sniff(archive_path);
+        const actual = archive.sniffBytes(payload.head());
         const kind = if (declared == .raw or declared == .dmg)
             declared
         else if (actual) |k| k else declared;
@@ -505,22 +547,55 @@ pub const Store = struct {
         return StoreError.ChecksumMismatch;
     }
 
+    /// What one pass over a payload yields: its SHA-256 and its leading bytes,
+    /// which the error-page check and the type sniff both read.
+    const Digest = struct {
+        hasher: std.crypto.hash.sha2.Sha256,
+        head_buf: [archive.head_len]u8,
+        head_len: usize,
+
+        fn init() Digest {
+            return .{
+                .hasher = std.crypto.hash.sha2.Sha256.init(.{}),
+                .head_buf = undefined,
+                .head_len = 0,
+            };
+        }
+
+        fn update(self: *Digest, bytes: []const u8) void {
+            self.hasher.update(bytes);
+            if (self.head_len < archive.head_len) {
+                const take = @min(archive.head_len - self.head_len, bytes.len);
+                @memcpy(self.head_buf[self.head_len..][0..take], bytes[0..take]);
+                self.head_len += take;
+            }
+        }
+
+        fn head(self: *const Digest) []const u8 {
+            return self.head_buf[0..self.head_len];
+        }
+
+        fn final(self: *Digest) [32]u8 {
+            var out: [32]u8 = undefined;
+            self.hasher.final(&out);
+            return out;
+        }
+    };
+
     /// Single streaming pass. The archive used to be read end to end three
     /// times: once by the hasher, once by the block store, once by tar.
-    fn hashFile(path: []const u8) ![32]u8 {
+    fn digestFile(path: []const u8) !Digest {
         const file = try std.fs.cwd().openFile(path, .{});
         defer file.close();
 
-        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        var d = Digest.init();
         var buf: [64 * 1024]u8 = undefined;
         while (true) {
             const n = try file.read(&buf);
             if (n == 0) break;
-            hasher.update(buf[0..n]);
+            d.update(buf[0..n]);
         }
-        var out: [32]u8 = undefined;
-        hasher.final(&out);
-        return out;
+        return d;
     }
 
     fn pruneTempDirs(self: *Store, a: std.mem.Allocator, name: []const u8) !void {
@@ -566,7 +641,31 @@ pub const Store = struct {
         const alias_target = std.fs.path.basename(info.bin_path);
         var alias_path: ?[]const u8 = null;
 
-        {
+        // bin_path names the real file, so look at that path before walking
+        // the tree. Its name resolves a wanted bin without a walk.
+        if (info.bin_path.len > 0) {
+            if (safepath.joinSafe(a, pkg_dir, info.bin_path)) |exact| {
+                if (isPlainFile(exact)) {
+                    alias_path = exact;
+                    if (wanted.getPtr(alias_target) orelse wanted.getPtr(stripExeSuffix(alias_target))) |slot| {
+                        slot.* = exact;
+                    }
+                }
+            } else |_| {}
+        }
+
+        // The walk is only needed for a wanted bin the exact path did not
+        // resolve. A single-binary package never walks.
+        var unresolved = false;
+        var pending = wanted.valueIterator();
+        while (pending.next()) |slot| {
+            if (slot.* == null) {
+                unresolved = true;
+                break;
+            }
+        }
+
+        if (unresolved) {
             var dir = std.fs.cwd().openDir(pkg_dir, .{ .iterate = true }) catch return 0;
             defer dir.close();
 
@@ -654,6 +753,15 @@ pub const Store = struct {
         }
         try self.writeOwners(a, owners.recs.items);
         return linked;
+    }
+
+    /// True for a regular file that is not a link. The walk never reports
+    /// links either, so the direct check accepts the same things it does.
+    fn isPlainFile(path: []const u8) bool {
+        var buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        if (std.fs.cwd().readLink(path, &buf)) |_| return false else |_| {}
+        const st = std.fs.cwd().statFile(path) catch return false;
+        return st.kind == .file;
     }
 
     fn stripExeSuffix(name: []const u8) []const u8 {
@@ -848,11 +956,11 @@ pub const Store = struct {
         url: []const u8,
         dest: []const u8,
         tmp_dir: []const u8,
-    ) !bool {
+    ) !?Digest {
         _ = self;
-        const info = net.head(a, url, .{}) catch return false;
-        const total = info.content_length orelse return false;
-        if (!info.accepts_ranges or total < 1 << 20) return false;
+        const info = net.head(a, url, .{}) catch return null;
+        const total = info.content_length orelse return null;
+        if (!info.accepts_ranges or total < 1 << 20) return null;
 
         const chunks: u64 = 4;
         const chunk_size = total / chunks;
@@ -876,37 +984,51 @@ pub const Store = struct {
         for (threads) |t| t.join();
 
         for (jobs) |j| {
-            if (!j.ok) return false;
+            if (!j.ok) return null;
         }
 
-        {
-            const out = try std.fs.cwd().createFile(dest, .{ .mode = platform.mode_private });
-            defer out.close();
-            var buf: [64 * 1024]u8 = undefined;
-            for (paths) |p| {
-                const f = try std.fs.cwd().openFile(p, .{});
-                defer f.close();
-                while (true) {
-                    const n = try f.read(&buf);
-                    if (n == 0) break;
-                    try out.writeAll(buf[0..n]);
-                }
-            }
-        }
+        const digest = try reassemble(dest, paths);
         for (paths) |p| std.fs.cwd().deleteFile(p) catch {};
 
         // Reassembly must produce exactly the advertised length.
         const st = try std.fs.cwd().statFile(dest);
         if (st.size != total) {
             std.fs.cwd().deleteFile(dest) catch {};
-            return false;
+            return null;
         }
-        return true;
+        return digest;
+    }
+
+    /// Concatenate `parts` into `dest`, hashing each byte as it is written, so
+    /// the digest costs no pass of its own.
+    fn reassemble(dest: []const u8, parts: []const []const u8) !Digest {
+        var d = Digest.init();
+        const out = try std.fs.cwd().createFile(dest, .{ .mode = platform.mode_private });
+        defer out.close();
+        var buf: [64 * 1024]u8 = undefined;
+        for (parts) |p| {
+            const f = try std.fs.cwd().openFile(p, .{});
+            defer f.close();
+            while (true) {
+                const n = try f.read(&buf);
+                if (n == 0) break;
+                d.update(buf[0..n]);
+                try out.writeAll(buf[0..n]);
+            }
+        }
+        return d;
     }
 
     // -----------------------------------------------------------------------
     // Uninstall / reset / gc
     // -----------------------------------------------------------------------
+
+    fn platformListed(pkg: Package, platform_name: []const u8) bool {
+        for (pkg.platforms) |plat| {
+            if (std.mem.eql(u8, plat.name, platform_name)) return true;
+        }
+        return false;
+    }
 
     pub fn uninstall(self: *Store, a: std.mem.Allocator, pkg: Package) !bool {
         var removed = false;
@@ -948,15 +1070,20 @@ pub const Store = struct {
             try self.writeOwners(a, owners.recs.items);
         }
 
-        for (pkg.platforms) |plat| {
-            const dirs = try self.installedVersions(a, pkg.name, plat.name);
-            defer a.free(dirs);
-            for (dirs) |d| {
-                const p = try std.fs.path.join(a, &.{ self.store_root, d.dir_name });
-                defer a.free(p);
-                if (std.fs.cwd().deleteTree(p)) |_| {
-                    removed = true;
-                } else |_| {}
+        // One scan of the store covers every platform of this package.
+        {
+            var scan_arena = std.heap.ArenaAllocator.init(a);
+            defer scan_arena.deinit();
+            const index = try self.scanStore(scan_arena.allocator());
+            if (index.get(pkg.name)) |list| {
+                for (list.items) |d| {
+                    if (!platformListed(pkg, d.platform)) continue;
+                    const p = try std.fs.path.join(a, &.{ self.store_root, d.dir_name });
+                    defer a.free(p);
+                    if (std.fs.cwd().deleteTree(p)) |_| {
+                        removed = true;
+                    } else |_| {}
+                }
             }
         }
 
@@ -1091,21 +1218,26 @@ pub const Store = struct {
         var out = std.ArrayList(OutdatedEntry).init(a);
         errdefer out.deinit();
 
+        // One scan of the store for every package below.
+        var scan_arena = std.heap.ArenaAllocator.init(a);
+        defer scan_arena.deinit();
+        const index = try self.scanStore(scan_arena.allocator());
+
         for (reg.packages) |pkg| {
             if (pkg.platform(platform_name) == null) continue;
 
-            const installed = try self.installedVersions(a, pkg.name, platform_name);
-            defer a.free(installed);
-            if (installed.len == 0) continue;
+            const list = index.get(pkg.name) orelse continue;
 
             // Newest installed version wins.
-            var newest = installed[0].version;
-            for (installed[1..]) |i| {
-                if (registry.compareVersions(i.version, newest) == .gt) newest = i.version;
+            var newest: ?[]const u8 = null;
+            for (list.items) |i| {
+                if (!std.mem.eql(u8, i.platform, platform_name)) continue;
+                if (newest == null or registry.compareVersions(i.version, newest.?) == .gt) newest = i.version;
             }
+            const installed = newest orelse continue;
 
-            if (registry.compareVersions(newest, pkg.version) == .lt) {
-                try out.append(.{ .pkg = pkg, .installed = newest });
+            if (registry.compareVersions(installed, pkg.version) == .lt) {
+                try out.append(.{ .pkg = pkg, .installed = try a.dupe(u8, installed) });
             }
         }
         return out.toOwnedSlice();
@@ -1238,6 +1370,30 @@ pub const Store = struct {
         .{ .pattern = "AWS_SECRET_ACCESS_KEY", .weight = 20, .reason = "cloud credential harvesting" },
     };
 
+    /// Bit i of a `SignatureMask` stands for `signatures[i]`.
+    const SignatureMask = std.meta.Int(.unsigned, signatures.len);
+
+    /// Bit i is set when `signatures[i]` begins with that byte, so a scan
+    /// needs one table lookup per byte rather than one search per signature.
+    const first_byte_table = blk: {
+        var table = [_]SignatureMask{0} ** 256;
+        for (signatures, 0..) |sig, i| {
+            table[sig.pattern[0]] |= @as(SignatureMask, 1) << @intCast(i);
+        }
+        break :blk table;
+    };
+
+    /// Longest signature, in bytes. A match of this length can straddle a read
+    /// boundary, so each read keeps this many bytes minus one from the last.
+    const longest_signature = blk: {
+        var longest: usize = 0;
+        for (signatures) |sig| longest = @max(longest, sig.pattern.len);
+        break :blk longest;
+    };
+
+    const scan_chunk = 256 * 1024;
+    const scan_overlap = longest_signature - 1;
+
     /// Streaming scan with an overlap window.
     ///
     /// The original read the entire executable into memory with a 50 MB cap and
@@ -1248,32 +1404,44 @@ pub const Store = struct {
         var threat = Threat{ .reasons = std.ArrayList([]const u8).init(a) };
         errdefer threat.deinit();
 
-        var seen = [_]bool{false} ** signatures.len;
-
         const file = try std.fs.cwd().openFile(path, .{});
         defer file.close();
 
-        const overlap = 64; // longest signature is far below this
-        const chunk = 256 * 1024;
-        const buf = try a.alloc(u8, chunk + overlap);
+        const buf = try a.alloc(u8, scan_chunk + scan_overlap);
         defer a.free(buf);
 
+        const all: SignatureMask = std.math.maxInt(SignatureMask);
+        var seen: SignatureMask = 0;
         var carry: usize = 0;
-        while (true) {
+        while (seen != all) {
             const n = try file.read(buf[carry..]);
             if (n == 0) break;
             const filled = carry + n;
 
-            for (signatures, 0..) |sig, i| {
-                if (seen[i]) continue;
-                if (std.mem.indexOf(u8, buf[0..filled], sig.pattern) != null) {
-                    seen[i] = true;
-                    threat.score += sig.weight;
-                    try threat.reasons.append(sig.reason);
+            // Every start position is tried, so a pattern beginning in the
+            // carried overlap is found here. Repeats from the overlap are
+            // harmless because `seen` already covers them.
+            var hit: SignatureMask = 0;
+            for (buf[0..filled], 0..) |byte, pos| {
+                var candidates = first_byte_table[byte] & ~seen & ~hit;
+                while (candidates != 0) {
+                    const i: usize = @ctz(candidates);
+                    candidates &= candidates - 1;
+                    const bit = @as(SignatureMask, 1) << @intCast(i);
+                    if (std.mem.startsWith(u8, buf[pos..filled], signatures[i].pattern)) hit |= bit;
                 }
             }
 
-            carry = @min(overlap, filled);
+            // Report in signature order, as the per-signature passes did.
+            for (signatures, 0..) |sig, i| {
+                const bit = @as(SignatureMask, 1) << @intCast(i);
+                if ((hit & bit) == 0) continue;
+                seen |= bit;
+                threat.score += sig.weight;
+                try threat.reasons.append(sig.reason);
+            }
+
+            carry = @min(scan_overlap, filled);
             std.mem.copyForwards(u8, buf[0..carry], buf[filled - carry ..][0..carry]);
         }
 
@@ -2053,6 +2221,112 @@ test "scanFile catches a signature straddling a read boundary" {
     try testing.expect(t.score > 0);
 }
 
+test "digestFile hashes in one pass and keeps the leading bytes" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(root);
+    const p = try std.fs.path.join(testing.allocator, &.{ root, "payload.bin" });
+    defer testing.allocator.free(p);
+
+    // Several 64 KiB reads, so the digest really spans more than one buffer.
+    const data = try testing.allocator.alloc(u8, 300 * 1024 + 17);
+    defer testing.allocator.free(data);
+    for (data, 0..) |*b, i| b.* = @truncate(i *% 131 +% (i >> 8));
+    try tmp.dir.writeFile(.{ .sub_path = "payload.bin", .data = data });
+
+    var d = try Store.digestFile(p);
+    var want: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(data, &want, .{});
+    const got = d.final();
+    try testing.expectEqualSlices(u8, &want, &got);
+    try testing.expectEqualSlices(u8, data[0..archive.head_len], d.head());
+}
+
+test "micro-split reassembly hashes exactly the bytes it writes" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(root);
+
+    var h = std.crypto.hash.sha2.Sha256.init(.{});
+    var names: [3][]u8 = undefined;
+    for (&names, 0..) |*name, i| {
+        const body = try testing.allocator.alloc(u8, 100_000 + i);
+        defer testing.allocator.free(body);
+        @memset(body, @as(u8, 'a') + @as(u8, @intCast(i)));
+        const sub = try std.fmt.allocPrint(testing.allocator, "chunk.{d}", .{i});
+        defer testing.allocator.free(sub);
+        try tmp.dir.writeFile(.{ .sub_path = sub, .data = body });
+        h.update(body);
+        name.* = try std.fs.path.join(testing.allocator, &.{ root, sub });
+    }
+    defer for (names) |n| testing.allocator.free(n);
+
+    const dest = try std.fs.path.join(testing.allocator, &.{ root, "joined.bin" });
+    defer testing.allocator.free(dest);
+    var parts: [3][]const u8 = undefined;
+    for (names, 0..) |n, i| parts[i] = n;
+
+    var d = try Store.reassemble(dest, &parts);
+    var want: [32]u8 = undefined;
+    h.final(&want);
+    const got = d.final();
+    try testing.expectEqualSlices(u8, &want, &got);
+}
+
+test "scanFile finds a signature straddling the first read boundary" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(root);
+    const p = try std.fs.path.join(testing.allocator, &.{ root, "boundary.bin" });
+    defer testing.allocator.free(p);
+
+    // The first read fills the whole buffer, so its end is the first boundary.
+    // Every start that makes the longest signature cross it must be caught.
+    const pattern = "AWS_SECRET_ACCESS_KEY";
+    const boundary = Store.scan_chunk + Store.scan_overlap;
+    const data = try testing.allocator.alloc(u8, boundary + 4096);
+    defer testing.allocator.free(data);
+
+    var offset: usize = boundary - pattern.len + 1;
+    while (offset < boundary) : (offset += 1) {
+        @memset(data, 'A');
+        @memcpy(data[offset..][0..pattern.len], pattern);
+        try tmp.dir.writeFile(.{ .sub_path = "boundary.bin", .data = data });
+
+        var t = try Store.scanFile(testing.allocator, p);
+        defer t.deinit();
+        try testing.expectEqual(@as(u32, 20), t.score);
+        try testing.expectEqual(@as(usize, 1), t.reasons.items.len);
+    }
+}
+
+test "scanStore groups every store directory by package name in one pass" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(root);
+    var s = try testStore(&tmp);
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    try tmp.dir.makePath("store/jq@1.6@x86_64-linux");
+    try tmp.dir.makePath("store/jq@1.7.1@x86_64-linux");
+    try tmp.dir.makePath("store/jq@1.7.1@aarch64-macos");
+    try tmp.dir.makePath("store/jq-extra@9.0@x86_64-linux");
+    try tmp.dir.makePath("store/jq@9.2@x86_64-linux.abcd.tmp");
+
+    var index = try s.scanStore(arena.allocator());
+    const jq = index.get("jq") orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 3), jq.items.len);
+    const extra = index.get("jq-extra") orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), extra.items.len);
+    try testing.expect(index.get("jq-") == null);
+}
+
 test "sql string escaping neutralises quotes" {
     var buf = std.ArrayList(u8).init(testing.allocator);
     defer buf.deinit();
@@ -2205,6 +2479,35 @@ test "bin conflicts are refused unless forced" {
     const other = [_]Store.OwnerRec{.{ .kind = "bin", .name = "tool", .pkg = "other" }};
     try s.writeOwners(a, &other);
     try testing.expectError(StoreError.BinaryConflict, s.linkBinaries(a, pkg, plats[0], pkg_dir, .{ .quiet = true }));
+}
+
+test "bin_path links the named file directly and still maps an alias" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var s = try testStore(&tmp);
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try tmp.dir.makePath("store/tool@1.0@x86_64-linux/bin");
+    try tmp.dir.writeFile(.{ .sub_path = "store/tool@1.0@x86_64-linux/bin/tool", .data = "exe" });
+    const tool_dir = try std.fs.path.join(a, &.{ s.store_root, "tool@1.0@x86_64-linux" });
+    const tool_plats = [_]registry.PlatformInfo{.{ .name = "x86_64-linux", .bin_path = "bin/tool" }};
+    const tool_bins = [_][]const u8{"tool"};
+    const tool = Package{ .name = "tool", .version = "1.0", .bin = &tool_bins, .platforms = &tool_plats };
+    try testing.expectEqual(@as(usize, 1), try s.linkBinaries(a, tool, tool_plats[0], tool_dir, .{ .quiet = true }));
+    try tmp.dir.access("bin/tool", .{});
+
+    // The package calls the binary `btm`, but the archive ships `real/bottom`.
+    try tmp.dir.makePath("store/btop@2.0@x86_64-linux/real");
+    try tmp.dir.writeFile(.{ .sub_path = "store/btop@2.0@x86_64-linux/real/bottom", .data = "exe" });
+    const btop_dir = try std.fs.path.join(a, &.{ s.store_root, "btop@2.0@x86_64-linux" });
+    const btop_plats = [_]registry.PlatformInfo{.{ .name = "x86_64-linux", .bin_path = "real/bottom" }};
+    const btop_bins = [_][]const u8{"btm"};
+    const btop = Package{ .name = "btop", .version = "2.0", .bin = &btop_bins, .platforms = &btop_plats };
+    try testing.expectEqual(@as(usize, 1), try s.linkBinaries(a, btop, btop_plats[0], btop_dir, .{ .quiet = true }));
+    try tmp.dir.access("bin/btm", .{});
 }
 
 test "a package can never link a bin named abv0" {
