@@ -1,4 +1,3 @@
-brew "ffmpeg"
 brew "ripgrep"
 brew "jq"
 brew "bat"
