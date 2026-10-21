@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux (test, check, smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+
+      - name: Unit tests
+        run: zig build test
+
+      - name: Compile check (Linux, macOS, Windows)
+        run: zig build check
+
+      - name: Release build
+        run: zig build -Doptimize=ReleaseFast
+
+      - name: Smoke test
+        run: |
+          ./zig-out/bin/abv0 --help
+          ./zig-out/bin/abv0 --version
+          # Lists the signed manifest in packages/, so this also checks its
+          # signature against keys/manifest.pub.
+          HOME="$(mktemp -d)" ./zig-out/bin/abv0 --registry packages/index.json list
+
+  test:
+    name: Unit tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+
+      - name: Unit tests
+        run: zig build test

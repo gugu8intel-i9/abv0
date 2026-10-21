@@ -57,6 +57,66 @@ pub fn envOwned(allocator: std.mem.Allocator, key: []const u8) ?[]u8 {
     return std.process.getEnvVarOwned(allocator, key) catch null;
 }
 
+// ---------------------------------------------------------------------------
+// ABV0_* path overrides
+// ---------------------------------------------------------------------------
+
+/// Accepts an `ABV0_HOME`, `ABV0_BIN_DIR` or `ABV0_REGISTRY_DIR` value only
+/// when it is an absolute path with no NUL or line breaks. Anything else is
+/// ignored, so the default under ~/.abv0 is used instead.
+pub fn acceptAbsolutePath(value: []const u8) ?[]const u8 {
+    if (value.len == 0) return null;
+    if (std.mem.indexOfAny(u8, value, "\x00\r\n") != null) return null;
+    if (!std.fs.path.isAbsolute(value)) return null;
+    return value;
+}
+
+fn envAbsolutePath(allocator: std.mem.Allocator, key: []const u8) ?[]u8 {
+    const raw = envOwned(allocator, key) orelse return null;
+    if (acceptAbsolutePath(raw) == null) {
+        allocator.free(raw);
+        return null;
+    }
+    return raw;
+}
+
+/// Root of the abv0 tree from `ABV0_HOME`, replacing `<home>/.abv0`.
+/// Caller frees the result.
+pub fn homeOverride(allocator: std.mem.Allocator) ?[]u8 {
+    return envAbsolutePath(allocator, "ABV0_HOME");
+}
+
+/// Bin directory from `ABV0_BIN_DIR`, replacing `<root>/bin`.
+/// Caller frees the result.
+pub fn binDirOverride(allocator: std.mem.Allocator) ?[]u8 {
+    return envAbsolutePath(allocator, "ABV0_BIN_DIR");
+}
+
+/// Registry directory from `ABV0_REGISTRY_DIR`, replacing `<root>/registry`.
+/// Caller frees the result.
+pub fn registryDirOverride(allocator: std.mem.Allocator) ?[]u8 {
+    return envAbsolutePath(allocator, "ABV0_REGISTRY_DIR");
+}
+
+/// Only https manifest URLs are accepted; a plain http or file URL is ignored.
+fn acceptRegistryUrl(url: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, url, "https://")) return null;
+    if (std.mem.indexOfAny(u8, url, "\x00\r\n") != null) return null;
+    return url;
+}
+
+/// Backing store for `registryUrlOverride`. The returned slice must outlive
+/// the call, and no allocator is passed in, so it lives in static memory.
+var registry_url_buf: [2048]u8 = undefined;
+
+/// Manifest URL from `ABV0_REGISTRY_URL`, if set to an https URL that fits in
+/// 2 KiB. The result points into static storage and is never freed.
+pub fn registryUrlOverride() ?[]const u8 {
+    var fba = std.heap.FixedBufferAllocator.init(&registry_url_buf);
+    const raw = std.process.getEnvVarOwned(fba.allocator(), "ABV0_REGISTRY_URL") catch return null;
+    return acceptRegistryUrl(raw);
+}
+
 /// The interactive shell to spawn for `abv0 shell`.
 pub fn defaultShell(allocator: std.mem.Allocator) ![]u8 {
     if (is_windows) {
@@ -391,6 +451,25 @@ test "isKnownPlatformTag rejects junk" {
     try std.testing.expect(!isKnownPlatformTag(""));
     try std.testing.expect(!isKnownPlatformTag("sparc-solaris"));
     try std.testing.expect(isKnownPlatformTag("x86_64-linux"));
+}
+
+test "absolute ABV0_* override is applied" {
+    const abs = if (is_windows) "C:\\abv0-test" else "/opt/abv0-test";
+    try std.testing.expectEqualStrings(abs, acceptAbsolutePath(abs).?);
+}
+
+test "relative, empty and malformed ABV0_* overrides are ignored" {
+    try std.testing.expect(acceptAbsolutePath("relative/dir") == null);
+    try std.testing.expect(acceptAbsolutePath("") == null);
+    try std.testing.expect(acceptAbsolutePath("/opt/abv0\nevil") == null);
+    try std.testing.expect(acceptAbsolutePath("/opt/abv0\x00evil") == null);
+}
+
+test "ABV0_REGISTRY_URL accepts only https" {
+    try std.testing.expectEqualStrings("https://example.com/index.json", acceptRegistryUrl("https://example.com/index.json").?);
+    try std.testing.expect(acceptRegistryUrl("http://example.com/index.json") == null);
+    try std.testing.expect(acceptRegistryUrl("file:///etc/passwd") == null);
+    try std.testing.expect(acceptRegistryUrl("https://example.com/\nx") == null);
 }
 
 test "fastLink produces a usable destination and is idempotent" {
