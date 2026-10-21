@@ -155,7 +155,7 @@ fn printUsage() void {
         \\  -j, --jobs <n>       Parallel install workers
         \\  --allow-unverified   Permit installs without a verified checksum
         \\  --micro-split        Parallel ranged download for large assets
-        \\  --force              Overwrite output files
+        \\  --force              Overwrite output files and replace conflicting bin links
         \\  --json               Machine-readable output (list, info, outdated)
         \\  --no-color           Disable colour
         \\  -h, --help           This message
@@ -393,6 +393,7 @@ fn run(base: std.mem.Allocator, a: std.mem.Allocator) !u8 {
     const opts = store.InstallOptions{
         .micro_split = args.micro_split,
         .allow_unverified = args.allow_unverified,
+        .force = args.force,
     };
 
     var timer = try std.time.Timer.start();

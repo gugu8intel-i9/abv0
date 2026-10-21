@@ -576,6 +576,9 @@ pub const Store = struct {
             if (!platform.pathExists(p.dst)) continue;
             if (ownerOf(owners.recs.items, "bin", p.bin)) |owner| {
                 if (std.mem.eql(u8, owner, pkg.name)) continue;
+            } else if (self.hasLegacyStoreDir(pkg.name)) {
+                // Installed by an abv0 that predates ownership records.
+                continue;
             }
             if (opts.force) continue;
             term.err(
@@ -926,6 +929,8 @@ pub const Store = struct {
                 if (!std.mem.endsWith(u8, entry.name, ".tmp")) continue;
                 const p = try std.fs.path.join(a, &.{ self.store_root, entry.name });
                 defer a.free(p);
+                // A fresh temp dir may be another abv0's install in progress.
+                if (!isOlderThan(p, 24 * std.time.ns_per_hour)) continue;
                 if (std.fs.cwd().deleteTree(p)) |_| reclaimed += 1 else |_| {}
             }
         } else |_| {}
@@ -960,9 +965,28 @@ pub const Store = struct {
         if (platform.is_posix) {
             if (shellPid(dir_name)) |pid| return !platform.processAlive(pid);
         }
-        const st = std.fs.cwd().statFile(dir_path) catch return false;
-        const age = std.time.nanoTimestamp() - st.mtime;
-        return age > 24 * std.time.ns_per_hour;
+        return isOlderThan(dir_path, 24 * std.time.ns_per_hour);
+    }
+
+    /// True when a `name-version-platform` directory from before the `@`
+    /// naming scheme exists for `name`. Links such an install made carry no
+    /// ownership record, so they are adopted rather than refused.
+    fn hasLegacyStoreDir(self: *const Store, name: []const u8) bool {
+        var dir = std.fs.cwd().openDir(self.store_root, .{ .iterate = true }) catch return false;
+        defer dir.close();
+        var it = dir.iterate();
+        while (it.next() catch return false) |entry| {
+            if (entry.kind != .directory) continue;
+            if (std.mem.indexOfScalar(u8, entry.name, '@') != null) continue;
+            if (std.mem.endsWith(u8, entry.name, ".tmp")) continue;
+            if (entry.name.len > name.len and std.mem.startsWith(u8, entry.name, name) and entry.name[name.len] == '-') return true;
+        }
+        return false;
+    }
+
+    fn isOlderThan(path: []const u8, ns: i128) bool {
+        const st = std.fs.cwd().statFile(path) catch return false;
+        return std.time.nanoTimestamp() - st.mtime > ns;
     }
 
     /// The pid embedded by `shellIsStale`'s naming scheme, or null for the
