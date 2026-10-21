@@ -5,6 +5,7 @@ const builtin = @import("builtin");
 
 const registry = @import("registry.zig");
 const store = @import("store.zig");
+const stream = @import("stream.zig");
 const platform = @import("platform.zig");
 const safepath = @import("safepath.zig");
 const term = @import("term.zig");
@@ -44,6 +45,7 @@ const Args = struct {
     json: bool = false,
     force: bool = false,
     micro_split: bool = false,
+    no_stream: bool = false,
     allow_unverified: bool = false,
     allow_unsigned_manifest: bool = false,
     no_color: bool = false,
@@ -114,6 +116,8 @@ fn parseArgsDiag(allocator: std.mem.Allocator, argv: []const []const u8, diag: *
             args.force = true;
         } else if (std.mem.eql(u8, arg, "--micro-split")) {
             args.micro_split = true;
+        } else if (std.mem.eql(u8, arg, "--no-stream")) {
+            args.no_stream = true;
         } else if (std.mem.eql(u8, arg, "--allow-unverified")) {
             args.allow_unverified = true;
         } else if (std.mem.eql(u8, arg, "--allow-unsigned-manifest")) {
@@ -585,6 +589,7 @@ fn renderUsage(w: anytype) !void {
         \\  --allow-unsigned-manifest  Skip signature and replay checks (UNSAFE)
         \\  --allow-unverified      Permit installs without a verified checksum
         \\  --micro-split           Parallel ranged download for large assets
+        \\  --no-stream             Download fully before unpacking (disable streaming install)
         \\  --force                 Overwrite output files and replace conflicting bin links
         \\  --dry-run               Show what install, upgrade, uninstall, bundle or cleanup would do; change nothing
         \\  --json                  Machine-readable output (list, search, info, outdated, install, doctor)
@@ -1475,6 +1480,15 @@ pub fn main() u8 {
     return code;
 }
 
+/// Commands that can download packages. Only these pay for loading the CA store.
+fn installsPackages(cmd: []const u8) bool {
+    const names = [_][]const u8{ "install", "upgrade", "bundle", "run", "shell" };
+    for (names) |name| {
+        if (std.mem.eql(u8, cmd, name)) return true;
+    }
+    return false;
+}
+
 fn run(base: std.mem.Allocator, a: std.mem.Allocator) !u8 {
     const argv = try std.process.argsAlloc(a);
     const rest_argv = if (argv.len > 1) argv[1..] else &[_][]const u8{};
@@ -1554,12 +1568,24 @@ fn run(base: std.mem.Allocator, a: std.mem.Allocator) !u8 {
         return 2;
     }
 
-    const opts = store.InstallOptions{
+    var opts = store.InstallOptions{
         .micro_split = args.micro_split,
+        .no_stream = args.no_stream,
         .allow_unverified = args.allow_unverified,
         .force = args.force,
         .quiet = output.quiet,
     };
+
+    // One streaming session for the whole run, shared by every worker. If it
+    // cannot be built, installs download to a file first.
+    var session: ?stream.Session = null;
+    defer if (session) |*s| s.deinit();
+    if (!args.no_stream and installsPackages(cmd)) {
+        if (stream.Session.init(base)) |s| {
+            session = s;
+            opts.session = &session.?;
+        } else |_| {}
+    }
 
     var timer = try std.time.Timer.start();
 
@@ -2619,4 +2645,5 @@ comptime {
     _ = @import("net.zig");
     _ = @import("store.zig");
     _ = @import("cmds_extra.zig");
+    _ = @import("stream.zig");
 }

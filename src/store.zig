@@ -12,11 +12,16 @@ const term = @import("term.zig");
 const wal = @import("wal.zig");
 const bloom = @import("bloom.zig");
 const abvindex = @import("abvindex.zig");
+const stream = @import("stream.zig");
 
 pub const Package = registry.Package;
 
 pub const InstallOptions = struct {
     micro_split: bool = false,
+    /// Download fully before unpacking, instead of streaming the unpack.
+    no_stream: bool = false,
+    /// Shared HTTP session for streamed installs. Null means the curl path.
+    session: ?*stream.Session = null,
     /// Permit installing a payload whose checksum does not match, or that has
     /// no pinned checksum at all. Off by default.
     allow_unverified: bool = false,
@@ -386,39 +391,75 @@ pub const Store = struct {
         errdefer std.fs.cwd().deleteTree(tmp_dir) catch {};
 
         const archive_path = try std.fs.path.join(a, &.{ tmp_dir, "payload" });
+        const raw_name = if (info.bin_path.len > 0)
+            info.bin_path
+        else if (pkg.primaryBin()) |b| b else pkg.name;
 
         // ---- fetch ----
         try w.append(.fetch);
         if (!opts.quiet) term.print("  {s}fetch{s}    {s} {s}\n", .{ term.cyan, term.reset, pkg.name, pkg.version });
 
-        // The payload is read once after it lands, for its digest and its
-        // leading bytes. A micro-split download already has both from the pass
-        // that reassembled its parts, so it does not read the file again.
-        var fetched: ?Digest = null;
-        if (opts.micro_split) {
-            fetched = self.microSplitDownload(a, info.url, archive_path, tmp_dir) catch null;
+        // Fast path: hash, decode and unpack while the bytes arrive. Nothing is
+        // published until the digest is checked below, so a failed stream
+        // leaves no trace in the store. Any error other than a checksum
+        // mismatch falls through to the curl path, which reports it properly.
+        var streamed: ?stream.Result = null;
+        var payload: ?Digest = null;
+        if (!opts.no_stream and !opts.micro_split) {
+            if (opts.session) |session| {
+                if (session.streamingEnabled()) {
+                    if (archive.Kind.fromString(info.archive_type) orelse archive.Kind.fromFilename(info.url)) |declared| {
+                        if (streamInto(session, a, info.url, declared, raw_name, tmp_dir)) |res| {
+                            streamed = res;
+                        } else |e| {
+                            // A zip or dmg was never attempted, so it says nothing about the network.
+                            if (e != error.NotStreamable) session.disableStreaming();
+                            // Whatever the stream wrote is untrusted; start the staging directory over.
+                            std.fs.cwd().deleteTree(tmp_dir) catch {};
+                            try platform.makeSecureDir(tmp_dir);
+                            if (!opts.quiet) {
+                                term.print("  {s}stream unavailable ({s}), using curl{s}\n", .{ term.dim, @errorName(e), term.reset });
+                            }
+                        }
+                    }
+                }
+            }
         }
-        var payload = fetched orelse blk: {
-            net.download(a, info.url, archive_path, .{}) catch |e| {
-                term.err("{s}error{s}: download failed for {s}: {s}\n", .{ term.red, term.reset, pkg.name, @errorName(e) });
-                return StoreError.DownloadFailed;
-            };
-            break :blk try digestFile(archive_path);
-        };
 
-        // A CDN error page is not a package. curl without --fail used to let
-        // these straight through into ~/.abv0/bin.
-        if (archive.looksLikeErrorPageBytes(payload.head())) {
-            term.err(
-                "{s}error{s}: the server returned an error page, not an archive, for {s}\n  {s}\n",
-                .{ term.red, term.reset, pkg.name, info.url },
-            );
-            return StoreError.DownloadLooksLikeErrorPage;
+        var sum: [32]u8 = undefined;
+        if (streamed) |res| {
+            sum = res.digest;
+        } else {
+            // The payload is read once after it lands, for its digest and its
+            // leading bytes. A micro-split download already has both from the
+            // pass that reassembled its parts, so it does not read the file again.
+            var fetched: ?Digest = null;
+            if (opts.micro_split) {
+                fetched = self.microSplitDownload(a, info.url, archive_path, tmp_dir) catch null;
+            }
+            var p = fetched orelse blk: {
+                net.download(a, info.url, archive_path, .{}) catch |e| {
+                    term.err("{s}error{s}: download failed for {s}: {s}\n", .{ term.red, term.reset, pkg.name, @errorName(e) });
+                    return StoreError.DownloadFailed;
+                };
+                break :blk try digestFile(archive_path);
+            };
+
+            // A CDN error page is not a package. curl without --fail used to let
+            // these straight through into ~/.abv0/bin.
+            if (archive.looksLikeErrorPageBytes(p.head())) {
+                term.err(
+                    "{s}error{s}: the server returned an error page, not an archive, for {s}\n  {s}\n",
+                    .{ term.red, term.reset, pkg.name, info.url },
+                );
+                return StoreError.DownloadLooksLikeErrorPage;
+            }
+            sum = p.final();
+            payload = p;
         }
 
         // ---- verify ----
         try w.append(.verify);
-        const sum = payload.final();
         var digest_hex: [64]u8 = undefined;
         _ = std.fmt.bufPrint(&digest_hex, "{s}", .{std.fmt.fmtSliceHexLower(&sum)}) catch unreachable;
 
@@ -428,30 +469,44 @@ pub const Store = struct {
         // ---- unpack ----
         try w.append(.unpack);
 
-        const declared = archive.Kind.fromString(info.archive_type) orelse
-            archive.Kind.fromFilename(info.url) orelse
-            return StoreError.UnknownArchiveType;
+        // A streamed install was already unpacked during the fetch.
+        if (payload) |*p| {
+            const declared = archive.Kind.fromString(info.archive_type) orelse
+                archive.Kind.fromFilename(info.url) orelse
+                return StoreError.UnknownArchiveType;
 
-        // Trust the bytes over the manifest: if the payload sniffs as a
-        // different container, use what it actually is.
-        const actual = archive.sniffBytes(payload.head());
-        const kind = if (declared == .raw or declared == .dmg)
-            declared
-        else if (actual) |k| k else declared;
+            // Trust the bytes over the manifest: if the payload sniffs as a
+            // different container, use what it actually is.
+            const actual = archive.sniffBytes(p.head());
+            const kind = if (declared == .raw or declared == .dmg)
+                declared
+            else if (actual) |k| k else declared;
 
-        const raw_name = if (info.bin_path.len > 0)
-            info.bin_path
-        else if (pkg.primaryBin()) |b| b else pkg.name;
+            archive.extract(a, kind, archive_path, tmp_dir, .{ .raw_name = raw_name }) catch |e| {
+                term.err("{s}error{s}: could not unpack {s}: {s}\n", .{ term.red, term.reset, pkg.name, @errorName(e) });
+                return StoreError.UnpackFailed;
+            };
 
-        archive.extract(a, kind, archive_path, tmp_dir, .{ .raw_name = raw_name }) catch |e| {
-            term.err("{s}error{s}: could not unpack {s}: {s}\n", .{ term.red, term.reset, pkg.name, @errorName(e) });
-            return StoreError.UnpackFailed;
-        };
-
-        // The payload file itself is not part of the installed tree.
-        std.fs.cwd().deleteFile(archive_path) catch {};
+            // The payload file itself is not part of the installed tree.
+            std.fs.cwd().deleteFile(archive_path) catch {};
+        }
 
         try publishTree(a, tmp_dir, pkg_dir);
+    }
+
+    /// Stream `url` into the staging directory. Opening the directory is part
+    /// of the attempt, so a failure there also falls back to curl.
+    fn streamInto(
+        session: *stream.Session,
+        a: std.mem.Allocator,
+        url: []const u8,
+        declared: archive.Kind,
+        raw_name: []const u8,
+        tmp_dir: []const u8,
+    ) !stream.Result {
+        var dir = try std.fs.cwd().openDir(tmp_dir, .{});
+        defer dir.close();
+        return stream.streamInstall(session, a, url, declared, raw_name, dir);
     }
 
     /// Swap a finished extraction into place. An existing install is moved

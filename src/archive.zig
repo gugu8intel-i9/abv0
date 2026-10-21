@@ -229,7 +229,7 @@ fn stripComponents(path: []const u8, count: u32) []const u8 {
 
 /// The safety-critical loop. `std.tar.pipeToFileSystem` is deliberately not
 /// used because it performs no containment check on member names.
-fn pipeTar(
+pub fn pipeTar(
     allocator: std.mem.Allocator,
     reader: anytype,
     dest: std.fs.Dir,
