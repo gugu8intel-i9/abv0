@@ -97,11 +97,20 @@ pub fn looksLikeErrorPage(path: []const u8) bool {
     return false;
 }
 
+/// Upper bounds on what one archive may expand to. A few kilobytes of gzip can
+/// claim terabytes of output, so extraction stops once either limit is passed.
+pub const max_extract_bytes: u64 = 4 * 1024 * 1024 * 1024;
+pub const max_extract_members: usize = 200_000;
+
 pub const Options = struct {
     /// Destination name for `raw` payloads (a bare executable, not an archive).
     raw_name: []const u8 = "payload",
     /// Directory levels to strip from member paths.
     strip_components: u32 = 0,
+    /// Total member bytes allowed before extraction is refused.
+    max_bytes: u64 = max_extract_bytes,
+    /// Member count allowed before extraction is refused.
+    max_members: usize = max_extract_members,
 };
 
 /// Extract `archive_path` into `dest_dir_path`.
@@ -127,7 +136,9 @@ pub fn extract(
         .zip => {
             const file = try std.fs.cwd().openFile(archive_path, .{});
             defer file.close();
+            try checkZipLimits(file, options);
             // std.zip rejects absolute paths and `..` components internally.
+            // It only creates files and directories, so it cannot plant a link.
             try std.zip.extract(dest, file.seekableStream(), .{});
         },
         .tar, .tar_gz, .tar_xz, .tar_zst => try extractTar(allocator, kind, archive_path, dest, options),
@@ -169,6 +180,22 @@ fn extractTar(
     }
 }
 
+/// std.zip has no limits of its own, so read the central directory first and
+/// refuse before anything is written.
+fn checkZipLimits(file: std.fs.File, options: Options) !void {
+    const Stream = @TypeOf(file.seekableStream());
+    var iter = try std.zip.Iterator(Stream).init(file.seekableStream());
+
+    var members: usize = 0;
+    var total: u64 = 0;
+    while (try iter.next()) |entry| {
+        members += 1;
+        if (members > options.max_members) return error.ArchiveTooManyMembers;
+        total +|= entry.uncompressed_size;
+        if (total > options.max_bytes) return error.ArchiveTooLarge;
+    }
+}
+
 fn stripComponents(path: []const u8, count: u32) []const u8 {
     var i: usize = 0;
     var c = count;
@@ -190,8 +217,6 @@ fn pipeTar(
     dest: std.fs.Dir,
     options: Options,
 ) !void {
-    _ = allocator;
-
     var file_name_buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
     var link_name_buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
 
@@ -200,12 +225,26 @@ fn pipeTar(
         .link_name_buffer = &link_name_buffer,
     });
 
+    var members: usize = 0;
+    var total_bytes: u64 = 0;
+
     while (try it.next()) |entry| {
+        // Counted before any filtering, so skipped members cannot hide cost.
+        members += 1;
+        if (members > options.max_members) return error.ArchiveTooManyMembers;
+        total_bytes +|= entry.size;
+        if (total_bytes > options.max_bytes) return error.ArchiveTooLarge;
+
         const name = stripComponents(entry.name, options.strip_components);
         if (name.len == 0) continue;
 
         // Refuse anything that could land outside the extraction root.
         if (!safepath.isSafeRelPath(name)) continue;
+
+        // createFile and makePath follow links. An earlier member may have
+        // created a link on disk (`a/l -> ..`), so a later name can route
+        // through it. Check every existing component, including the last.
+        if (passesThroughSymlink(dest, name, true)) continue;
 
         switch (entry.kind) {
             .directory => {
@@ -213,7 +252,10 @@ fn pipeTar(
             },
             .file => {
                 if (std.fs.path.dirname(name)) |d| dest.makePath(d) catch {};
-                const mode: std.fs.File.Mode = if (std.fs.has_executable_bit and (entry.mode & 0o100) != 0)
+                // Only the permission bits matter here. setuid, setgid and
+                // sticky are dropped, and the mode is one of two fixed values.
+                const perm = entry.mode & 0o777;
+                const mode: std.fs.File.Mode = if (std.fs.has_executable_bit and (perm & 0o100) != 0)
                     platform.mode_bin
                 else
                     platform.mode_public;
@@ -225,6 +267,8 @@ fn pipeTar(
                 const link_dir = std.fs.path.dirname(name) orelse "";
                 // A member name can be safe while its symlink target escapes.
                 if (!safepath.symlinkStaysInside(link_dir, entry.link_name)) continue;
+                // The target text can also run through a link already on disk.
+                if (try targetCrossesSymlink(allocator, dest, link_dir, entry.link_name)) continue;
                 if (std.fs.path.dirname(name)) |d| dest.makePath(d) catch {};
                 // Unprivileged Windows accounts cannot create symlinks; skip.
                 dest.symLink(entry.link_name, name, .{}) catch continue;
@@ -233,49 +277,119 @@ fn pipeTar(
     }
 }
 
+/// True when `rel` names a symbolic link on disk under `dest`.
+fn isLinkOnDisk(dest: std.fs.Dir, rel: []const u8) bool {
+    var buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+    _ = dest.readLink(rel, &buf) catch return false;
+    return true;
+}
+
+/// True when some existing parent of `rel` is a symlink, or, with
+/// `include_last` set, when `rel` itself is one.
+fn passesThroughSymlink(dest: std.fs.Dir, rel: []const u8, include_last: bool) bool {
+    var end: usize = 0;
+    while (std.mem.indexOfAnyPos(u8, rel, end, "/\\")) |sep| {
+        if (sep > end and isLinkOnDisk(dest, rel[0..sep])) return true;
+        end = sep + 1;
+    }
+    return include_last and rel.len > end and isLinkOnDisk(dest, rel);
+}
+
+/// `safepath.symlinkStaysInside` reads only the link text. A target such as
+/// `a/l/..` also depends on what `a/l` is on disk. Every component the target
+/// walks through before its last one must therefore not be a link already.
+/// The last component may be one, since that is an ordinary link chain.
+fn targetCrossesSymlink(
+    allocator: std.mem.Allocator,
+    dest: std.fs.Dir,
+    link_dir: []const u8,
+    target: []const u8,
+) !bool {
+    // Where the walk currently is, relative to `dest`.
+    var here = std.ArrayList([]const u8).init(allocator);
+    defer here.deinit();
+    var dir_it = std.mem.tokenizeAny(u8, link_dir, "/\\");
+    while (dir_it.next()) |c| try here.append(c);
+
+    var steps = std.ArrayList([]const u8).init(allocator);
+    defer steps.deinit();
+    var tgt_it = std.mem.tokenizeAny(u8, target, "/\\");
+    while (tgt_it.next()) |c| {
+        if (std.mem.eql(u8, c, ".")) continue;
+        try steps.append(c);
+    }
+
+    for (steps.items, 0..) |c, i| {
+        if (std.mem.eql(u8, c, "..")) {
+            // safepath has already ensured the walk never leaves the root.
+            if (here.items.len > 0) _ = here.pop();
+            continue;
+        }
+        try here.append(c);
+        if (i + 1 < steps.items.len) {
+            const joined = try std.mem.join(allocator, "/", here.items);
+            defer allocator.free(joined);
+            if (isLinkOnDisk(dest, joined)) return true;
+        }
+    }
+    return false;
+}
+
 fn extractDmg(allocator: std.mem.Allocator, archive_path: []const u8, dest_dir_path: []const u8) !void {
     if (!platform.is_macos) return error.DmgUnsupportedOnThisPlatform;
 
-    const mount = try std.process.Child.run(.{
+    // Attach at a mount point we create, so the only volume we read from or
+    // detach is the one this image produced. Scanning /Volumes could reach an
+    // unrelated disk.
+    const mount_name = try std.fmt.allocPrint(allocator, ".abv0-dmg-{x}", .{std.crypto.random.int(u64)});
+    defer allocator.free(mount_name);
+    const mount_point = try std.fs.path.join(allocator, &.{ dest_dir_path, mount_name });
+    defer allocator.free(mount_point);
+
+    try std.fs.cwd().makePath(mount_point);
+    // Runs last, after the detach below.
+    defer std.fs.cwd().deleteDir(mount_point) catch {};
+
+    const attach = try std.process.Child.run(.{
         .allocator = allocator,
-        .argv = &.{ "hdiutil", "attach", "-nobrowse", "-readonly", "-quiet", archive_path },
+        .argv = &.{ "hdiutil", "attach", "-readonly", "-nobrowse", "-noverify", "-noautoopen", "-quiet", "-mountpoint", mount_point, archive_path },
     });
     defer {
-        allocator.free(mount.stdout);
-        allocator.free(mount.stderr);
+        allocator.free(attach.stdout);
+        allocator.free(attach.stderr);
     }
-    if (mount.term != .Exited or mount.term.Exited != 0) return error.DmgMountFailed;
+    if (attach.term != .Exited or attach.term.Exited != 0) return error.DmgMountFailed;
 
-    var volumes = std.fs.cwd().openDir("/Volumes", .{ .iterate = true }) catch return error.DmgMountFailed;
-    defer volumes.close();
+    // The image is attached from here on, so detach on every path out.
+    defer detachDmg(allocator, mount_point);
 
-    var vol_it = volumes.iterate();
-    while (try vol_it.next()) |vol| {
-        const vol_path = try std.fs.path.join(allocator, &.{ "/Volumes", vol.name });
-        defer allocator.free(vol_path);
+    var mounted = std.fs.cwd().openDir(mount_point, .{ .iterate = true }) catch return error.DmgMountFailed;
+    defer mounted.close();
 
-        var vol_dir = std.fs.cwd().openDir(vol_path, .{ .iterate = true }) catch continue;
-        defer vol_dir.close();
+    var entries = mounted.iterate();
+    while (try entries.next()) |entry| {
+        if (!std.mem.endsWith(u8, entry.name, ".app")) continue;
 
-        var entries = vol_dir.iterate();
-        while (try entries.next()) |entry| {
-            if (!std.mem.endsWith(u8, entry.name, ".app")) continue;
+        const src_app = try std.fs.path.join(allocator, &.{ mount_point, entry.name });
+        defer allocator.free(src_app);
+        const dst_app = try std.fs.path.join(allocator, &.{ dest_dir_path, entry.name });
+        defer allocator.free(dst_app);
 
-            const src_app = try std.fs.path.join(allocator, &.{ vol_path, entry.name });
-            defer allocator.free(src_app);
-            const dst_app = try std.fs.path.join(allocator, &.{ dest_dir_path, entry.name });
-            defer allocator.free(dst_app);
-
-            platform.copyTree(src_app, dst_app) catch {};
-
-            _ = std.process.Child.run(.{
-                .allocator = allocator,
-                .argv = &.{ "hdiutil", "detach", "-quiet", vol_path },
-            }) catch {};
-            return;
-        }
+        try platform.copyTree(src_app, dst_app);
+        return;
     }
     return error.DmgNoApplicationFound;
+}
+
+/// Detach our own mount point. A failure here is not fatal, because the copy
+/// is already finished, but the mount is left for the user to eject.
+fn detachDmg(allocator: std.mem.Allocator, mount_point: []const u8) void {
+    const detach = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ "hdiutil", "detach", "-quiet", mount_point },
+    }) catch return;
+    allocator.free(detach.stdout);
+    allocator.free(detach.stderr);
 }
 
 // ---------------------------------------------------------------------------
@@ -301,9 +415,13 @@ test "stripComponents" {
 }
 
 fn writeTarEntry(w: anytype, name: []const u8, content: []const u8, kind: u8, link: []const u8) !void {
+    try writeTarEntryMode(w, name, content, kind, link, 0o644);
+}
+
+fn writeTarEntryMode(w: anytype, name: []const u8, content: []const u8, kind: u8, link: []const u8, mode: u32) !void {
     var header = [_]u8{0} ** 512;
     @memcpy(header[0..name.len], name);
-    _ = try std.fmt.bufPrint(header[100..108], "0000644\x00", .{});
+    _ = try std.fmt.bufPrint(header[100..108], "{o:0>7}\x00", .{mode});
     _ = try std.fmt.bufPrint(header[108..116], "0000000\x00", .{});
     _ = try std.fmt.bufPrint(header[116..124], "0000000\x00", .{});
     _ = try std.fmt.bufPrint(header[124..136], "{o:0>11} ", .{content.len});
@@ -410,6 +528,105 @@ test "tar extraction refuses symlinks that escape the root" {
     if (!platform.is_windows) {
         try tmp.dir.access("inside", .{});
     }
+}
+
+test "tar extraction refuses to write through a symlink chain" {
+    if (platform.is_windows) return error.SkipZigTest;
+
+    var buf = std.ArrayList(u8).init(testing.allocator);
+    defer buf.deinit();
+    // Each name passes on its own. Together, `p/...` lands in the directory
+    // above the root, because `a/l/..` resolves through the earlier `a/l`.
+    try buildTar(&buf, .{
+        .{ "a/l", "", '2', ".." },
+        .{ "p", "", '2', "a/l/.." },
+        .{ "p/abv0-escape-probe", "pwned", '0', "" },
+    });
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var stream = std.io.fixedBufferStream(buf.items);
+    try pipeTar(testing.allocator, stream.reader(), tmp.dir, .{});
+
+    // The escape target is the parent of the extraction root.
+    try testing.expectError(error.FileNotFound, tmp.parent_dir.access("abv0-escape-probe", .{}));
+    // The chain's second link was never created.
+    var link_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+    try testing.expectError(error.NotLink, tmp.dir.readLink("p", &link_buf));
+}
+
+test "tar extraction refuses members that route through an earlier symlink" {
+    if (platform.is_windows) return error.SkipZigTest;
+
+    var buf = std.ArrayList(u8).init(testing.allocator);
+    defer buf.deinit();
+    try buildTar(&buf, .{
+        .{ "a/l", "", '2', ".." },
+        .{ "a/l/abv0-escape-probe", "pwned", '0', "" },
+        .{ "a/l/sub/file", "pwned", '0', "" },
+    });
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var stream = std.io.fixedBufferStream(buf.items);
+    try pipeTar(testing.allocator, stream.reader(), tmp.dir, .{});
+
+    // Neither write goes through the link, so nothing lands at the root.
+    try testing.expectError(error.FileNotFound, tmp.dir.access("abv0-escape-probe", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.access("sub/file", .{}));
+}
+
+test "tar extraction strips setuid, setgid and sticky bits" {
+    if (platform.is_windows) return error.SkipZigTest;
+
+    var buf = std.ArrayList(u8).init(testing.allocator);
+    defer buf.deinit();
+    const w = buf.writer();
+    try writeTarEntryMode(w, "bin/suid", "#!/bin/sh\n", '0', "", 0o4755);
+    try writeTarEntryMode(w, "bin/sgid", "#!/bin/sh\n", '0', "", 0o2755);
+    try writeTarEntryMode(w, "bin/sticky", "#!/bin/sh\n", '0', "", 0o1755);
+    try w.writeByteNTimes(0, 1024);
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var stream = std.io.fixedBufferStream(buf.items);
+    try pipeTar(testing.allocator, stream.reader(), tmp.dir, .{});
+
+    for ([_][]const u8{ "bin/suid", "bin/sgid", "bin/sticky" }) |name| {
+        const st = try tmp.dir.statFile(name);
+        try testing.expectEqual(@as(std.fs.File.Mode, 0), st.mode & 0o7000);
+        try testing.expectEqual(@as(std.fs.File.Mode, 0o755), st.mode & 0o777);
+    }
+}
+
+test "tar extraction stops at the member and byte caps" {
+    var buf = std.ArrayList(u8).init(testing.allocator);
+    defer buf.deinit();
+    try buildTar(&buf, .{
+        .{ "a", "1", '0', "" },
+        .{ "b", "2", '0', "" },
+        .{ "c", "3", '0', "" },
+    });
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var stream = std.io.fixedBufferStream(buf.items);
+    try testing.expectError(
+        error.ArchiveTooManyMembers,
+        pipeTar(testing.allocator, stream.reader(), tmp.dir, .{ .max_members = 2 }),
+    );
+
+    stream.reset();
+    try testing.expectError(
+        error.ArchiveTooLarge,
+        pipeTar(testing.allocator, stream.reader(), tmp.dir, .{ .max_bytes = 2 }),
+    );
+
+    // Under the limits the same archive extracts normally.
+    stream.reset();
+    try pipeTar(testing.allocator, stream.reader(), tmp.dir, .{ .max_members = 3, .max_bytes = 3 });
+    try tmp.dir.access("c", .{});
 }
 
 test "sniff identifies formats and rejects an HTML error page" {
