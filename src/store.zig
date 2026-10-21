@@ -84,15 +84,16 @@ pub const Store = struct {
         const home = try platform.homeDir(allocator);
         errdefer allocator.free(home);
 
-        const root = try std.fs.path.join(allocator, &.{ home, ".abv0" });
+        // ABV0_HOME, ABV0_BIN_DIR and ABV0_REGISTRY_DIR match the installers.
+        const root = platform.homeOverride(allocator) orelse try std.fs.path.join(allocator, &.{ home, ".abv0" });
         errdefer allocator.free(root);
         const store_root = try std.fs.path.join(allocator, &.{ root, "store" });
         errdefer allocator.free(store_root);
-        const bin_root = try std.fs.path.join(allocator, &.{ root, "bin" });
+        const bin_root = platform.binDirOverride(allocator) orelse try std.fs.path.join(allocator, &.{ root, "bin" });
         errdefer allocator.free(bin_root);
         const shells_root = try std.fs.path.join(allocator, &.{ root, "shells" });
         errdefer allocator.free(shells_root);
-        const registry_root = try std.fs.path.join(allocator, &.{ root, "registry" });
+        const registry_root = platform.registryDirOverride(allocator) orelse try std.fs.path.join(allocator, &.{ root, "registry" });
         errdefer allocator.free(registry_root);
         const locks_root = try std.fs.path.join(allocator, &.{ root, "locks" });
         errdefer allocator.free(locks_root);
