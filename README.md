@@ -2,9 +2,9 @@
 
 **A fast, verifying package manager written in Zig. Linux, macOS and Windows.**
 
-`abv0` installs prebuilt release binaries from a signed-by-checksum manifest into a
-content-addressed store under `~/.abv0`, then links them onto your `PATH`. There is no
-interpreter to boot, no formula DSL to evaluate and no `git` clone in the hot path.
+`abv0` installs prebuilt release binaries from a signed manifest into a content-addressed
+store under `~/.abv0`, then links them onto your `PATH`. There is no interpreter to boot,
+no formula DSL to evaluate and no `git` clone in the hot path.
 
 ```bash
 abv0 install ripgrep jq      # verified, parallel
@@ -32,7 +32,8 @@ The installer downloads over HTTPS only, refuses protocol downgrades on redirect
 verifies the published SHA-256 from `release/SHA256SUMS`, checks the payload is
 actually an executable, runs it once, and only then moves it into place. Any failure
 leaves nothing installed. Set `ABV0_ALLOW_UNVERIFIED=1` to bypass checksum
-verification (not recommended).
+verification (not recommended). If no SHA-256 tool is found, the installer stops unless
+that variable is set.
 
 **From source** — requires [Zig 0.13.0](https://ziglang.org/):
 
@@ -57,6 +58,146 @@ Add `~/.abv0/bin` to your `PATH` (`abv0 doctor` will tell you if it is missing).
 
 `zig build check` type-checks the whole codebase against all six targets, so a
 Windows-only or macOS-only compile error fails on any machine.
+
+---
+
+## Usage
+
+```
+abv0 <command> [options] [arguments]
+abv0 <command> --help        help for one command (same as: abv0 help <command>)
+```
+
+Common tasks:
+
+```bash
+abv0 install jq ripgrep            # install with dependencies, in parallel
+abv0 install --dry-run jq          # show what would happen; change nothing
+abv0 list --installed              # versions in the store for this platform
+abv0 outdated                      # installed packages with a newer version
+abv0 upgrade                       # upgrade every outdated package
+abv0 pin jq                        # hold jq at its installed version
+abv0 which rg                      # which package owns the rg command
+abv0 cleanup --dry-run             # old versions and stale temp files
+abv0 doctor                        # PATH, permissions and link problems
+```
+
+### Commands
+
+```
+PACKAGES
+  install <pkg>...         Install packages and their dependencies (verified, in parallel)
+  uninstall <pkg>...       Remove packages and the links they created
+  upgrade [pkg]...         Upgrade outdated packages
+  outdated                 List packages with a newer version available
+  list [--installed]       List registry packages, or what is installed
+  search <query>           Search the registry
+  info <pkg>               Show package metadata
+  pin <pkg>                Hold a package at its installed version
+  unpin <pkg>              Let upgrade update it again
+  pinned                   List pinned packages
+  which <bin>              Show which package owns a command
+
+EXECUTION
+  run <pkg> [-- args]      Run a package executable
+  shell <pkg>...           Ephemeral subshell with only those packages
+
+MANIFESTS
+  bundle [install|dump]    Install from, or export to, a Brewfile
+  update                   Refresh the registry index
+  sync                     Recompile the local index and SQL export
+
+MAINTENANCE
+  doctor                   Diagnose PATH, permissions and links
+  fix                      Repair broken links and permissions
+  detect <pkg>             Scan an installed package for malware patterns
+  benchmark                Measure local store and index performance
+  gc                       Remove temporary files and stale sandboxes
+  cleanup                  Remove old versions, keeping the newest
+  completions <shell>      Print a bash, zsh, fish or pwsh completion script
+  self-update [--check]    Update abv0 from a signed release
+  reset                    Uninstall everything
+  report [--bug]           Open a prefilled GitHub issue
+  version                  Print the version
+  help [command]           This message, or help for one command
+```
+
+### Options
+
+| Option | Meaning |
+| :--- | :--- |
+| `--platform <tag>` | Target platform (default: this machine) |
+| `-f, --file <path>` | Manifest path for `bundle` commands (default: `Brewfile`) |
+| `-j, --jobs <n>` | Parallel install workers |
+| `--registry <path>` | Use this manifest instead of the cached one. `<path>.sig` must verify. |
+| `--allow-unsigned-manifest` | Skip the manifest signature and replay checks (UNSAFE) |
+| `--allow-unverified` | Permit installs without a verified checksum |
+| `--micro-split` | Parallel ranged download for large assets |
+| `--no-stream` | Download fully before unpacking (disables the streaming install) |
+| `--force` | Overwrite files and replace conflicting bin links |
+| `--dry-run` | Show what install, upgrade, uninstall, bundle or cleanup would do; change nothing |
+| `--json` | Machine-readable output on stdout (`list`, `search`, `info`, `outdated`, `install`, `doctor`) |
+| `--installed` | With `list`: show what is installed |
+| `--bug`, `--malware` | With `report`: a bug report, or a suspicious-package report |
+| `-q, --quiet` | Suppress progress lines (errors still print) |
+| `-v, --verbose` | Also print URLs, store paths and timings per package |
+| `--no-color` | Disable colour |
+| `-h, --help` | Help for the command |
+| `-V, --version` | Version |
+
+`--dry-run` for `install`, `upgrade`, `uninstall`, `bundle install` and `cleanup` needs an
+already-cached registry.
+
+Cross-platform installs work from any host: `abv0 install --platform aarch64-macos jq`
+fetches and stores the macOS build without linking it into your `PATH`.
+
+### Exit codes
+
+| Code | Meaning |
+| :---: | :--- |
+| 0 | success |
+| 1 | the operation failed (a download, a check, or a package) |
+| 2 | usage error (unknown command, option or argument) |
+
+`abv0 search` with no matches prints `no packages match` and exits 0.
+
+### Environment variables
+
+| Variable | Effect |
+| :--- | :--- |
+| `ABV0_HOME` | Root of the abv0 tree, replacing `~/.abv0` |
+| `ABV0_BIN_DIR` | Bin directory for links, replacing `<root>/bin` |
+| `ABV0_REGISTRY_DIR` | Registry directory, replacing `<root>/registry` |
+| `ABV0_REGISTRY_URL` | Manifest URL, for a mirror. Must be `https`. The manifest is still signature-checked. |
+| `NO_COLOR` | Disables colour, as `--no-color` does |
+
+The three path variables must be absolute, with no NUL bytes or line breaks. Anything
+else is ignored. `install.sh` honours `ABV0_BIN_DIR` and `ABV0_REGISTRY_DIR`, and
+`install.ps1` honours `ABV0_HOME`.
+
+### Shell completion
+
+`abv0 completions <bash|zsh|fish|pwsh>` prints a completion script to stdout.
+
+```bash
+# bash (bash-completion v2)
+abv0 completions bash > ~/.local/share/bash-completion/completions/abv0
+```
+
+```bash
+# zsh: ~/.zfunc must be on fpath before compinit runs in ~/.zshrc
+abv0 completions zsh > ~/.zfunc/_abv0
+```
+
+```bash
+# fish
+abv0 completions fish > ~/.config/fish/completions/abv0.fish
+```
+
+```powershell
+# PowerShell: add to $PROFILE
+abv0 completions pwsh | Out-String | Invoke-Expression
+```
 
 ---
 
@@ -108,6 +249,29 @@ Other performance work in 2.0.0:
   then duplicate every string, keeping two copies of the registry alive and freeing
   neither.
 
+### Streaming install
+
+For tar, tar.gz and tar.xz packages, `abv0` does not wait for the download to finish
+before it starts on the package:
+
+1. curl writes the response to a pipe.
+2. The bytes are hashed with SHA-256 as they arrive.
+3. They are decompressed and unpacked into a private staging folder in the store.
+4. The digest is compared with the manifest. Only if it matches is the staging folder
+   published into the store. A mismatch is a hard failure and the staging folder is
+   deleted, so unverified bytes never reach the store.
+
+zip and dmg archives need a seekable file, so they download first, as `--no-stream` does
+for every package. Transport is curl with the same hardened arguments as the plain
+download path (HTTPS only, no `~/.curlrc`, size cap, timeouts), so proxies and system CA
+stores behave the same either way.
+
+Measured on the development machine: ten rounds installing ripgrep, bat and jq, median
+**346 ms** streamed against **404 ms** when downloading to a file first (about 14% less).
+The gain comes from overlapping the hash and unpack with the download. It should grow on
+slower links and larger packages, where more of the work overlaps; that has not been
+measured.
+
 ---
 
 ## How it actually works
@@ -115,24 +279,32 @@ Other performance work in 2.0.0:
 **Store layout**
 
 ```
-~/.abv0/
-  bin/                     links onto your PATH
-  store/<pkg>-<ver>-<platform>/    unpacked package, read-only tree
-  store/states_wal/        write-ahead log for crash recovery
-  registry/index.json      the manifest
-  registry/index.abv       compiled binary index (mmap'ed)
-  locks/                   per-package install locks
+~/.abv0/                                  (ABV0_HOME replaces this root)
+  bin/                                    links onto your PATH (ABV0_BIN_DIR)
+  store/<name>@<version>@<platform>/      unpacked package, read-only tree
+  store/states_wal/                       write-ahead log for crash recovery
+  registry/index.json                     the manifest (ABV0_REGISTRY_DIR)
+  registry/index.abv                      compiled binary index (mmap'ed)
+  registry/last-updated-at                newest manifest updated_at accepted
+  state/pins                              pinned packages
+  apps/                                   app bundles
+  locks/                                  per-package and ownership locks
 ```
+
+**Store folder names.** Each package is stored in `name@version@platform`. `@` is not
+allowed in package names or versions, so the split is unambiguous. Earlier versions used
+`name-version-platform`, which was ambiguous when a name contained `-`. Packages installed
+that way show as not installed; reinstall them once. Their existing bin links are adopted.
 
 **`index.abv` — a real memory-mapped index.** `abv0` compiles `index.json` into a flat
 binary file: a header with a content stamp, a sorted fixed-width record array, and a
 deduplicated string table. Lookups `mmap` the file and binary-search the records,
 slicing strings directly out of the mapping with no parsing and no allocation. The
-stamp (source size + mtime) is checked on load, so editing `index.json` transparently
-rebuilds the index. Every offset is bounds-checked against the mapping before use, and
-a truncated, corrupt or wrong-version file is rejected rather than dereferenced. On
-Windows, which has no `mmap` in the Zig standard library without libc, the same file is
-read into a heap buffer and used identically.
+stamp is checked on load, so editing `index.json` transparently rebuilds the index.
+Every offset is bounds-checked against the mapping before use, and a truncated, corrupt
+or wrong-version file is rejected rather than dereferenced. On Windows, which has no
+`mmap` in the Zig standard library without libc, the same file is read into a heap
+buffer and used identically.
 
 *(Before: `index.abv` was a 24-byte header containing no data, written and never read.)*
 
@@ -164,78 +336,67 @@ is installed. If it is not installed, it says so instead of pretending.
 ## Security
 
 `abv0` treats the manifest and everything it downloads as hostile input. See
-[SECURITY.md](SECURITY.md) for the full list of vulnerabilities found and fixed in
-2.0.0, including three that previous releases claimed to have fixed but had not.
+[SECURITY.md](SECURITY.md) for each finding, its severity and how it was fixed.
 
 Behaviour you can rely on:
 
+- **The manifest is signed.** `update` and the first-run bootstrap download the manifest
+  and `<url>.sig`, verify the Ed25519 signature against the public key compiled in from
+  `keys/manifest.pub`, and only then use the file. The manifest's `updated_at` may not go
+  back in time relative to the last one accepted, so an old signed manifest cannot be
+  replayed. `--allow-unsigned-manifest` skips both checks and prints a warning.
 - **Checksums are enforced.** A SHA-256 mismatch aborts the install; nothing is
   unpacked and nothing is linked. A package with no pinned hash for your platform is
   refused. `--allow-unverified` opts out per invocation and says so loudly.
 - **Archives cannot escape the store.** Every tar/zip member name is validated before
   extraction: `../` components, absolute paths, Windows drive letters, UNC prefixes and
-  embedded NUL bytes are rejected, and symlink targets that resolve outside the
-  extraction root are skipped.
+  embedded NUL bytes are rejected. Every existing parent component is checked on disk,
+  and a symlink may not walk through a link already present. Extraction stops at 4 GiB
+  or 200,000 members, and setuid, setgid and sticky bits are cleared.
+- **Commands are owned.** abv0 records which package owns each bin link and app bundle.
+  A package cannot take over a name it does not own, and reserved names (`abv0`, `sudo`,
+  `ssh`, shells and similar) are refused. `--force` replaces a conflicting link.
 - **Manifests are validated on load.** Non-HTTPS URLs, path traversal in `name`,
-  `bin_path` or `bin[]`, and malformed records are dropped with the rest of the manifest
-  still usable. A corrupt or truncated `index.json` produces an error, not a panic.
-- **HTTPS only.** `curl` runs with `--fail --proto '=https' --proto-redir '=https'` and
-  bounded timeouts, so a 404 page can never be saved as a binary and a redirect cannot
-  downgrade to plaintext.
+  `bin_path` or `bin[]`, duplicate and reserved names, and malformed records are dropped
+  with the rest of the manifest still usable. A corrupt or truncated `index.json`
+  produces an error, not a panic.
+- **HTTPS only.** `curl` runs with `-q` (so `~/.curlrc` is ignored),
+  `--fail --proto '=https' --proto-redir '=https'`, bounded timeouts and a 2 GiB download
+  cap. URLs containing userinfo are rejected, so a 404 page cannot be saved as a binary
+  and a redirect cannot downgrade to plaintext.
 - **Unverifiable dynamic installs are opt-in.** Installing a package that is not in the
-  registry searches GitHub and cannot check a checksum, so it now requires
+  registry searches GitHub and cannot check a checksum, so it requires
   `--allow-unverified`.
+- **Upgrades install first.** The new version is installed before older versions are
+  removed, so a failed upgrade keeps the working one.
 
-Report a vulnerability by opening an issue, or use `abv0 report`.
+Report a vulnerability by opening an issue, or use `abv0 report --malware <pkg>` for a
+suspicious package.
 
 ---
 
-## Commands
+## Signing the package list (maintainers)
 
-```
-PACKAGES
-  install <pkg>...     Install packages (verified, in parallel)
-  uninstall <pkg>      Remove a package and its links
-  upgrade [pkg]...     Upgrade outdated packages
-  outdated             List packages with a newer version available
-  list                 List registry packages
-  search <query>       Search the registry
-  info <pkg>           Show package metadata
+The manifest is trusted only if its detached Ed25519 signature verifies against
+`keys/manifest.pub`, which is compiled into every `abv0` binary. Signing happens offline.
 
-EXECUTION
-  run <pkg> [-- args]  Run a package executable
-  shell <pkg>...       Ephemeral subshell with only those packages
-
-MANIFESTS
-  bundle [install]     Install from a Brewfile
-  bundle dump          Export installed packages to a Brewfile
-  update               Refresh the registry index
-  sync                 Recompile the local index and SQL export
-
-MAINTENANCE
-  doctor               Diagnose PATH, permissions and links
-  fix                  Repair broken links and permissions
-  detect <pkg>         Scan an installed package for malware patterns
-  benchmark            Measure local store and index performance
-  gc                   Remove temporary files and stale sandboxes
-  reset                Uninstall everything
-  report [--bug]       Open a prefilled GitHub issue
-
-OPTIONS
-  --platform <tag>     Target platform (default: x86_64-linux)
-  -f, --file <path>    Manifest path for bundle commands
-  -j, --jobs <n>       Parallel install workers
-  --allow-unverified   Permit installs without a verified checksum
-  --micro-split        Parallel ranged download for large assets
-  --force              Overwrite output files
-  --json               Machine-readable output (list, info, outdated)
-  --no-color           Disable colour
-  -h, --help           This message
-  -V, --version        Version
+```bash
+zig build sign-tool                                      # installs sign-manifest to zig-out/bin
+zig-out/bin/sign-manifest keygen <secret-key> keys/manifest.pub
+zig-out/bin/sign-manifest sign <secret-key> packages/index.json   # writes packages/index.json.sig
+zig-out/bin/sign-manifest verify keys/manifest.pub packages/index.json
 ```
 
-Cross-platform installs work from any host: `abv0 install --platform aarch64-macos jq`
-fetches and stores the macOS build without linking it into your `PATH`.
+- Keep the secret key out of git. Only the public key is committed.
+- Commit `keys/manifest.pub`, `packages/index.json` and `packages/index.json.sig` together.
+  Every change to the manifest needs a new signature.
+- The public key in the repository is a development placeholder. Replace it with the
+  maintainer's key before a real release, then rebuild the binaries.
+- Releases also need `release/SHA256SUMS.sig`, a signature over `release/SHA256SUMS`
+  made the same way (`sign-manifest sign <secret-key> release/SHA256SUMS`). `abv0
+  self-update` refuses a release whose checksums do not verify.
+- `-Dmanifest-pubkey=<hex>` at build time embeds a different public key instead of
+  `keys/manifest.pub`.
 
 ---
 
@@ -243,68 +404,27 @@ fetches and stores the macOS build without linking it into your `PATH`.
 
 ```bash
 zig build                       # debug build
-zig build test                  # 61 unit tests
+zig build test                  # 146 test blocks across src/*.zig
 zig build check                 # type-check Linux, macOS and Windows targets
 zig build release               # stripped ReleaseFast binaries for all 6 targets
+zig build sign-tool             # the sign-manifest CLI
 zig build -Doptimize=ReleaseFast
 ```
 
 The test suite covers path-traversal and tar-slip rejection, symlink escape, hostile
-manifests, checksum enforcement, index corruption and truncation, WAL torn-record
-recovery, Bloom filter false-negative freedom, version comparison and argument parsing.
-`src/main.zig` imports every module at comptime, so `zig build test` runs all of them.
+manifests, signature and replay checks, checksum enforcement, index corruption and
+truncation, WAL torn-record recovery, Bloom filter false-negative freedom, version
+comparison, argument parsing and the streaming install. `src/main.zig` imports every
+module at comptime, so `zig build test` runs all of them.
+
+Fixtures used only by these tests live in `tests/fixtures/`. They are not registry
+packages.
 
 ---
 
 ## Changelog
 
-### v2.0.0 — correctness, security and cross-platform release
-
-The tree did not compile before this release; `zig build` failed on a syntax error in
-`src/main.zig`, so none of the previously shipped binaries corresponded to the source.
-
-* **Fixed: the build.** Removed an orphaned function body, added missing imports.
-* **Fixed: `abv0 outdated` never reported anything.** Its body was
-  `if (try self.isInstalled(...)) {}` — an empty block — so it always printed
-  "everything is up to date". It now compares installed versions against the registry
-  with numeric-aware version ordering.
-* **Fixed: `abv0 run` / `abv0 shell` for most packages.** Both looked for an executable
-  named after the *package* (`bin/ripgrep`) instead of the executables the package
-  actually provides (`bin/rg`).
-* **Fixed: data race in parallel installs.** Every worker thread shared one
-  `ArenaAllocator`, which is not thread-safe. Each install now gets its own arena over a
-  thread-safe base allocator, and installs are bounded to `min(CPUs, packages, 8)`.
-* **Fixed: crashes on malformed input.** Unchecked `.?` unwraps on parsed JSON panicked
-  on a truncated manifest or a GitHub rate-limit response.
-* **Fixed: concurrent first runs corrupted the registry.** Two `abv0` processes starting
-  on a fresh machine both wrote `index.json` in place; one read the other's partial
-  write. The manifest is now downloaded to a temporary file, parsed, and renamed into
-  place atomically.
-* **Fixed: `installDynamic` hardcoded `refs/heads/master`**, so it 404'd on every
-  repository that has since renamed its default branch.
-* **Security:** strict checksum enforcement, archive path-traversal and symlink-escape
-  rejection, manifest validation, HTTPS-only downloads, opt-in dynamic installs,
-  `hdiutil attach -readonly`, and removal of the `curl | sh` self-update. Details in
-  [SECURITY.md](SECURITY.md).
-* **Windows support**, plus Linux aarch64. The old code could not compile for Windows
-  at all (`std.posix.getenv` is a compile error there).
-* **Implemented the subsystems that were previously fictional**: memory-mapped binary
-  index, crash-recoverable WAL, real Bloom filter, genuine SQLite export.
-* **Performance:** 6–10× faster startup, single-pass hashing, one directory walk per
-  install, buffered stdout, bounded parallelism. Details above.
-* **Release binaries rebuilt.** `abv0-darwin-x86_64` was a 0-byte file and
-  `abv0-linux-x86_64` was an unstripped debug build. All six artifacts are now stripped
-  `ReleaseFast` builds published with `release/SHA256SUMS`.
-* **Installer hardened** and an `install.ps1` added for Windows.
-* **Documentation:** removed the unreproducible benchmark table and the descriptions of
-  subsystems that did not exist.
-
-### Earlier releases
-
-v1.5.0 and earlier claimed fixes for the memory-mapped uninitialized read, the archive
-path traversal and several performance features. Those claims did not match the code;
-the issues are genuinely fixed in 2.0.0. The historical changelog is preserved in the
-git history.
+See [CHANGELOG.md](CHANGELOG.md), including migration notes for this release.
 
 ---
 
