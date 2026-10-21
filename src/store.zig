@@ -295,15 +295,18 @@ pub const Store = struct {
         var guard = try Guard.acquire(a, self.locks_root, pkg.name);
         defer guard.release();
 
+        // One WAL handle per install. A second handle on the same log would
+        // keep its own sequence counter and write duplicate seq numbers.
+        var w = try wal.Wal.init(a, self.store_root, pkg.name);
+        defer w.deinit();
+
         // Re-check under the lock: another worker may have just finished.
         if (!self.isInstalled(pkg, platform_name)) {
-            try self.fetchAndUnpack(a, pkg, info, pkg_dir, opts);
+            try self.fetchAndUnpack(a, pkg, info, pkg_dir, opts, &w);
         } else if (!opts.quiet) {
             term.print("  {s}cached{s}  {s} {s}\n", .{ term.dim, term.reset, pkg.name, pkg.version });
         }
 
-        var w = try wal.Wal.init(a, self.store_root, pkg.name);
-        defer w.deinit();
         try w.append(.link);
 
         const linked = try self.linkBinaries(a, pkg, info, pkg_dir, opts);
@@ -326,10 +329,8 @@ pub const Store = struct {
         info: registry.PlatformInfo,
         pkg_dir: []const u8,
         opts: InstallOptions,
+        w: *wal.Wal,
     ) !void {
-        var w = try wal.Wal.init(a, self.store_root, pkg.name);
-        defer w.deinit();
-
         if (w.hasUnfinishedInstall() catch false) {
             if (!opts.quiet) {
                 term.print("  {s}recovering{s} interrupted install of {s}\n", .{ term.yellow, term.reset, pkg.name });
@@ -407,9 +408,58 @@ pub const Store = struct {
         // The payload file itself is not part of the installed tree.
         std.fs.cwd().deleteFile(archive_path) catch {};
 
-        // Atomic publish.
-        std.fs.cwd().deleteTree(pkg_dir) catch {};
-        try std.fs.cwd().rename(tmp_dir, pkg_dir);
+        try publishTree(a, tmp_dir, pkg_dir);
+    }
+
+    /// Swap a finished extraction into place. An existing install is moved
+    /// aside first, so a crash leaves either the old or the new tree at
+    /// `pkg_dir`. The set-aside copy ends in `.tmp`, so gc reclaims it if we
+    /// die before deleting it.
+    fn publishTree(a: std.mem.Allocator, tmp_dir: []const u8, pkg_dir: []const u8) !void {
+        var old: ?[]const u8 = null;
+        if (std.fs.cwd().access(pkg_dir, .{})) |_| {
+            const aside = try std.fmt.allocPrint(a, "{s}.old.{x}.tmp", .{ pkg_dir, std.crypto.random.int(u64) });
+            try std.fs.cwd().rename(pkg_dir, aside);
+            old = aside;
+        } else |_| {}
+
+        std.fs.cwd().rename(tmp_dir, pkg_dir) catch |e| {
+            if (old) |o| std.fs.cwd().rename(o, pkg_dir) catch {};
+            return e;
+        };
+        if (old) |o| std.fs.cwd().deleteTree(o) catch {};
+    }
+
+    test "publish over an existing install leaves only the new tree" {
+        var tmp = testing.tmpDir(.{ .iterate = true });
+        defer tmp.cleanup();
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const root = try tmp.dir.realpathAlloc(a, ".");
+
+        try tmp.dir.makePath("jq@1.0@x86_64-linux");
+        try tmp.dir.writeFile(.{ .sub_path = "jq@1.0@x86_64-linux/old", .data = "old" });
+        try tmp.dir.makePath("jq@1.0@x86_64-linux.1f.tmp");
+        try tmp.dir.writeFile(.{ .sub_path = "jq@1.0@x86_64-linux.1f.tmp/new", .data = "new" });
+
+        const pkg_dir = try std.fs.path.join(a, &.{ root, "jq@1.0@x86_64-linux" });
+        const tmp_dir = try std.fs.path.join(a, &.{ root, "jq@1.0@x86_64-linux.1f.tmp" });
+        try publishTree(a, tmp_dir, pkg_dir);
+
+        const got = try tmp.dir.readFileAlloc(a, "jq@1.0@x86_64-linux/new", 64);
+        try testing.expectEqualStrings("new", got);
+        try testing.expectError(error.FileNotFound, tmp.dir.access("jq@1.0@x86_64-linux/old", .{}));
+        try testing.expectError(error.FileNotFound, tmp.dir.access("jq@1.0@x86_64-linux.1f.tmp", .{}));
+
+        // Only the install itself remains in the store root.
+        var it = tmp.dir.iterate();
+        var entries: usize = 0;
+        while (try it.next()) |entry| {
+            entries += 1;
+            try testing.expectEqualStrings("jq@1.0@x86_64-linux", entry.name);
+        }
+        try testing.expectEqual(@as(usize, 1), entries);
     }
 
     fn verifyChecksum(
