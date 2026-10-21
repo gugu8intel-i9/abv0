@@ -69,6 +69,14 @@ pub const Stamp = struct {
         return .{ .size = st.size, .mtime_ns = @truncate(st.mtime), .sha256 = digest };
     }
 
+    /// Hashes a manifest that is already in memory. `ofFile` is the streaming
+    /// equivalent for callers that have no bytes in hand.
+    pub fn ofManifest(m: registry.Manifest) Stamp {
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(m.bytes, &digest, .{});
+        return .{ .size = m.bytes.len, .mtime_ns = m.mtime_ns, .sha256 = digest };
+    }
+
     pub fn eql(a: Stamp, b: Stamp) bool {
         return std.mem.eql(u8, &a.sha256, &b.sha256);
     }
@@ -327,6 +335,20 @@ pub fn load(
     }
     const aa = arena.allocator();
 
+    // List entries and platforms are each decoded once into a shared array, and
+    // every package's slices are windows into it. This replaces what used to be
+    // several small allocations per package. The strings themselves already
+    // alias the mapping.
+    const names = try aa.alloc([]const u8, list_count);
+    var n: u32 = 0;
+    while (n < list_count) : (n += 1) {
+        const base = @as(u64, list_off) + @as(u64, n) * list_entry_size;
+        names[n] = try view.str(try view.u32At(base), try view.u32At(base + 4));
+    }
+
+    const plat_entries = try aa.alloc(registry.PlatformInfo, plat_count);
+    var plat_kept: usize = 0;
+
     const packages = try aa.alloc(registry.Package, pkg_count);
 
     var i: u32 = 0;
@@ -352,16 +374,30 @@ pub fn load(
         if (@as(u64, dep_first) + dep_count > list_count) return Error.CorruptIndex;
         if (@as(u64, plat_first) + pcount > plat_count) return Error.CorruptIndex;
 
+        // Platforms failing the JSON loader's checks are dropped, so this
+        // package's window may be shorter than its record says.
+        const plat_start = plat_kept;
+        var p: u32 = 0;
+        while (p < pcount) : (p += 1) {
+            const plat = try readPlatform(view, plat_off, @as(u64, plat_first) + p);
+            if (!registry.isUsablePlatform(plat.name, plat.url, plat.bin_path)) continue;
+            // A valid index keeps each platform at most once, so this only
+            // fires when packages share platform records.
+            if (plat_kept == plat_entries.len) return Error.CorruptIndex;
+            plat_entries[plat_kept] = plat;
+            plat_kept += 1;
+        }
+
         packages[i] = .{
             .name = try view.str(f[0], f[1]),
             .version = try view.str(f[2], f[3]),
             .description = try view.str(f[4], f[5]),
             .homepage = try view.str(f[6], f[7]),
             .license = try view.str(f[8], f[9]),
-            .bin = try readList(aa, view, list_off, bin_first, bin_count),
-            .app_bundles = try readList(aa, view, list_off, app_first, app_count),
-            .deps = try readList(aa, view, list_off, dep_first, dep_count),
-            .platforms = try readPlatforms(aa, view, plat_off, plat_first, pcount),
+            .bin = names[bin_first..][0..bin_count],
+            .app_bundles = names[app_first..][0..app_count],
+            .deps = names[dep_first..][0..dep_count],
+            .platforms = plat_entries[plat_start..plat_kept],
         };
     }
 
@@ -391,63 +427,25 @@ pub fn load(
         .arena = arena,
         .mapped = mapped,
         .packages = packages[0..kept],
+        .bin_index = try registry.buildBinIndex(aa, packages[0..kept]),
         .rejected = rejected,
     };
 }
 
-fn readList(
-    allocator: std.mem.Allocator,
-    view: View,
-    list_off: u32,
-    first: u32,
-    count: u32,
-) ![]const []const u8 {
-    if (count == 0) return &.{};
-    const out = try allocator.alloc([]const u8, count);
-    var i: u32 = 0;
-    while (i < count) : (i += 1) {
-        // `first + i` is widened before the multiply; the caller has already
-        // checked that `first + count` fits the list, but the arithmetic
-        // should not depend on that.
-        const base = @as(u64, list_off) + (@as(u64, first) + i) * list_entry_size;
-        const off = try view.u32At(base);
-        const len = try view.u32At(base + 4);
-        out[i] = try view.str(off, len);
+/// Decodes the platform record at `index` in the platform table.
+fn readPlatform(view: View, plat_off: u32, index: u64) !registry.PlatformInfo {
+    const base = @as(u64, plat_off) + index * plat_entry_size;
+    var f: [10]u32 = undefined;
+    for (&f, 0..) |*slot, j| {
+        slot.* = try view.u32At(base + @as(u64, j) * 4);
     }
-    return out;
-}
-
-/// Decodes platform entries, keeping only those the JSON loader would have
-/// accepted. The returned slice may be shorter than `count`.
-fn readPlatforms(
-    allocator: std.mem.Allocator,
-    view: View,
-    plat_off: u32,
-    first: u32,
-    count: u32,
-) ![]const registry.PlatformInfo {
-    if (count == 0) return &.{};
-    const out = try allocator.alloc(registry.PlatformInfo, count);
-    var kept: usize = 0;
-    var i: u32 = 0;
-    while (i < count) : (i += 1) {
-        const base = @as(u64, plat_off) + (@as(u64, first) + i) * plat_entry_size;
-        var f: [10]u32 = undefined;
-        for (&f, 0..) |*slot, j| {
-            slot.* = try view.u32At(base + @as(u64, j) * 4);
-        }
-        const plat = registry.PlatformInfo{
-            .name = try view.str(f[0], f[1]),
-            .url = try view.str(f[2], f[3]),
-            .sha256 = try view.str(f[4], f[5]),
-            .archive_type = try view.str(f[6], f[7]),
-            .bin_path = try view.str(f[8], f[9]),
-        };
-        if (!registry.isUsablePlatform(plat.name, plat.url, plat.bin_path)) continue;
-        out[kept] = plat;
-        kept += 1;
-    }
-    return out[0..kept];
+    return .{
+        .name = try view.str(f[0], f[1]),
+        .url = try view.str(f[2], f[3]),
+        .sha256 = try view.str(f[4], f[5]),
+        .archive_type = try view.str(f[6], f[7]),
+        .bin_path = try view.str(f[8], f[9]),
+    };
 }
 
 /// Load the registry the fast way when possible, otherwise parse JSON and
@@ -457,7 +455,11 @@ pub fn loadCached(
     json_path: []const u8,
     index_path: []const u8,
 ) !registry.Registry {
-    const stamp = try Stamp.ofFile(json_path);
+    // One read of index.json serves both the freshness hash and, on a miss,
+    // the parse. On a hit the bytes are released when this function returns.
+    var manifest = try registry.Manifest.read(allocator, json_path);
+    defer manifest.deinit();
+    const stamp = Stamp.ofManifest(manifest);
 
     if (load(allocator, index_path, stamp)) |reg| {
         return reg;
@@ -466,7 +468,7 @@ pub fn loadCached(
         // back to the authoritative JSON.
     }
 
-    var reg = try registry.loadFromJsonFile(allocator, json_path, null);
+    var reg = try registry.loadManifest(&manifest, null);
     errdefer reg.deinit();
 
     // Best-effort cache refresh; failing to write it must not break the command.
@@ -783,4 +785,91 @@ test "index contents are re-validated on load and invalid packages dropped" {
     // The http:// platform is dropped; the https one survives.
     try testing.expectEqual(@as(usize, 1), loaded.get("mixed").?.platforms.len);
     try testing.expectEqual(@as(usize, 1), loaded.rejected);
+}
+
+test "a cache miss parses the manifest it hashed, and the next load is a hit" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const paths = try setupSample(&tmp, testing.allocator);
+    defer testing.allocator.free(paths[0]);
+    defer testing.allocator.free(paths[1]);
+
+    {
+        var miss = try loadCached(testing.allocator, paths[0], paths[1]);
+        defer miss.deinit();
+        try testing.expect(miss.mapped == null);
+        try testing.expectEqualStrings("jq", miss.findByBin("jq").?.name);
+        try testing.expectEqualStrings("ripgrep", miss.findByBin("rg").?.name);
+        try testing.expectEqual(@as(usize, 2), miss.get("ripgrep").?.platforms.len);
+    }
+    {
+        var hit = try loadCached(testing.allocator, paths[0], paths[1]);
+        defer hit.deinit();
+        try testing.expect(hit.mapped != null);
+        try testing.expectEqualStrings("ripgrep", hit.findByBin("rg").?.name);
+        try testing.expect(hit.findByBin("absent") == null);
+        try testing.expectEqualStrings(
+            "https://example.com/rg.tar.gz",
+            hit.get("ripgrep").?.platform("x86_64-linux").?.url,
+        );
+    }
+}
+
+test "a large index round-trips bin lookups and drops unusable platforms" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const good_plat = registry.PlatformInfo{ .name = "x86_64-linux", .url = "https://e.com/x", .sha256 = "SKIP", .archive_type = "raw", .bin_path = "x" };
+    const bad_plat = registry.PlatformInfo{ .name = "aarch64-linux", .url = "http://e.com/x", .sha256 = "SKIP", .archive_type = "raw", .bin_path = "x" };
+
+    // Even packages carry one unusable platform (plain http) that must not
+    // survive the round trip. Names are ascending, so the list is sorted.
+    const count: usize = 1000;
+    const pkgs = try arena.alloc(registry.Package, count);
+    for (pkgs, 0..) |*p, i| {
+        const name = try std.fmt.allocPrint(arena, "pkg{d:0>5}", .{i});
+        const bin = try std.fmt.allocPrint(arena, "bin{d:0>5}", .{i});
+        const plats: []const registry.PlatformInfo = if (i % 2 == 0)
+            try arena.dupe(registry.PlatformInfo, &.{ good_plat, bad_plat })
+        else
+            try arena.dupe(registry.PlatformInfo, &.{good_plat});
+        p.* = .{
+            .name = name,
+            .version = "1.0",
+            .bin = try arena.dupe([]const u8, &.{bin}),
+            .platforms = plats,
+        };
+    }
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(root);
+    const idx = try std.fs.path.join(testing.allocator, &.{ root, "big.abv" });
+    defer testing.allocator.free(idx);
+
+    const src = registry.Registry{ .allocator = testing.allocator, .packages = pkgs };
+    try build(testing.allocator, &src, idx, .{});
+
+    var loaded = try load(testing.allocator, idx, null);
+    defer loaded.deinit();
+
+    try testing.expectEqual(count, loaded.count());
+    try testing.expectEqual(@as(usize, 0), loaded.rejected);
+    try testing.expect(loaded.bin_index != null);
+
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        const bin = try std.fmt.allocPrint(arena, "bin{d:0>5}", .{i});
+        const want = try std.fmt.allocPrint(arena, "pkg{d:0>5}", .{i});
+        try testing.expectEqualStrings(want, loaded.findByBin(bin).?.name);
+
+        const got = loaded.get(want).?;
+        try testing.expectEqual(@as(usize, 1), got.platforms.len);
+        try testing.expectEqualStrings("https://e.com/x", got.platforms[0].url);
+        try testing.expectEqual(@as(usize, 1), got.bin.len);
+        try testing.expectEqualStrings(bin, got.bin[0]);
+    }
+    try testing.expect(loaded.findByBin("bin99999") == null);
 }

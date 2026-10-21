@@ -143,6 +143,10 @@ pub const Registry = struct {
     packages: []Package = &.{},
     /// How many manifest entries were rejected during load.
     rejected: usize = 0,
+    /// Executable name -> package, sorted by name. Built by `buildBinIndex`
+    /// and owned by `arena`. Null means no table was built, and `findByBin`
+    /// falls back to a linear scan.
+    bin_index: ?[]const BinEntry = null,
 
     pub fn deinit(self: *Registry) void {
         if (self.arena) |a| {
@@ -155,6 +159,7 @@ pub const Registry = struct {
             self.mapped = null;
         }
         self.packages = &.{};
+        self.bin_index = null;
     }
 
     pub fn count(self: *const Registry) usize {
@@ -166,8 +171,26 @@ pub const Registry = struct {
         return self.packages[idx];
     }
 
-    /// Find whichever package ships an executable called `bin_name`.
+    /// Find whichever package ships an executable called `bin_name`. When more
+    /// than one package ships it, the one earliest in `packages` wins, which is
+    /// the answer a linear scan gives.
     pub fn findByBin(self: *const Registry, bin_name: []const u8) ?Package {
+        const table = self.bin_index orelse return self.findByBinScan(bin_name);
+        var lo: usize = 0;
+        var hi: usize = table.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (std.mem.order(u8, table[mid].bin, bin_name) == .lt) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        if (lo == table.len or !std.mem.eql(u8, table[lo].bin, bin_name)) return null;
+        return self.packages[table[lo].pkg];
+    }
+
+    fn findByBinScan(self: *const Registry, bin_name: []const u8) ?Package {
         for (self.packages) |p| {
             if (p.providesBin(bin_name)) return p;
         }
@@ -182,6 +205,42 @@ pub const Registry = struct {
         return .{ .allocator = allocator, .arena = arena };
     }
 };
+
+// ---------------------------------------------------------------------------
+// Bin lookup table
+// ---------------------------------------------------------------------------
+
+/// One executable name and the package that ships it. See `buildBinIndex`.
+pub const BinEntry = struct {
+    bin: []const u8,
+    /// Position in `Registry.packages`.
+    pkg: usize,
+};
+
+fn lessThanBinEntry(_: void, a: BinEntry, b: BinEntry) bool {
+    const ord = std.mem.order(u8, a.bin, b.bin);
+    if (ord != .eq) return ord == .lt;
+    return a.pkg < b.pkg;
+}
+
+/// Builds the bin-name table for `packages`, which must be sorted by name.
+/// Entries are ordered by bin name and then by package position, so the first
+/// entry for any name points at the package a linear scan would return.
+pub fn buildBinIndex(allocator: std.mem.Allocator, packages: []const Package) ![]BinEntry {
+    var total: usize = 0;
+    for (packages) |p| total += p.bin.len;
+
+    const table = try allocator.alloc(BinEntry, total);
+    var k: usize = 0;
+    for (packages, 0..) |p, i| {
+        for (p.bin) |b| {
+            table[k] = .{ .bin = b, .pkg = i };
+            k += 1;
+        }
+    }
+    std.mem.sort(BinEntry, table, {}, lessThanBinEntry);
+    return table;
+}
 
 // ---------------------------------------------------------------------------
 // JSON loading
@@ -235,19 +294,66 @@ pub fn loadFromJsonFile(
     path: []const u8,
     diags: ?*LoadDiagnostics,
 ) !Registry {
-    var reg = try Registry.initArena(allocator);
+    var manifest = try Manifest.read(allocator, path);
+    errdefer manifest.deinit();
+    return loadManifest(&manifest, diags);
+}
+
+/// An `index.json` read into memory once. The bytes live in an arena that
+/// becomes the Registry's arena when `loadManifest` succeeds, so every string
+/// the Registry hands out stays valid for the Registry's lifetime.
+pub const Manifest = struct {
+    allocator: std.mem.Allocator,
+    arena: ?*std.heap.ArenaAllocator,
+    bytes: []const u8,
+    mtime_ns: i64,
+
+    pub fn read(allocator: std.mem.Allocator, path: []const u8) !Manifest {
+        const arena = try allocator.create(std.heap.ArenaAllocator);
+        arena.* = std.heap.ArenaAllocator.init(allocator);
+        errdefer {
+            arena.deinit();
+            allocator.destroy(arena);
+        }
+
+        const file = try std.fs.cwd().openFile(path, .{});
+        defer file.close();
+        const st = try file.stat();
+
+        const bytes = try file.readToEndAlloc(arena.allocator(), 16 * 1024 * 1024);
+        if (bytes.len == 0) return error.EmptyManifest;
+
+        return .{
+            .allocator = allocator,
+            .arena = arena,
+            .bytes = bytes,
+            .mtime_ns = @truncate(st.mtime),
+        };
+    }
+
+    /// Frees the bytes if they never reached a Registry. Safe to call after
+    /// `loadManifest`, which leaves the Manifest empty.
+    pub fn deinit(self: *Manifest) void {
+        if (self.arena) |a| {
+            a.deinit();
+            self.allocator.destroy(a);
+            self.arena = null;
+        }
+    }
+};
+
+/// Parse a manifest that `Manifest.read` has already loaded. On success the
+/// Registry takes over the manifest's arena and `m` is left empty.
+pub fn loadManifest(m: *Manifest, diags: ?*LoadDiagnostics) !Registry {
+    const arena_state = m.arena orelse return error.ManifestConsumed;
+    var reg = Registry{ .allocator = m.allocator, .arena = arena_state };
+    m.arena = null;
     errdefer reg.deinit();
-    const arena = reg.arena.?.allocator();
+    const arena = arena_state.allocator();
 
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-
-    const content = try file.readToEndAlloc(arena, 16 * 1024 * 1024);
-    if (content.len == 0) return error.EmptyManifest;
-
-    // Leaky parse into our arena: string values alias `content`, which the
+    // Leaky parse into our arena: string values alias `m.bytes`, which the
     // arena also owns, so nothing is copied twice.
-    const root_value = std.json.parseFromSliceLeaky(std.json.Value, arena, content, .{}) catch {
+    const root_value = std.json.parseFromSliceLeaky(std.json.Value, arena, m.bytes, .{}) catch {
         return error.MalformedManifest;
     };
 
@@ -266,7 +372,7 @@ pub fn loadFromJsonFile(
     var rejected: usize = 0;
 
     // Names already admitted. See admitUnique.
-    var seen = std.StringHashMap(void).init(allocator);
+    var seen = std.StringHashMap(void).init(m.allocator);
     defer seen.deinit();
 
     var it = packages_obj.iterator();
@@ -303,6 +409,7 @@ pub fn loadFromJsonFile(
     std.mem.sort(Package, pkgs, {}, lessThanByName);
 
     reg.packages = pkgs;
+    reg.bin_index = try buildBinIndex(arena, pkgs);
     reg.rejected = rejected;
     if (diags) |d| d.rejected_packages = rejected;
     return reg;
@@ -811,4 +918,106 @@ test "resolveOrder still accepts a chain just inside the depth limit" {
     const order = try resolveOrder(testing.allocator, &reg, &.{"p000"});
     defer testing.allocator.free(order);
     try testing.expectEqual(count, order.len);
+}
+
+test "findByBin finds the right package among many, and the earliest package wins a shared name" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Names are generated in ascending order, so the list is already sorted.
+    const count: usize = 2000;
+    var list = std.ArrayList(Package).init(arena);
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        const name = try std.fmt.allocPrint(arena, "pkg{d:0>5}", .{i});
+        const bin = try std.fmt.allocPrint(arena, "bin{d:0>5}", .{i});
+        const bins: []const []const u8 = if (i == 700 or i == 1500)
+            try arena.dupe([]const u8, &.{ bin, "shared" })
+        else
+            try arena.dupe([]const u8, &.{bin});
+        try list.append(.{ .name = name, .version = "1.0", .bin = bins });
+    }
+    const pkgs = try list.toOwnedSlice();
+    var reg = Registry{ .allocator = testing.allocator, .packages = pkgs };
+    reg.bin_index = try buildBinIndex(arena, pkgs);
+
+    i = 0;
+    while (i < count) : (i += 1) {
+        const bin = try std.fmt.allocPrint(arena, "bin{d:0>5}", .{i});
+        const want = try std.fmt.allocPrint(arena, "pkg{d:0>5}", .{i});
+        try testing.expectEqualStrings(want, reg.findByBin(bin).?.name);
+    }
+
+    // Both 700 and 1500 ship "shared"; the earlier package must win, exactly as
+    // the linear scan does.
+    try testing.expectEqualStrings("pkg00700", reg.findByBin("shared").?.name);
+    try testing.expectEqualStrings(reg.findByBinScan("shared").?.name, reg.findByBin("shared").?.name);
+
+    // Misses: absent, a prefix of a real name, and values before and after the
+    // whole table.
+    try testing.expect(reg.findByBin("nope") == null);
+    try testing.expect(reg.findByBin("bin0") == null);
+    try testing.expect(reg.findByBin("bin99999") == null);
+    try testing.expect(reg.findByBin("aaa") == null);
+    try testing.expect(reg.findByBin("zzz") == null);
+}
+
+test "findByBin without a bin table falls back to a scan" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const pkgs = try arena_state.allocator().dupe(Package, &.{
+        .{ .name = "a", .version = "1.0", .bin = &.{"alpha"} },
+        .{ .name = "b", .version = "1.0", .bin = &.{ "beta", "alpha" } },
+    });
+    const reg = Registry{ .allocator = testing.allocator, .packages = pkgs };
+    try testing.expect(reg.bin_index == null);
+    try testing.expectEqualStrings("a", reg.findByBin("alpha").?.name);
+    try testing.expectEqualStrings("b", reg.findByBin("beta").?.name);
+    try testing.expect(reg.findByBin("gamma") == null);
+}
+
+test "loadFromJsonFile builds the bin table" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const p = try writeTempJson(&tmp, "index.json",
+        \\{"packages":{
+        \\ "ripgrep":{"name":"ripgrep","version":"14.1.0","bin":["rg"],
+        \\   "platforms":{"x86_64-linux":{"url":"https://e.com/rg","sha256":"SKIP","archive_type":"raw","bin_path":"rg"}}},
+        \\ "jq":{"name":"jq","version":"1.7.1","bin":["jq","jqx"],
+        \\   "platforms":{"x86_64-linux":{"url":"https://e.com/jq","sha256":"SKIP","archive_type":"raw","bin_path":"jq"}}}
+        \\}}
+    );
+    defer testing.allocator.free(p);
+
+    var reg = try loadFromJsonFile(testing.allocator, p, null);
+    defer reg.deinit();
+
+    try testing.expect(reg.bin_index != null);
+    try testing.expectEqualStrings("ripgrep", reg.findByBin("rg").?.name);
+    try testing.expectEqualStrings("jq", reg.findByBin("jqx").?.name);
+    try testing.expect(reg.findByBin("ripgrep") == null);
+}
+
+test "a manifest read once is parsed, and is empty afterwards" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const p = try writeTempJson(&tmp, "index.json",
+        \\{"packages":{
+        \\ "jq":{"name":"jq","version":"1.7.1","bin":["jq"],
+        \\   "platforms":{"x86_64-linux":{"url":"https://e.com/jq","sha256":"SKIP","archive_type":"raw","bin_path":"jq"}}}
+        \\}}
+    );
+    defer testing.allocator.free(p);
+
+    var m = try Manifest.read(testing.allocator, p);
+    defer m.deinit();
+    try testing.expect(m.bytes.len > 0);
+
+    var reg = try loadManifest(&m, null);
+    defer reg.deinit();
+    try testing.expect(m.arena == null);
+    try testing.expectError(error.ManifestConsumed, loadManifest(&m, null));
+    try testing.expectEqualStrings("jq", reg.get("jq").?.name);
+    try testing.expectEqualStrings("1.7.1", reg.get("jq").?.version);
 }
