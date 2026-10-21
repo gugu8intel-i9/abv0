@@ -1960,6 +1960,35 @@ pub const Store = struct {
         if (want_arm) return is_arm or !is_x64;
         return is_x64 or !is_arm;
     }
+
+    /// Remove every installed version of `name` for `platform_name` except
+    /// `keep_version`. `upgrade` calls this only after the new version has
+    /// installed, so a failed download never leaves the package with nothing.
+    /// Bin links are not touched: the new version's install has already
+    /// relinked them, and removing them here would break the live command.
+    pub fn pruneOtherVersions(
+        self: *Store,
+        a: std.mem.Allocator,
+        name: []const u8,
+        keep_version: []const u8,
+        platform_name: []const u8,
+    ) !usize {
+        if (!safepath.isValidId(name)) return StoreError.InvalidPackageIdentifier;
+
+        const dirs = try self.installedVersions(a, name, platform_name);
+        defer a.free(dirs);
+
+        var removed: usize = 0;
+        for (dirs) |d| {
+            if (std.mem.eql(u8, d.version, keep_version)) continue;
+            const p = try std.fs.path.join(a, &.{ self.store_root, d.dir_name });
+            defer a.free(p);
+            if (std.fs.cwd().deleteTree(p)) |_| {
+                removed += 1;
+            } else |_| {}
+        }
+        return removed;
+    }
 };
 
 // ---------------------------------------------------------------------------

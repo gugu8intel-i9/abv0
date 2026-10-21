@@ -13,10 +13,12 @@ const abvindex = @import("abvindex.zig");
 const archive = @import("archive.zig");
 const bloom = @import("bloom.zig");
 const wal = @import("wal.zig");
+const sign = @import("sign.zig");
 
 pub const version = "2.0.0";
 
 const registry_url = "https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/packages/index.json";
+const registry_sig_url = registry_url ++ ".sig";
 const issues_url = "https://github.com/gugu8intel-i9/abv0/issues/new";
 
 // ---------------------------------------------------------------------------
@@ -30,11 +32,14 @@ const Args = struct {
     platform_name: ?[]const u8 = null,
     file: ?[]const u8 = null,
     jobs: ?usize = null,
+    /// Load this manifest instead of the installed registry (`--registry`).
+    registry_path: ?[]const u8 = null,
 
     json: bool = false,
     force: bool = false,
     micro_split: bool = false,
     allow_unverified: bool = false,
+    allow_unsigned_manifest: bool = false,
     no_color: bool = false,
     want_help: bool = false,
     want_version: bool = false,
@@ -79,6 +84,12 @@ fn parseArgs(allocator: std.mem.Allocator, argv: []const []const u8) ParseError!
             args.micro_split = true;
         } else if (std.mem.eql(u8, arg, "--allow-unverified")) {
             args.allow_unverified = true;
+        } else if (std.mem.eql(u8, arg, "--allow-unsigned-manifest")) {
+            args.allow_unsigned_manifest = true;
+        } else if (std.mem.eql(u8, arg, "--registry")) {
+            i += 1;
+            if (i >= argv.len) return error.MissingOptionValue;
+            args.registry_path = argv[i];
         } else if (std.mem.eql(u8, arg, "--no-color")) {
             args.no_color = true;
         } else if (std.mem.eql(u8, arg, "--bug")) {
@@ -153,6 +164,8 @@ fn printUsage() void {
         \\  --platform <tag>     Target platform (default: {s})
         \\  -f, --file <path>    Manifest path for bundle commands
         \\  -j, --jobs <n>       Parallel install workers
+        \\  --registry <path>    Use this manifest (its <path>.sig must verify)
+        \\  --allow-unsigned-manifest  Skip manifest signature and replay checks (UNSAFE)
         \\  --allow-unverified   Permit installs without a verified checksum
         \\  --micro-split        Parallel ranged download for large assets
         \\  --force              Overwrite output files and replace conflicting bin links
@@ -183,29 +196,198 @@ fn registryPaths(a: std.mem.Allocator, st: *const store.Store) ![2][]u8 {
     return .{ json, idx };
 }
 
-/// Seed the user registry from the repository copy (development checkout) or
-/// by downloading it.
-/// Materialise the registry manifest, atomically.
+// The manifest is trusted only after its detached signature (`<url>.sig`)
+// verifies. The signature check comes before anything else reads the content.
+//
+// Replay protection: the manifest's top-level `updated_at` must not be older
+// than the last one this machine accepted, remembered in
+// `<registry dir>/last-updated-at`. Without this an attacker could serve an
+// old, correctly signed manifest that still lists a vulnerable version.
+
+const max_manifest_bytes = 16 * 1024 * 1024;
+const max_sig_bytes = 4 * 1024;
+const stored_updated_at_name = "last-updated-at";
+
+const manifest_error = error{
+    ManifestSignatureInvalid,
+    ManifestReplay,
+    MissingUpdatedAt,
+    InvalidUpdatedAt,
+};
+
+fn warnUnsignedManifest() void {
+    term.err(
+        "{s}{s}WARNING{s}: --allow-unsigned-manifest: the registry signature is NOT checked and " ++
+            "replay protection is off. Whatever the registry serves will be trusted.\n",
+        .{ term.bold, term.red, term.reset },
+    );
+}
+
+/// Pure replay test. Both values must be in the same fixed ISO-8601 UTC form
+/// (validUpdatedAt enforces the character set), so lexical order is time order.
+/// Equal is accepted: re-fetching the same manifest is not a replay.
+fn isReplay(candidate: []const u8, stored: ?[]const u8) bool {
+    const s = stored orelse return false;
+    return std.mem.order(u8, candidate, s) == .lt;
+}
+
+/// Shape check for `updated_at`: `YYYY-...` made only of the characters an
+/// ISO-8601 timestamp uses. Rejecting anything else keeps control bytes out of
+/// the terminal and out of the stored file, and keeps the comparison meaningful.
+fn validUpdatedAt(s: []const u8) bool {
+    if (s.len < 10 or s.len > 64) return false;
+    for (s[0..4]) |c| if (!std.ascii.isDigit(c)) return false;
+    if (s[4] != '-') return false;
+    for (s) |c| switch (c) {
+        '0'...'9', 'T', 'Z', ':', '.', '+', '-' => {},
+        else => return false,
+    };
+    return true;
+}
+
+/// Top-level `updated_at` of a manifest's bytes. The returned slice aliases
+/// `a`'s allocation for the parse, so the caller keeps `a` alive while using it.
+fn manifestUpdatedAt(a: std.mem.Allocator, bytes: []const u8) manifest_error![]const u8 {
+    const root = std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{}) catch return error.MissingUpdatedAt;
+    const obj = switch (root) {
+        .object => |o| o,
+        else => return error.MissingUpdatedAt,
+    };
+    const v = obj.get("updated_at") orelse return error.MissingUpdatedAt;
+    const s = switch (v) {
+        .string => |str| str,
+        else => return error.MissingUpdatedAt,
+    };
+    if (!validUpdatedAt(s)) return error.InvalidUpdatedAt;
+    return s;
+}
+
+/// Verify a staged manifest against its staged signature. Returns the
+/// manifest's `updated_at`, or null when `--allow-unsigned-manifest` skipped
+/// every check. Prints a specific diagnostic for each failure.
+/// The returned slice is allocated from `a`; scratch memory for the file
+/// contents is released before returning.
+fn vetManifest(
+    a: std.mem.Allocator,
+    manifest_path: []const u8,
+    sig_path: []const u8,
+    allow_unsigned: bool,
+) !?[]const u8 {
+    if (allow_unsigned) {
+        warnUnsignedManifest();
+        return null;
+    }
+
+    var scratch = std.heap.ArenaAllocator.init(a);
+    defer scratch.deinit();
+    const s = scratch.allocator();
+
+    const bytes = std.fs.cwd().readFileAlloc(s, manifest_path, max_manifest_bytes) catch |e| {
+        term.err("{s}error{s}: cannot read manifest: {s}\n", .{ term.red, term.reset, @errorName(e) });
+        return e;
+    };
+    const sig = std.fs.cwd().readFileAlloc(s, sig_path, max_sig_bytes) catch |e| {
+        term.err("{s}error{s}: cannot read manifest signature: {s}\n", .{ term.red, term.reset, @errorName(e) });
+        return e;
+    };
+
+    sign.verify(bytes, sig) catch |e| {
+        term.err(
+            "{s}error{s}: manifest signature check failed \xe2\x80\x94 refusing to use it ({s})\n",
+            .{ term.red, term.reset, @errorName(e) },
+        );
+        return error.ManifestSignatureInvalid;
+    };
+
+    const updated_at = manifestUpdatedAt(s, bytes) catch |e| {
+        term.err("{s}error{s}: signed manifest has no valid updated_at ({s}); refusing it\n", .{ term.red, term.reset, @errorName(e) });
+        return e;
+    };
+    return try a.dupe(u8, updated_at);
+}
+
+fn readStoredUpdatedAt(a: std.mem.Allocator, st: *const store.Store) !?[]const u8 {
+    const p = try std.fs.path.join(a, &.{ st.registry_root, stored_updated_at_name });
+    defer a.free(p);
+    const raw = std.fs.cwd().readFileAlloc(a, p, 256) catch |e| switch (e) {
+        error.FileNotFound => return null,
+        else => return e,
+    };
+    const t = std.mem.trim(u8, raw, " \t\r\n");
+    if (!validUpdatedAt(t)) return null;
+    return t;
+}
+
+/// Refuse a manifest older than the one already accepted.
+fn checkReplay(a: std.mem.Allocator, st: *const store.Store, candidate: []const u8) !void {
+    const stored = try readStoredUpdatedAt(a, st);
+    if (isReplay(candidate, stored)) {
+        term.err(
+            "{s}error{s}: manifest is older than the one already installed \xe2\x80\x94 possible replay ({s} < {s})\n",
+            .{ term.red, term.reset, candidate, stored.? },
+        );
+        return error.ManifestReplay;
+    }
+}
+
+/// Record an accepted `updated_at`, atomically. Called after the manifest is
+/// in place, so a crash in between leaves the stored value older, never newer.
+fn storeUpdatedAt(a: std.mem.Allocator, st: *const store.Store, value: []const u8) !void {
+    const p = try std.fs.path.join(a, &.{ st.registry_root, stored_updated_at_name });
+    defer a.free(p);
+    const tmp = try std.fmt.allocPrint(a, "{s}.{x}.tmp", .{ p, std.crypto.random.int(u32) });
+    defer a.free(tmp);
+    errdefer std.fs.cwd().deleteFile(tmp) catch {};
+
+    const f = try std.fs.cwd().createFile(tmp, .{ .mode = platform.mode_private });
+    {
+        defer f.close();
+        try f.writeAll(value);
+        try f.writeAll("\n");
+    }
+    try std.fs.cwd().rename(tmp, p);
+}
+
+/// Download the manifest and its signature to staging names. Nothing is
+/// published here.
+fn fetchManifestPair(a: std.mem.Allocator, manifest_tmp: []const u8, sig_tmp: []const u8) !void {
+    net.download(a, registry_url, manifest_tmp, .{}) catch |e| {
+        term.err("{s}error{s}: could not download registry manifest: {s}\n", .{ term.red, term.reset, @errorName(e) });
+        return e;
+    };
+    net.download(a, registry_sig_url, sig_tmp, .{}) catch |e| {
+        term.err("{s}error{s}: could not download manifest signature: {s}\n", .{ term.red, term.reset, @errorName(e) });
+        return e;
+    };
+}
+
+/// Materialise the registry manifest, atomically, if it is not present yet.
 ///
-/// This used to write `index.json` in place. Two `abv0` processes started at
-/// once on a fresh machine would then both create it, and whichever one read
-/// the file while the other was still writing got a truncated document and
-/// reported `MalformedManifest`. Downloading to a unique temporary name,
-/// validating it, and renaming into place makes the publish step atomic: a
-/// reader sees either no file or a complete, parseable one.
-fn ensureRegistryFile(a: std.mem.Allocator, json_path: []const u8) !void {
+/// The manifest is always downloaded: a file in the current directory is never
+/// used. Download to unique temporary names, verify, validate, and rename into
+/// place, so a reader sees either no file or a complete, verified one.
+fn ensureRegistryFile(base: std.mem.Allocator, st: *const store.Store, json_path: []const u8, allow_unsigned: bool) !void {
     if (std.fs.cwd().access(json_path, .{})) |_| return else |_| {}
 
-    const tmp_path = try std.fmt.allocPrint(a, "{s}.{x}.tmp", .{ json_path, std.crypto.random.int(u64) });
-    defer a.free(tmp_path);
-    errdefer std.fs.cwd().deleteFile(tmp_path) catch {};
+    // Scratch for paths and the verified manifest. The caller's allocator is
+    // long-lived (it is the GPA in `main`), so nothing is left in it.
+    var scratch = std.heap.ArenaAllocator.init(base);
+    defer scratch.deinit();
+    const a = scratch.allocator();
 
-    if (std.fs.cwd().access("packages/index.json", .{})) |_| {
-        try std.fs.cwd().copyFile("packages/index.json", std.fs.cwd(), tmp_path, .{});
-    } else |_| {
-        term.print("fetching registry index...\n", .{});
-        try net.download(a, registry_url, tmp_path, .{});
-    }
+    const tag = std.crypto.random.int(u64);
+    const tmp_path = try std.fmt.allocPrint(a, "{s}.{x}.tmp", .{ json_path, tag });
+    defer a.free(tmp_path);
+    const sig_path = try std.fmt.allocPrint(a, "{s}.sig", .{tmp_path});
+    defer a.free(sig_path);
+    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+    defer std.fs.cwd().deleteFile(sig_path) catch {};
+
+    term.print("fetching registry index...\n", .{});
+    try fetchManifestPair(a, tmp_path, sig_path);
+
+    const updated_at = try vetManifest(a, tmp_path, sig_path, allow_unsigned);
+    if (updated_at) |u| try checkReplay(a, st, u);
 
     // Never publish something the parser would reject: a corrupt download must
     // not become the registry every later command reads.
@@ -213,20 +395,43 @@ fn ensureRegistryFile(a: std.mem.Allocator, json_path: []const u8) !void {
     probe.deinit();
 
     try std.fs.cwd().rename(tmp_path, json_path);
+    if (updated_at) |u| try storeUpdatedAt(a, st, u);
 }
 
-fn loadRegistry(a: std.mem.Allocator, st: *const store.Store) !registry.Registry {
+fn loadRegistry(a: std.mem.Allocator, st: *const store.Store, allow_unsigned: bool) !registry.Registry {
     const paths = try registryPaths(a, st);
     defer a.free(paths[0]);
     defer a.free(paths[1]);
 
-    ensureRegistryFile(a, paths[0]) catch |e| {
+    ensureRegistryFile(a, st, paths[0], allow_unsigned) catch |e| {
         term.err("{s}error{s}: no package registry available: {s}\n", .{ term.red, term.reset, @errorName(e) });
         return e;
     };
 
     return abvindex.loadCached(a, paths[0], paths[1]) catch |e| {
         term.err("{s}error{s}: could not load registry: {s}\n", .{ term.red, term.reset, @errorName(e) });
+        return e;
+    };
+}
+
+/// `--registry <path>`: an explicit local manifest. It is signature-checked
+/// against `<path>.sig` like any other. It does not touch the installed
+/// registry or its replay state, and it skips the binary index cache so it
+/// cannot be confused with the installed one.
+fn loadExplicitRegistry(base: std.mem.Allocator, path: []const u8, allow_unsigned: bool) !registry.Registry {
+    var scratch = std.heap.ArenaAllocator.init(base);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+
+    const sig_path = try std.fmt.allocPrint(a, "{s}.sig", .{path});
+
+    _ = vetManifest(a, path, sig_path, allow_unsigned) catch |e| {
+        term.err("{s}error{s}: registry '{s}' was not loaded: {s}\n", .{ term.red, term.reset, path, @errorName(e) });
+        return e;
+    };
+    // The loaded registry outlives the scratch arena, so it uses `base`.
+    return registry.loadFromJsonFile(base, path, null) catch |e| {
+        term.err("{s}error{s}: could not load registry '{s}': {s}\n", .{ term.red, term.reset, path, @errorName(e) });
         return e;
     };
 }
@@ -291,29 +496,79 @@ fn runBatch(a: std.mem.Allocator, batch: *Batch, requested_jobs: ?usize) !usize 
 // JSON output
 // ---------------------------------------------------------------------------
 
+/// Terminal-safe view of manifest text. Manifest strings come from a remote
+/// index and may carry escape sequences that move the cursor, rewrite earlier
+/// lines or retitle the window. Every control byte (0x00-0x1f, which includes
+/// ESC and tab/newline, and 0x7f) prints as '?'. Use with `{}`. Pads on the
+/// right when a width is given, like `{s:<16}`.
+const Safe = struct {
+    text: []const u8,
+
+    pub fn format(
+        self: Safe,
+        comptime fmt_str: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt_str;
+        for (self.text) |c| try writer.writeByte(if (c < 0x20 or c == 0x7f) '?' else c);
+        if (options.width) |w| {
+            if (w > self.text.len) try writer.writeByteNTimes(' ', w - self.text.len);
+        }
+    }
+};
+
+fn safe(text: []const u8) Safe {
+    return .{ .text = text };
+}
+
+/// Every JSON string value goes through the standard encoder, so quotes,
+/// backslashes and control bytes can never break out of the document.
+fn writeJsonString(w: anytype, s: []const u8) !void {
+    try std.json.encodeJsonString(s, .{}, w);
+}
+
 fn writePackageJson(w: anytype, pkg: registry.Package) !void {
-    try w.writeAll("{");
-    try w.print("\"name\":\"{s}\",", .{pkg.name});
-    try w.print("\"version\":\"{s}\",", .{pkg.version});
-    try w.writeAll("\"description\":");
-    try std.json.encodeJsonString(pkg.description, .{}, w);
+    try w.writeAll("{\"name\":");
+    try writeJsonString(w, pkg.name);
+    try w.writeAll(",\"version\":");
+    try writeJsonString(w, pkg.version);
+    try w.writeAll(",\"description\":");
+    try writeJsonString(w, pkg.description);
     try w.writeAll(",\"homepage\":");
-    try std.json.encodeJsonString(pkg.homepage, .{}, w);
-    try w.print(",\"license\":\"{s}\",\"bin\":[", .{pkg.license});
+    try writeJsonString(w, pkg.homepage);
+    try w.writeAll(",\"license\":");
+    try writeJsonString(w, pkg.license);
+    try w.writeAll(",\"bin\":[");
     for (pkg.bin, 0..) |b, i| {
         if (i > 0) try w.writeAll(",");
-        try w.print("\"{s}\"", .{b});
+        try writeJsonString(w, b);
     }
     try w.writeAll("],\"platforms\":{");
     for (pkg.platforms, 0..) |p, i| {
         if (i > 0) try w.writeAll(",");
-        try w.print("\"{s}\":{{\"archive_type\":\"{s}\",\"sha256\":\"{s}\",\"bin_path\":\"{s}\",\"url\":", .{
-            p.name, p.archive_type, p.sha256, p.bin_path,
-        });
-        try std.json.encodeJsonString(p.url, .{}, w);
+        try writeJsonString(w, p.name);
+        try w.writeAll(":{\"archive_type\":");
+        try writeJsonString(w, p.archive_type);
+        try w.writeAll(",\"sha256\":");
+        try writeJsonString(w, p.sha256);
+        try w.writeAll(",\"bin_path\":");
+        try writeJsonString(w, p.bin_path);
+        try w.writeAll(",\"url\":");
+        try writeJsonString(w, p.url);
         try w.writeAll("}");
     }
     try w.writeAll("}}");
+}
+
+fn writeOutdatedJson(w: anytype, name: []const u8, installed: []const u8, available: []const u8) !void {
+    try w.writeAll("{\"name\":");
+    try writeJsonString(w, name);
+    try w.writeAll(",\"installed\":");
+    try writeJsonString(w, installed);
+    try w.writeAll(",\"available\":");
+    try writeJsonString(w, available);
+    try w.writeAll("}");
 }
 
 // ---------------------------------------------------------------------------
@@ -408,13 +663,16 @@ fn run(base: std.mem.Allocator, a: std.mem.Allocator) !u8 {
         return 0;
     }
     if (std.mem.eql(u8, cmd, "update")) {
-        return cmdUpdate(a, &st);
+        return cmdUpdate(a, &st, args.allow_unsigned_manifest);
     }
     if (std.mem.eql(u8, cmd, "report")) {
         return cmdReport(a, &args, platform_name);
     }
 
-    var reg = try loadRegistry(base, &st);
+    var reg = if (args.registry_path) |p|
+        try loadExplicitRegistry(base, p, args.allow_unsigned_manifest)
+    else
+        try loadRegistry(base, &st, args.allow_unsigned_manifest);
     defer reg.deinit();
 
     if (std.mem.eql(u8, cmd, "list")) return cmdList(&reg, args.json);
@@ -474,8 +732,8 @@ fn cmdList(reg: *const registry.Registry, json: bool) !u8 {
         return 0;
     }
     for (reg.packages) |pkg| {
-        term.print("{s}{s}{s} {s}{s}{s}\n    {s}\n", .{
-            term.bold, pkg.name, term.reset, term.dim, pkg.version, term.reset, pkg.description,
+        term.print("{s}{}{s} {s}{}{s}\n    {}\n", .{
+            term.bold, safe(pkg.name), term.reset, term.dim, safe(pkg.version), term.reset, safe(pkg.description),
         });
     }
     term.print("\n{d} packages\n", .{reg.count()});
@@ -496,13 +754,13 @@ fn cmdSearch(reg: *const registry.Registry, rest: []const []const u8) !u8 {
     for (reg.packages) |pkg| {
         if (containsIgnoreCase(pkg.name, q) or containsIgnoreCase(pkg.description, q)) {
             found += 1;
-            term.print("{s}{s}{s} {s}{s}{s}\n    {s}\n", .{
-                term.bold, pkg.name, term.reset, term.dim, pkg.version, term.reset, pkg.description,
+            term.print("{s}{}{s} {s}{}{s}\n    {}\n", .{
+                term.bold, safe(pkg.name), term.reset, term.dim, safe(pkg.version), term.reset, safe(pkg.description),
             });
         }
     }
     if (found == 0) {
-        term.print("no packages match '{s}'\n", .{q});
+        term.print("no packages match '{}'\n", .{safe(q)});
         return 1;
     }
     return 0;
@@ -524,18 +782,18 @@ fn cmdInfo(reg: *const registry.Registry, rest: []const []const u8, json: bool) 
         return 0;
     }
 
-    term.print("{s}{s}{s} {s}\n", .{ term.bold, pkg.name, term.reset, pkg.version });
-    if (pkg.description.len > 0) term.print("  {s}\n", .{pkg.description});
-    if (pkg.homepage.len > 0) term.print("  {s}\n", .{pkg.homepage});
-    term.print("  license: {s}\n", .{pkg.license});
+    term.print("{s}{}{s} {}\n", .{ term.bold, safe(pkg.name), term.reset, safe(pkg.version) });
+    if (pkg.description.len > 0) term.print("  {}\n", .{safe(pkg.description)});
+    if (pkg.homepage.len > 0) term.print("  {}\n", .{safe(pkg.homepage)});
+    term.print("  license: {}\n", .{safe(pkg.license)});
     if (pkg.bin.len > 0) {
         term.print("  binaries:", .{});
-        for (pkg.bin) |b| term.print(" {s}", .{b});
+        for (pkg.bin) |b| term.print(" {}", .{safe(b)});
         term.print("\n", .{});
     }
     if (pkg.deps.len > 0) {
         term.print("  depends on:", .{});
-        for (pkg.deps) |d| term.print(" {s}", .{d});
+        for (pkg.deps) |d| term.print(" {}", .{safe(d)});
         term.print("\n", .{});
     }
     term.print("\n  platforms:\n", .{});
@@ -543,9 +801,9 @@ fn cmdInfo(reg: *const registry.Registry, rest: []const []const u8, json: bool) 
         const pinned = p.checksumIsPinned();
         const colour = if (pinned) term.green else term.yellow;
         const state = if (pinned) "verified" else "UNVERIFIED";
-        term.print("    {s:<16} {s:<8} {s}{s}{s}\n", .{ p.name, p.archive_type, colour, state, term.reset });
-        term.print("      {s}\n", .{p.url});
-        term.print("      sha256 {s}\n", .{if (p.sha256.len > 0) p.sha256 else "(none)"});
+        term.print("    {:<16} {:<8} {s}{s}{s}\n", .{ safe(p.name), safe(p.archive_type), colour, state, term.reset });
+        term.print("      {}\n", .{safe(p.url)});
+        term.print("      sha256 {}\n", .{safe(if (p.sha256.len > 0) p.sha256 else "(none)")});
     }
     return 0;
 }
@@ -606,14 +864,14 @@ fn cmdUninstall(
     var failed: u8 = 0;
     for (rest) |name| {
         const pkg = store.Store.resolveRequest(reg, name) orelse {
-            term.err("{s}error{s}: '{s}' not found in registry\n", .{ term.red, term.reset, name });
+            term.err("{s}error{s}: '{}' not found in registry\n", .{ term.red, term.reset, safe(name) });
             failed = 1;
             continue;
         };
         if (try st.uninstall(a, pkg)) {
-            term.print("removed {s}\n", .{pkg.name});
+            term.print("removed {}\n", .{safe(pkg.name)});
         } else {
-            term.print("{s} was not installed\n", .{pkg.name});
+            term.print("{} was not installed\n", .{safe(pkg.name)});
         }
     }
     return failed;
@@ -634,9 +892,7 @@ fn cmdOutdated(
         try w.writeAll("[");
         for (list, 0..) |e, i| {
             if (i > 0) try w.writeAll(",");
-            try w.print("{{\"name\":\"{s}\",\"installed\":\"{s}\",\"available\":\"{s}\"}}", .{
-                e.pkg.name, e.installed, e.pkg.version,
-            });
+            try writeOutdatedJson(w, e.pkg.name, e.installed, e.pkg.version);
         }
         try w.writeAll("]\n");
         return 0;
@@ -647,10 +903,10 @@ fn cmdOutdated(
         return 0;
     }
     for (list) |e| {
-        term.print("{s}{s}{s}  {s} {s}->{s} {s}{s}{s}\n", .{
-            term.bold, e.pkg.name,  term.reset,
-            e.installed, term.dim,  term.reset,
-            term.green, e.pkg.version, term.reset,
+        term.print("{s}{}{s}  {} {s}->{s} {s}{}{s}\n", .{
+            term.bold, safe(e.pkg.name), term.reset,
+            safe(e.installed), term.dim, term.reset,
+            term.green, safe(e.pkg.version), term.reset,
         });
     }
     term.print("\n{d} outdated; run `abv0 upgrade`\n", .{list.len});
@@ -673,13 +929,17 @@ fn cmdUpgrade(
         defer a.free(list);
         for (list) |e| try targets.append(e.pkg);
     } else {
+        var unknown: usize = 0;
         for (rest) |name| {
             if (store.Store.resolveRequest(reg, name)) |p| {
                 try targets.append(p);
             } else {
-                term.err("{s}warning{s}: '{s}' not in registry\n", .{ term.yellow, term.reset, name });
+                unknown += 1;
+                term.err("{s}warning{s}: '{}' not in registry\n", .{ term.yellow, term.reset, safe(name) });
             }
         }
+        // Asking only for names that do not exist is a failed request.
+        if (unknown == rest.len) return 1;
     }
 
     if (targets.items.len == 0) {
@@ -687,14 +947,18 @@ fn cmdUpgrade(
         return 0;
     }
 
+    // Install the new version first; each version has its own store
+    // directory, so the old one stays usable until the new one is in place.
+    // Only a successful install lets the older versions go, so a failed
+    // download leaves the package exactly as it was.
     var failures: u8 = 0;
     for (targets.items) |pkg| {
-        // Remove the old tree so the new version is genuinely fetched.
-        _ = st.uninstall(a, pkg) catch false;
         st.install(pkg, platform_name, opts) catch |e| {
-            term.err("{s}error{s}: {s}: {s}\n", .{ term.red, term.reset, pkg.name, @errorName(e) });
+            term.err("{s}error{s}: {}: {s}\n", .{ term.red, term.reset, safe(pkg.name), @errorName(e) });
             failures = 1;
+            continue;
         };
+        _ = try st.pruneOtherVersions(a, pkg.name, pkg.version, platform_name);
     }
     return failures;
 }
@@ -788,7 +1052,7 @@ fn cmdDetect(
     return 1;
 }
 
-fn cmdUpdate(a: std.mem.Allocator, st: *store.Store) !u8 {
+fn cmdUpdate(a: std.mem.Allocator, st: *store.Store, allow_unsigned: bool) !u8 {
     // The original `update` ran:
     //     sh -c "curl -sL https://.../install.sh | sh"
     // i.e. it downloaded and executed an arbitrary remote script every time.
@@ -797,15 +1061,21 @@ fn cmdUpdate(a: std.mem.Allocator, st: *store.Store) !u8 {
     defer a.free(paths[0]);
     defer a.free(paths[1]);
 
-    const tmp = try std.fmt.allocPrint(a, "{s}.{x}.tmp", .{ paths[0], std.crypto.random.int(u32) });
+    const tag = std.crypto.random.int(u32);
+    const tmp = try std.fmt.allocPrint(a, "{s}.{x}.tmp", .{ paths[0], tag });
     defer a.free(tmp);
+    const tmp_sig = try std.fmt.allocPrint(a, "{s}.sig", .{tmp});
+    defer a.free(tmp_sig);
+    defer std.fs.cwd().deleteFile(tmp) catch {};
+    defer std.fs.cwd().deleteFile(tmp_sig) catch {};
 
     term.print("fetching {s}\n", .{registry_url});
-    net.download(a, registry_url, tmp, .{}) catch |e| {
-        term.err("{s}error{s}: update failed: {s}\n", .{ term.red, term.reset, @errorName(e) });
-        return 1;
-    };
-    defer std.fs.cwd().deleteFile(tmp) catch {};
+    fetchManifestPair(a, tmp, tmp_sig) catch return 1;
+
+    // Nothing below may touch the working registry until the signature and
+    // the replay check both pass.
+    const updated_at = vetManifest(a, tmp, tmp_sig, allow_unsigned) catch return 1;
+    if (updated_at) |u| checkReplay(a, st, u) catch return 1;
 
     // Validate before replacing the working registry.
     var probe = registry.loadFromJsonFile(a, tmp, null) catch |e| {
@@ -816,6 +1086,7 @@ fn cmdUpdate(a: std.mem.Allocator, st: *store.Store) !u8 {
     probe.deinit();
 
     try std.fs.cwd().rename(tmp, paths[0]);
+    if (updated_at) |u| try storeUpdatedAt(a, st, u);
 
     const stamp = try abvindex.Stamp.ofFile(paths[0]);
     var reg = try registry.loadFromJsonFile(a, paths[0], null);
@@ -1020,6 +1291,100 @@ test "writePackageJson escapes strings" {
     defer parsed.deinit();
     try testing.expectEqualStrings("x", parsed.value.object.get("name").?.string);
     try testing.expectEqualStrings("has \"quotes\" and \\ backslash", parsed.value.object.get("description").?.string);
+}
+
+test "JSON output escapes quotes, newlines and ESC in every string field" {
+    var buf = std.ArrayList(u8).init(testing.allocator);
+    defer buf.deinit();
+
+    const nasty = "q\"uote\\ new\nline\x1b[2J";
+    try writePackageJson(buf.writer(), .{
+        .name = nasty,
+        .version = nasty,
+        .description = nasty,
+        .homepage = nasty,
+        .license = nasty,
+        .bin = &.{nasty},
+        .platforms = &.{.{
+            .name = nasty,
+            .url = nasty,
+            .sha256 = nasty,
+            .archive_type = nasty,
+            .bin_path = nasty,
+        }},
+    });
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.items, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try testing.expectEqualStrings(nasty, obj.get("name").?.string);
+    try testing.expectEqualStrings(nasty, obj.get("version").?.string);
+    try testing.expectEqualStrings(nasty, obj.get("description").?.string);
+    try testing.expectEqualStrings(nasty, obj.get("homepage").?.string);
+    try testing.expectEqualStrings(nasty, obj.get("license").?.string);
+    try testing.expectEqualStrings(nasty, obj.get("bin").?.array.items[0].string);
+    const plat = obj.get("platforms").?.object.get(nasty).?.object;
+    try testing.expectEqualStrings(nasty, plat.get("archive_type").?.string);
+    try testing.expectEqualStrings(nasty, plat.get("sha256").?.string);
+    try testing.expectEqualStrings(nasty, plat.get("bin_path").?.string);
+    try testing.expectEqualStrings(nasty, plat.get("url").?.string);
+}
+
+test "outdated JSON escapes its fields" {
+    var buf = std.ArrayList(u8).init(testing.allocator);
+    defer buf.deinit();
+    try writeOutdatedJson(buf.writer(), "a\"b", "1\n", "2\x1b");
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.items, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("a\"b", parsed.value.object.get("name").?.string);
+    try testing.expectEqualStrings("1\n", parsed.value.object.get("installed").?.string);
+    try testing.expectEqualStrings("2\x1b", parsed.value.object.get("available").?.string);
+}
+
+test "terminal output replaces every control byte with '?'" {
+    const out = try std.fmt.allocPrint(testing.allocator, "{}", .{safe("a\x1b[31mb\n\t\x7fc")});
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("a?[31mb???c", out);
+    // Printable text, including multi-byte UTF-8, passes through untouched.
+    const plain = try std.fmt.allocPrint(testing.allocator, "{}", .{safe("jq 1.7 \xc3\xa9")});
+    defer testing.allocator.free(plain);
+    try testing.expectEqualStrings("jq 1.7 \xc3\xa9", plain);
+}
+
+test "terminal output keeps width padding" {
+    const out = try std.fmt.allocPrint(testing.allocator, "[{:<6}]", .{safe("ab\x1b")});
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("[ab?   ]", out);
+}
+
+test "replay check refuses older manifests and accepts equal or newer" {
+    const old = "2026-06-18T00:00:00Z";
+    const new = "2026-06-19T00:00:00Z";
+    try testing.expect(isReplay(old, new));
+    try testing.expect(!isReplay(new, old));
+    try testing.expect(!isReplay(old, old));
+    try testing.expect(!isReplay(old, null));
+}
+
+test "updated_at must look like an ISO-8601 timestamp" {
+    try testing.expect(validUpdatedAt("2026-06-18T00:00:00Z"));
+    try testing.expect(validUpdatedAt("2026-06-18T10:20:30.5+02:00"));
+    try testing.expect(!validUpdatedAt("2026-06-18\n"));
+    try testing.expect(!validUpdatedAt("yesterday"));
+    try testing.expect(!validUpdatedAt("2026-06-18T00:00:00Z\x1b[2J"));
+}
+
+test "manifestUpdatedAt reads the top-level field only" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const ok = try manifestUpdatedAt(a, "{\"packages\":{\"x\":{\"updated_at\":\"1999-01-01\"}},\"updated_at\":\"2026-06-18T00:00:00Z\"}");
+    try testing.expectEqualStrings("2026-06-18T00:00:00Z", ok);
+    try testing.expectError(error.MissingUpdatedAt, manifestUpdatedAt(a, "{\"packages\":{}}"));
+    try testing.expectError(error.MissingUpdatedAt, manifestUpdatedAt(a, "[1,2]"));
+    try testing.expectError(error.InvalidUpdatedAt, manifestUpdatedAt(a, "{\"updated_at\":\"bad\\nvalue\"}"));
 }
 
 comptime {
