@@ -22,6 +22,18 @@ REG_DIR="${ABV0_REGISTRY_DIR:-$HOME/.abv0/registry}"
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 info() { printf '%s\n' "$*"; }
 
+# BIN_DIR is written into shell profiles, so it must fit on one line.
+NEWLINE='
+'
+case "${BIN_DIR}" in
+    *"${NEWLINE}"*) die "ABV0_BIN_DIR must not contain newlines" ;;
+esac
+
+# Single-quote a value for POSIX sh, escaping embedded single quotes as '\''.
+sh_quote() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
 command -v curl >/dev/null 2>&1 || die "curl is required"
 
 OS="$(uname -s)"
@@ -53,8 +65,22 @@ esac
 
 info "installing abv0 (${TARGET})"
 
+# Only directories this run creates under the default ~/.abv0 are made private
+# (0700). A custom ABV0_BIN_DIR / ABV0_REGISTRY_DIR, and anything that already
+# exists, keeps the permissions it has.
+DEFAULT_ROOT="${HOME}/.abv0"
+for d in "${BIN_DIR}" "${REG_DIR}"; do
+    case "${d}" in
+        "${DEFAULT_ROOT}"/*) ;;
+        *) continue ;;
+    esac
+    if [ ! -d "${d}" ]; then
+        [ -d "${DEFAULT_ROOT}" ] || mkdir -m 0700 "${DEFAULT_ROOT}"
+        mkdir -p "${d}"
+        chmod 0700 "${d}"
+    fi
+done
 mkdir -p "${BIN_DIR}" "${REG_DIR}"
-chmod 0700 "$(dirname "${BIN_DIR}")" 2>/dev/null || true
 
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/abv0-install.XXXXXX")"
 cleanup() { rm -rf "${TMP_DIR}"; }
@@ -93,8 +119,12 @@ if fetch "${BASE}/release/SHA256SUMS" "${TMP_DIR}/SHA256SUMS"; then
     elif command -v shasum >/dev/null 2>&1; then
         ACTUAL="$(shasum -a 256 "${TMP_DIR}/abv0" | awk '{print $1}')"
     else
+        if [ "${ABV0_ALLOW_UNVERIFIED:-0}" != "1" ]; then
+            die "no sha256 tool found (need sha256sum or shasum); refusing to install an unverified binary
+(set ABV0_ALLOW_UNVERIFIED=1 to override)"
+        fi
         ACTUAL=""
-        info "warning: no sha256 tool found; skipping verification"
+        info "warning: no sha256 tool found; ABV0_ALLOW_UNVERIFIED=1, continuing unverified"
     fi
 
     if [ -n "${ACTUAL}" ] && [ "${ACTUAL}" != "${EXPECTED}" ]; then
@@ -140,7 +170,7 @@ PROFILE_UPDATED=0
 for profile in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.profile"; do
     [ -f "${profile}" ] || continue
     if ! grep -q "\.abv0/bin" "${profile}" 2>/dev/null; then
-        printf '\n# added by the abv0 installer\nexport PATH="%s:$PATH"\n' "${BIN_DIR}" >> "${profile}"
+        printf '\n# added by the abv0 installer\nexport PATH=%s:"$PATH"\n' "$(sh_quote "${BIN_DIR}")" >> "${profile}"
         info "added ${BIN_DIR} to ${profile}"
         PROFILE_UPDATED=1
     fi
@@ -152,7 +182,7 @@ if [ "${PROFILE_UPDATED}" -eq 1 ]; then
 else
     info "add abv0 to your PATH:"
 fi
-info "    export PATH=\"${BIN_DIR}:\$PATH\""
+info "    export PATH=$(sh_quote "${BIN_DIR}"):\$PATH"
 info ""
 info "then try:"
 info "    abv0 list"

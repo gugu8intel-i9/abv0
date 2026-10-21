@@ -89,42 +89,13 @@
         }
       }
     },
-    "btop": {
-      "name": "btop",
-      "version": "0.12.3",
-      "description": "A cross-platform graphical graphical resource monitor that looks absolutely stunning",
-      "homepage": "https://github.com/ClementTsang/bottom",
-      "license": "MIT",
-      "bin": ["btop"],
-      "app_bundles": [],
-      "platforms": {
-        "x86_64-macos": {
-          "url": "https://github.com/ClementTsang/bottom/releases/download/0.12.3/bottom_x86_64-apple-darwin.tar.gz",
-          "sha256": "5744b5c78db14b85e025c31ded93ba038041e6ff2e8c16ea1d2f9bdb6487316f",
-          "archive_type": "tar.gz",
-          "bin_path": "btm"
-        },
-        "aarch64-macos": {
-          "url": "https://github.com/ClementTsang/bottom/releases/download/0.12.3/bottom_aarch64-apple-darwin.tar.gz",
-          "sha256": "106e9493d20192d18dbe46d4c99f680d817c796724103ee258567070fcd16429",
-          "archive_type": "tar.gz",
-          "bin_path": "btm"
-        },
-        "x86_64-linux": {
-          "url": "https://github.com/ClementTsang/bottom/releases/download/0.12.3/bottom_x86_64-unknown-linux-musl.tar.gz",
-          "sha256": "0d6352079422fda8f4ee242eb849f45a6008db96d6c1cd35e8436babc51bc33f",
-          "archive_type": "tar.gz",
-          "bin_path": "btm"
-        }
-      }
-    },
     "bottom": {
       "name": "bottom",
       "version": "0.12.3",
       "description": "A graphical cross-platform resource monitor that looks incredibly beautiful",
       "homepage": "https://github.com/ClementTsang/bottom",
       "license": "MIT",
-      "bin": ["bottom", "btm"],
+      "bin": ["btm"],
       "app_bundles": [],
       "platforms": {
         "x86_64-macos": {
@@ -186,167 +157,22 @@
       "app_bundles": [],
       "platforms": {
         "x86_64-macos": {
-          "url": "https://raw.githubusercontent.com/dylanaraps/neofetch/master/neofetch",
-          "sha256": "2a272bbaa1275f21835fd3258fb8032ccdc98348e6ccb9cf58acacd366340170",
+          "url": "https://raw.githubusercontent.com/dylanaraps/neofetch/7.1.0/neofetch",
+          "sha256": "3dc33493e54029fb1528251552093a9f9a2894fcf94f9c3a6f809136a42348c7",
           "archive_type": "raw",
           "bin_path": "neofetch"
         },
         "aarch64-macos": {
-          "url": "https://raw.githubusercontent.com/dylanaraps/neofetch/master/neofetch",
-          "sha256": "2a272bbaa1275f21835fd3258fb8032ccdc98348e6ccb9cf58acacd366340170",
+          "url": "https://raw.githubusercontent.com/dylanaraps/neofetch/7.1.0/neofetch",
+          "sha256": "3dc33493e54029fb1528251552093a9f9a2894fcf94f9c3a6f809136a42348c7",
           "archive_type": "raw",
           "bin_path": "neofetch"
         },
         "x86_64-linux": {
-          "url": "https://raw.githubusercontent.com/dylanaraps/neofetch/master/neofetch",
-          "sha256": "2a272bbaa1275f21835fd3258fb8032ccdc98348e6ccb9cf58acacd366340170",
+          "url": "https://raw.githubusercontent.com/dylanaraps/neofetch/7.1.0/neofetch",
+          "sha256": "3dc33493e54029fb1528251552093a9f9a2894fcf94f9c3a6f809136a42348c7",
           "archive_type": "raw",
           "bin_path": "neofetch"
-        }
-      }
-    },
-    "ffmpeg": {
-      "name": "ffmpeg",
-      "version": "latest",
-      "description": "Complete solution to record, convert and stream audio and video",
-      "homepage": "https://ffmpeg.org/",
-      "license": "GPL-3.0",
-      "bin": ["ffmpeg", "ffprobe", "ffplay"],
-      "app_bundles": [],
-      "platforms": {
-        "x86_64-linux": {
-          "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz",
-          "sha256": "68fd66ae1be70d896d5c8dcadf0973d4f13ac718bf369f37b2d34f3c4e62100e",
-          "archive_type": "tar.xz",
-          "bin_path": "ffmpeg-master-latest-linux64-gpl/bin/"
-        },
-        "x86_64-macos": {
-          "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz",
-          "sha256": "68fd66ae1be70d896d5c8dcadf0973d4f13ac718bf369f37b2d34f3c4e62100e",
-          "archive_type": "tar.xz",
-          "bin_path": "ffmpeg-master-latest-linux64-gpl/bin/"
-        },
-        "aarch64-macos": {
-          "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz",
-          "sha256": "68fd66ae1be70d896d5c8dcadf0973d4f13ac718bf369f37b2d34f3c4e62100e",
-          "archive_type": "tar.xz",
-          "bin_path": "ffmpeg-master-latest-linux64-gpl/bin/"
-        }
-      }
-    },
-    "mock-gui": {
-      "name": "mock-gui",
-      "version": "1.0.0",
-      "description": "A high-performance mock macOS GUI .app bundle for evaluating abv0 applications cloning",
-      "homepage": "https://github.com/gugu8intel-i9/abv0",
-      "license": "MIT",
-      "bin": [],
-      "app_bundles": ["MockApp.app"],
-      "platforms": {
-        "x86_64-linux": {
-          "url": "https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/packages/MockApp.app.tar.gz",
-          "sha256": "126e7af6c8ec5321ed55a83ab556fa57e703a90f86d48abd0b0da6f0845be435",
-          "archive_type": "tar.gz",
-          "bin_path": "MockApp.app/Contents/MacOS/mock_gui"
-        },
-        "x86_64-macos": {
-          "url": "https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/packages/MockApp.app.tar.gz",
-          "sha256": "126e7af6c8ec5321ed55a83ab556fa57e703a90f86d48abd0b0da6f0845be435",
-          "archive_type": "tar.gz",
-          "bin_path": "MockApp.app/Contents/MacOS/mock_gui"
-        },
-        "aarch64-macos": {
-          "url": "https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/packages/MockApp.app.tar.gz",
-          "sha256": "126e7af6c8ec5321ed55a83ab556fa57e703a90f86d48abd0b0da6f0845be435",
-          "archive_type": "tar.gz",
-          "bin_path": "MockApp.app/Contents/MacOS/mock_gui"
-        }
-      }
-    },
-    "threat-sample": {
-      "name": "threat-sample",
-      "version": "1.0.0",
-      "description": "A mock security heuristic sample for evaluating abv0 threat detection scanner",
-      "homepage": "https://github.com/gugu8intel-i9/abv0",
-      "license": "GPL-3.0",
-      "bin": ["malware_sample.sh"],
-      "app_bundles": [],
-      "platforms": {
-        "x86_64-linux": {
-          "url": "https://raw.githubusercontent.com/gugu8intel-i9/abv0/1a84e05/packages/malware_sample.sh",
-          "sha256": "c2f6fdf60594739e6167a4cd7874c9b6e43440ee145ae66ab6096cf7ab231737",
-          "archive_type": "raw",
-          "bin_path": "malware_sample.sh"
-        },
-        "x86_64-macos": {
-          "url": "https://raw.githubusercontent.com/gugu8intel-i9/abv0/1a84e05/packages/malware_sample.sh",
-          "sha256": "c2f6fdf60594739e6167a4cd7874c9b6e43440ee145ae66ab6096cf7ab231737",
-          "archive_type": "raw",
-          "bin_path": "malware_sample.sh"
-        },
-        "aarch64-macos": {
-          "url": "https://raw.githubusercontent.com/gugu8intel-i9/abv0/1a84e05/packages/malware_sample.sh",
-          "sha256": "c2f6fdf60594739e6167a4cd7874c9b6e43440ee145ae66ab6096cf7ab231737",
-          "archive_type": "raw",
-          "bin_path": "malware_sample.sh"
-        }
-      }
-    },
-    "wget": {
-      "name": "wget",
-      "version": "1.21.4",
-      "description": "Internet file retriever",
-      "homepage": "https://www.gnu.org/software/wget/",
-      "license": "GPL-3.0",
-      "bin": ["wget"],
-      "app_bundles": [],
-      "platforms": {
-        "x86_64-linux": {
-          "url": "https://raw.githubusercontent.com/gugu8intel-i9/abv0/fef5ba1/packages/wget_mock.sh",
-          "sha256": "022d7b6fc7971e74ad98aab67c973fa4a07394303e7d7bc10f8c5ff79f5bbd38",
-          "archive_type": "raw",
-          "bin_path": "wget"
-        },
-        "x86_64-macos": {
-          "url": "https://raw.githubusercontent.com/gugu8intel-i9/abv0/fef5ba1/packages/wget_mock.sh",
-          "sha256": "022d7b6fc7971e74ad98aab67c973fa4a07394303e7d7bc10f8c5ff79f5bbd38",
-          "archive_type": "raw",
-          "bin_path": "wget"
-        },
-        "aarch64-macos": {
-          "url": "https://raw.githubusercontent.com/gugu8intel-i9/abv0/fef5ba1/packages/wget_mock.sh",
-          "sha256": "022d7b6fc7971e74ad98aab67c973fa4a07394303e7d7bc10f8c5ff79f5bbd38",
-          "archive_type": "raw",
-          "bin_path": "wget"
-        }
-      }
-    },
-    "git": {
-      "name": "git",
-      "version": "2.45.2",
-      "description": "Distributed revision control system",
-      "homepage": "https://git-scm.com",
-      "license": "GPL-2.0",
-      "bin": ["git"],
-      "app_bundles": [],
-      "platforms": {
-        "x86_64-linux": {
-          "url": "https://raw.githubusercontent.com/gugu8intel-i9/abv0/fef5ba1/packages/git_mock.sh",
-          "sha256": "1e7c52f016b2450e503282697ab228934df1660761488b055dc7c95cfb473858",
-          "archive_type": "raw",
-          "bin_path": "git"
-        },
-        "x86_64-macos": {
-          "url": "https://raw.githubusercontent.com/gugu8intel-i9/abv0/fef5ba1/packages/git_mock.sh",
-          "sha256": "1e7c52f016b2450e503282697ab228934df1660761488b055dc7c95cfb473858",
-          "archive_type": "raw",
-          "bin_path": "git"
-        },
-        "aarch64-macos": {
-          "url": "https://raw.githubusercontent.com/gugu8intel-i9/abv0/fef5ba1/packages/git_mock.sh",
-          "sha256": "1e7c52f016b2450e503282697ab228934df1660761488b055dc7c95cfb473858",
-          "archive_type": "raw",
-          "bin_path": "git"
         }
       }
     },

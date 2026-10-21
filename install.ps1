@@ -18,8 +18,14 @@ $RegDir  = Join-Path $Root 'registry'
 
 function Die($msg) { Write-Error "error: $msg"; exit 1 }
 
-# TLS 1.2 is not the default on older PowerShell hosts.
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+# Allow TLS 1.2 and 1.3. TLS 1.2 is not the default on older PowerShell hosts,
+# and the Tls13 enum member is missing on runtimes that predate it, so fall
+# back to Tls12 alone in that case.
+if ([Enum]::GetNames([Net.SecurityProtocolType]) -contains 'Tls13') {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
+} else {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+}
 
 switch ($env:PROCESSOR_ARCHITECTURE) {
     'AMD64' { $Target = 'abv0-windows-x86_64.exe' }
