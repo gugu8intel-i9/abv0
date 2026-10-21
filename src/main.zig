@@ -45,15 +45,40 @@ const Args = struct {
     want_version: bool = false,
     report_bug: bool = false,
     report_malware: bool = false,
+    /// `list --installed`: show what is in the store instead of the registry.
+    installed: bool = false,
+    /// `--dry-run`: describe what would change and change nothing.
+    dry_run: bool = false,
+    /// `-q` / `--quiet`: no progress or summary lines. Errors still print.
+    quiet: bool = false,
+    /// `-v` / `--verbose`: extra detail per package (urls, store paths, timings).
+    verbose: bool = false,
 
     fn deinit(self: *Args) void {
         self.rest.deinit();
     }
 };
 
-const ParseError = error{ MissingOptionValue, UnknownOption, OutOfMemory };
+const ParseError = error{ MissingOptionValue, UnknownOption, InvalidNumber, OutOfMemory };
+
+/// The option a parse error is about, and the value that could not be used.
+/// The message names both, so a bad flag is easy to find.
+const ArgDiag = struct {
+    option: []const u8 = "",
+    value: []const u8 = "",
+};
 
 fn parseArgs(allocator: std.mem.Allocator, argv: []const []const u8) ParseError!Args {
+    var diag = ArgDiag{};
+    return parseArgsDiag(allocator, argv, &diag);
+}
+
+fn failArg(diag: *ArgDiag, option: []const u8, value: []const u8, err: ParseError) ParseError {
+    diag.* = .{ .option = option, .value = value };
+    return err;
+}
+
+fn parseArgsDiag(allocator: std.mem.Allocator, argv: []const []const u8, diag: *ArgDiag) ParseError!Args {
     var args = Args{ .rest = std.ArrayList([]const u8).init(allocator) };
     errdefer args.deinit();
 
@@ -88,7 +113,7 @@ fn parseArgs(allocator: std.mem.Allocator, argv: []const []const u8) ParseError!
             args.allow_unsigned_manifest = true;
         } else if (std.mem.eql(u8, arg, "--registry")) {
             i += 1;
-            if (i >= argv.len) return error.MissingOptionValue;
+            if (i >= argv.len) return failArg(diag, arg, "", error.MissingOptionValue);
             args.registry_path = argv[i];
         } else if (std.mem.eql(u8, arg, "--no-color")) {
             args.no_color = true;
@@ -96,22 +121,31 @@ fn parseArgs(allocator: std.mem.Allocator, argv: []const []const u8) ParseError!
             args.report_bug = true;
         } else if (std.mem.eql(u8, arg, "--malware")) {
             args.report_malware = true;
+        } else if (std.mem.eql(u8, arg, "--installed")) {
+            args.installed = true;
+        } else if (std.mem.eql(u8, arg, "--dry-run")) {
+            args.dry_run = true;
+        } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
+            args.quiet = true;
+        } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
+            args.verbose = true;
         } else if (std.mem.eql(u8, arg, "--platform")) {
             // The original called args_it.next() with no null check, so a
             // trailing `--platform` silently produced a null platform.
             i += 1;
-            if (i >= argv.len) return error.MissingOptionValue;
+            if (i >= argv.len) return failArg(diag, arg, "", error.MissingOptionValue);
             args.platform_name = argv[i];
         } else if (std.mem.eql(u8, arg, "-f") or std.mem.eql(u8, arg, "--file")) {
             i += 1;
-            if (i >= argv.len) return error.MissingOptionValue;
+            if (i >= argv.len) return failArg(diag, arg, "", error.MissingOptionValue);
             args.file = argv[i];
         } else if (std.mem.eql(u8, arg, "-j") or std.mem.eql(u8, arg, "--jobs")) {
             i += 1;
-            if (i >= argv.len) return error.MissingOptionValue;
-            args.jobs = std.fmt.parseInt(usize, argv[i], 10) catch return error.MissingOptionValue;
+            if (i >= argv.len) return failArg(diag, arg, "", error.MissingOptionValue);
+            args.jobs = std.fmt.parseInt(usize, argv[i], 10) catch
+                return failArg(diag, arg, argv[i], error.InvalidNumber);
         } else if (arg.len > 1 and arg[0] == '-' and !std.mem.eql(u8, arg, "-")) {
-            return error.UnknownOption;
+            return failArg(diag, arg, "", error.UnknownOption);
         } else if (args.command == null) {
             args.command = arg;
         } else {
@@ -121,69 +155,419 @@ fn parseArgs(allocator: std.mem.Allocator, argv: []const []const u8) ParseError!
     return args;
 }
 
+/// The one-line message for an argument error, naming the option and value.
+fn argErrorMessage(buf: []u8, e: ParseError, diag: ArgDiag) []const u8 {
+    return switch (e) {
+        error.MissingOptionValue => std.fmt.bufPrint(buf, "option '{}' requires a value", .{safe(diag.option)}) catch "option requires a value",
+        error.UnknownOption => std.fmt.bufPrint(buf, "unknown option '{}' (see `abv0 help`)", .{safe(diag.option)}) catch "unknown option",
+        error.InvalidNumber => std.fmt.bufPrint(buf, "option '{}' requires a number, got '{}'", .{ safe(diag.option), safe(diag.value) }) catch "option requires a number",
+        else => "out of memory",
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Output mode and user-facing messages
+// ---------------------------------------------------------------------------
+
+/// How this process talks, set once from the global flags in `run`.
+const Output = struct {
+    /// `-q`: no progress or summary lines. Errors and results still print.
+    quiet: bool = false,
+    /// `-v`: extra detail per package.
+    verbose: bool = false,
+    /// `--dry-run`: describe the change and make none.
+    dry_run: bool = false,
+    /// `--json`: stdout carries the JSON document and nothing else.
+    json: bool = false,
+};
+
+var output: Output = .{};
+
+/// A progress or summary line, shown unless `-q` or `--json` is in effect.
+fn say(comptime fmt: []const u8, args: anytype) void {
+    if (!output.quiet) term.print(fmt, args);
+}
+
+/// An extra detail line, shown only with `-v`.
+fn detail(comptime fmt: []const u8, args: anytype) void {
+    if (output.verbose) term.print(fmt, args);
+}
+
+/// A sentence someone can act on for a common failure, with the next step
+/// where there is one. Anything not listed falls back to the error's name.
+fn explain(err: anyerror) []const u8 {
+    return switch (err) {
+        error.FileNotFound => "file not found (check the path)",
+        error.AccessDenied, error.PermissionDenied => "permission denied (check the file's owner and mode)",
+        error.UnknownHostName,
+        error.TemporaryNameServerFailure,
+        error.NameServerFailure,
+        error.ConnectionRefused,
+        error.ConnectionResetByPeer,
+        error.ConnectionTimedOut,
+        error.NetworkUnreachable,
+        => "network error (check your connection or proxy settings, then retry)",
+        net.Error.DownloadFailed => "download failed (check your connection, then retry)",
+        net.Error.NoDownloaderAvailable => "no download tool found (install curl and make sure it is on PATH)",
+        net.Error.UnsafeUrl => "refused a download URL that is not plain https",
+        store.StoreError.ChecksumMismatch => "checksum mismatch: the download does not match the pinned sha256 (retry; if it persists, run `abv0 update`)",
+        store.StoreError.ChecksumMissing => "no pinned checksum for this package (use --allow-unverified to install it anyway)",
+        store.StoreError.BinaryConflict => "an executable with this name already belongs to another package (use --force to replace it)",
+        store.StoreError.DownloadLooksLikeErrorPage => "the server sent an error page instead of the package (retry later)",
+        store.StoreError.UnpackFailed => "could not unpack the archive (the download may be incomplete; retry)",
+        store.StoreError.UnsupportedPlatform => "this package has no build for this platform",
+        else => @errorName(err),
+    };
+}
+
+/// Longest name the suggestion code compares. Longer names are never suggested.
+const max_suggest_len = 64;
+/// Largest edit distance that still counts as "did you mean".
+const max_suggest_distance = 2;
+
+/// Optimal-string-alignment distance: Levenshtein, plus swapping two adjacent
+/// bytes as one edit, so `isntall` is one edit away from `install`.
+fn editDistance(a: []const u8, b: []const u8) usize {
+    if (a.len > max_suggest_len or b.len > max_suggest_len) return max_suggest_len + 1;
+    var d: [max_suggest_len + 1][max_suggest_len + 1]usize = undefined;
+    for (0..a.len + 1) |i| d[i][0] = i;
+    for (0..b.len + 1) |j| d[0][j] = j;
+    for (1..a.len + 1) |i| {
+        for (1..b.len + 1) |j| {
+            const cost: usize = if (a[i - 1] == b[j - 1]) 0 else 1;
+            var best = @min(@min(d[i - 1][j] + 1, d[i][j - 1] + 1), d[i - 1][j - 1] + cost);
+            if (i > 1 and j > 1 and a[i - 1] == b[j - 2] and a[i - 2] == b[j - 1]) {
+                best = @min(best, d[i - 2][j - 2] + 1);
+            }
+            d[i][j] = best;
+        }
+    }
+    return d[a.len][b.len];
+}
+
+/// The candidate closest to `name`, when one is within reach: edit distance at
+/// most 2, or a candidate that starts with `name` (`ripg` suggests `ripgrep`).
+/// Ties go to the earlier candidate, so the order given decides them.
+fn closest(name: []const u8, candidates: []const []const u8) ?[]const u8 {
+    if (name.len == 0) return null;
+    var best: ?[]const u8 = null;
+    var best_score: usize = max_suggest_distance + 1;
+    for (candidates) |cand| {
+        const dist = editDistance(name, cand);
+        const prefix = name.len >= 3 and std.mem.startsWith(u8, cand, name);
+        const score = if (prefix) @min(dist, max_suggest_distance) else dist;
+        if (score <= max_suggest_distance and score < best_score) {
+            best = cand;
+            best_score = score;
+        }
+    }
+    return best;
+}
+
+/// The host part of a URL, for showing where bytes will come from. Returns
+/// "?" for anything without a scheme.
+fn urlHost(url: []const u8) []const u8 {
+    const start = std.mem.indexOf(u8, url, "://") orelse return "?";
+    const rest = url[start + 3 ..];
+    const end = std.mem.indexOfAny(u8, rest, "/?#") orelse rest.len;
+    const host_port = rest[0..end];
+    // Drop any user:password@ part; it is never useful to show.
+    const host = if (std.mem.lastIndexOfScalar(u8, host_port, '@')) |at| host_port[at + 1 ..] else host_port;
+    return if (host.len == 0) "?" else host;
+}
+
 // ---------------------------------------------------------------------------
 // Help
 // ---------------------------------------------------------------------------
 
-fn printUsage() void {
-    term.print(
-        \\{s}{s}abv0{s} {s} - a fast, verifying package manager in Zig
-        \\
-        \\{s}USAGE{s}
+const Flag = struct {
+    name: []const u8,
+    help: []const u8,
+};
+
+/// One command as `abv0 <cmd> --help` shows it. `commands` below is the single
+/// list of commands: help lookup, `did you mean` and the tests all read it.
+const Command = struct {
+    name: []const u8,
+    /// Arguments after the name, for example `<pkg>...`.
+    args: []const u8 = "",
+    summary: []const u8,
+    flags: []const Flag = &.{},
+    example: []const u8,
+};
+
+const dry_run_flag = Flag{ .name = "--dry-run", .help = "Show what would change; change nothing" };
+const json_flag = Flag{ .name = "--json", .help = "Machine-readable output on stdout" };
+const quiet_flag = Flag{ .name = "-q, --quiet", .help = "Suppress progress lines (errors still print)" };
+const verbose_flag = Flag{ .name = "-v, --verbose", .help = "Also print urls, store paths and timings" };
+const platform_flag = Flag{ .name = "--platform <tag>", .help = "Target platform (default: this machine)" };
+const jobs_flag = Flag{ .name = "-j, --jobs <n>", .help = "Parallel workers" };
+const file_flag = Flag{ .name = "-f, --file <path>", .help = "Manifest path (default: Brewfile)" };
+const unverified_flag = Flag{ .name = "--allow-unverified", .help = "Permit installs without a verified checksum" };
+const unsigned_flag = Flag{ .name = "--allow-unsigned-manifest", .help = "Skip signature and replay checks (UNSAFE)" };
+const force_flag = Flag{ .name = "--force", .help = "Overwrite files and replace conflicting bin links" };
+const installed_flag = Flag{ .name = "--installed", .help = "Show what is installed, not the registry" };
+const bug_flag = Flag{ .name = "--bug", .help = "Report a bug (default)" };
+const malware_flag = Flag{ .name = "--malware", .help = "Report a suspicious package" };
+
+const commands = [_]Command{
+    .{
+        .name = "install",
+        .args = "<pkg>...",
+        .summary = "Install packages and their dependencies, verified, in parallel.",
+        .flags = &.{
+            dry_run_flag,                                                  json_flag,      jobs_flag,      platform_flag,
+            unverified_flag,                                               force_flag,     quiet_flag,     verbose_flag,
+            .{ .name = "--micro-split", .help = "Parallel ranged download for large assets" },
+        },
+        .example = "abv0 install jq ripgrep",
+    },
+    .{
+        .name = "uninstall",
+        .args = "<pkg>...",
+        .summary = "Remove packages and the links they created.",
+        .flags = &.{ dry_run_flag, quiet_flag, verbose_flag },
+        .example = "abv0 uninstall jq",
+    },
+    .{
+        .name = "upgrade",
+        .args = "[pkg]...",
+        .summary = "Upgrade the named packages, or every outdated one when none are named.",
+        .flags = &.{ dry_run_flag, jobs_flag, platform_flag, quiet_flag, verbose_flag },
+        .example = "abv0 upgrade ripgrep",
+    },
+    .{
+        .name = "outdated",
+        .summary = "List installed packages that have a newer version in the registry.",
+        .flags = &.{ json_flag, platform_flag },
+        .example = "abv0 outdated --json",
+    },
+    .{
+        .name = "list",
+        .summary = "List registry packages, or with --installed, the versions in the store.",
+        .flags = &.{ installed_flag, json_flag, platform_flag },
+        .example = "abv0 list --installed",
+    },
+    .{
+        .name = "search",
+        .args = "<query>",
+        .summary = "Find registry packages whose name or description contains <query>.",
+        .flags = &.{json_flag},
+        .example = "abv0 search json --json",
+    },
+    .{
+        .name = "info",
+        .args = "<pkg>",
+        .summary = "Show a package's versions, platforms, URLs and checksums.",
+        .flags = &.{json_flag},
+        .example = "abv0 info jq",
+    },
+    .{
+        .name = "run",
+        .args = "<pkg> [-- args...]",
+        .summary = "Run a package's executable, installing the package first if needed.",
+        .flags = &.{ platform_flag, unverified_flag },
+        .example = "abv0 run ripgrep -- --version",
+    },
+    .{
+        .name = "shell",
+        .args = "<pkg>...",
+        .summary = "Open a subshell where only the named packages are on PATH.",
+        .flags = &.{platform_flag},
+        .example = "abv0 shell jq fd",
+    },
+    .{
+        .name = "bundle",
+        .args = "[install|dump]",
+        .summary = "Install the packages listed in a Brewfile, or write the installed ones to one.",
+        .flags = &.{ file_flag, dry_run_flag, jobs_flag, force_flag, quiet_flag, verbose_flag },
+        .example = "abv0 bundle install -f Brewfile --dry-run",
+    },
+    .{
+        .name = "update",
+        .summary = "Download and verify the registry index.",
+        .flags = &.{unsigned_flag},
+        .example = "abv0 update",
+    },
+    .{
+        .name = "sync",
+        .summary = "Recompile the local index and the SQL export.",
+        .example = "abv0 sync",
+    },
+    .{
+        .name = "doctor",
+        .summary = "Check PATH, store permissions and links.",
+        .flags = &.{ json_flag, platform_flag },
+        .example = "abv0 doctor --json",
+    },
+    .{
+        .name = "fix",
+        .summary = "Repair broken links and permissions.",
+        .example = "abv0 fix",
+    },
+    .{
+        .name = "detect",
+        .args = "<pkg>",
+        .summary = "Scan an installed package's executable for malware-like patterns (exit 1 if suspicious).",
+        .example = "abv0 detect jq",
+    },
+    .{
+        .name = "benchmark",
+        .summary = "Measure registry lookups, index load, linking and hashing.",
+        .example = "abv0 benchmark",
+    },
+    .{
+        .name = "gc",
+        .summary = "Remove temporary files and stale sandboxes.",
+        .example = "abv0 gc",
+    },
+    .{
+        .name = "reset",
+        .summary = "Uninstall every package and clear the store.",
+        .example = "abv0 reset",
+    },
+    .{
+        .name = "report",
+        .args = "[subject]",
+        .summary = "Open a prefilled GitHub issue for a bug or a suspicious package.",
+        .flags = &.{ bug_flag, malware_flag },
+        .example = "abv0 report --malware jq",
+    },
+    .{
+        .name = "version",
+        .summary = "Print the version and platform.",
+        .example = "abv0 version",
+    },
+    .{
+        .name = "help",
+        .args = "[command]",
+        .summary = "Show every command and option, or the help for one command.",
+        .example = "abv0 help install",
+    },
+};
+
+const command_names = blk: {
+    var names: [commands.len][]const u8 = undefined;
+    for (commands, 0..) |cmd, i| names[i] = cmd.name;
+    break :blk names;
+};
+
+fn findCommand(name: []const u8) ?Command {
+    for (commands) |cmd| {
+        if (std.mem.eql(u8, cmd.name, name)) return cmd;
+    }
+    return null;
+}
+
+/// An unknown command is a usage error. Name the closest real command when one
+/// is near, so a typo costs one retry instead of a search through the help.
+fn reportUnknownCommand(name: []const u8) void {
+    term.err("{s}error{s}: unknown command '{}'\n", .{ term.red, term.reset, safe(name) });
+    if (closest(name, &command_names)) |s| {
+        term.err("  did you mean '{s}'?\n", .{s});
+    } else {
+        term.err("  run `abv0 help` to list the commands\n", .{});
+    }
+}
+
+fn heading(w: anytype, title: []const u8) !void {
+    try w.print("\n{s}{s}{s}\n", .{ term.bold, title, term.reset });
+}
+
+fn renderUsage(w: anytype) !void {
+    try w.print("{s}{s}abv0{s} {s} - a fast, verifying package manager in Zig\n", .{ term.bold, term.cyan, term.reset, version });
+    try heading(w, "USAGE");
+    try w.writeAll(
         \\  abv0 <command> [options] [arguments]
+        \\  abv0 <command> --help   Help for one command (same as: abv0 help <command>)
         \\
-        \\{s}PACKAGES{s}
-        \\  install <pkg>...     Install packages (verified, in parallel)
-        \\  uninstall <pkg>      Remove a package and its links
-        \\  upgrade [pkg]...     Upgrade outdated packages
-        \\  outdated             List packages with a newer version available
-        \\  list                 List registry packages
-        \\  search <query>       Search the registry
-        \\  info <pkg>           Show package metadata
+    );
+    try heading(w, "PACKAGES");
+    try w.writeAll(
+        \\  install <pkg>...        Install packages and their dependencies (verified, in parallel)
+        \\  uninstall <pkg>...      Remove packages and the links they created
+        \\  upgrade [pkg]...        Upgrade outdated packages
+        \\  outdated                List packages with a newer version available
+        \\  list [--installed]      List registry packages, or what is installed
+        \\  search <query>          Search the registry
+        \\  info <pkg>              Show package metadata
         \\
-        \\{s}EXECUTION{s}
-        \\  run <pkg> [-- args]  Run a package executable
-        \\  shell <pkg>...       Ephemeral subshell with only those packages
+    );
+    try heading(w, "EXECUTION");
+    try w.writeAll(
+        \\  run <pkg> [-- args]     Run a package executable
+        \\  shell <pkg>...          Ephemeral subshell with only those packages
         \\
-        \\{s}MANIFESTS{s}
-        \\  bundle [install]     Install from a Brewfile
-        \\  bundle dump          Export installed packages to a Brewfile
-        \\  update               Refresh the registry index
-        \\  sync                 Recompile the local index and SQL export
+    );
+    try heading(w, "MANIFESTS");
+    try w.writeAll(
+        \\  bundle [install|dump]   Install from, or export to, a Brewfile
+        \\  update                  Refresh the registry index
+        \\  sync                    Recompile the local index and SQL export
         \\
-        \\{s}MAINTENANCE{s}
-        \\  doctor               Diagnose PATH, permissions and links
-        \\  fix                  Repair broken links and permissions
-        \\  detect <pkg>         Scan an installed package for malware patterns
-        \\  benchmark            Measure local store and index performance
-        \\  gc                   Remove temporary files and stale sandboxes
-        \\  reset                Uninstall everything
-        \\  report [--bug]       Open a prefilled GitHub issue
+    );
+    try heading(w, "MAINTENANCE");
+    try w.writeAll(
+        \\  doctor                  Diagnose PATH, permissions and links
+        \\  fix                     Repair broken links and permissions
+        \\  detect <pkg>            Scan an installed package for malware patterns
+        \\  benchmark               Measure local store and index performance
+        \\  gc                      Remove temporary files and stale sandboxes
+        \\  reset                   Uninstall everything
+        \\  report [--bug]          Open a prefilled GitHub issue
+        \\  version                 Print the version
+        \\  help [command]          This message, or help for one command
         \\
-        \\{s}OPTIONS{s}
-        \\  --platform <tag>     Target platform (default: {s})
-        \\  -f, --file <path>    Manifest path for bundle commands
-        \\  -j, --jobs <n>       Parallel install workers
-        \\  --registry <path>    Use this manifest (its <path>.sig must verify)
-        \\  --allow-unsigned-manifest  Skip manifest signature and replay checks (UNSAFE)
-        \\  --allow-unverified   Permit installs without a verified checksum
-        \\  --micro-split        Parallel ranged download for large assets
-        \\  --force              Overwrite output files and replace conflicting bin links
-        \\  --json               Machine-readable output (list, info, outdated)
-        \\  --no-color           Disable colour
-        \\  -h, --help           This message
-        \\  -V, --version        Version
+    );
+    try heading(w, "OPTIONS");
+    try w.print("  --platform <tag>        Target platform (default: {s})\n", .{platform.defaultPlatformTag()});
+    try w.writeAll(
+        \\  -f, --file <path>       Manifest path for bundle commands
+        \\  -j, --jobs <n>          Parallel install workers
+        \\  --registry <path>       Use this manifest (its <path>.sig must verify)
+        \\  --allow-unsigned-manifest  Skip signature and replay checks (UNSAFE)
+        \\  --allow-unverified      Permit installs without a verified checksum
+        \\  --micro-split           Parallel ranged download for large assets
+        \\  --force                 Overwrite output files and replace conflicting bin links
+        \\  --dry-run               Show what install, upgrade, uninstall or bundle would do; change nothing
+        \\  --json                  Machine-readable output (list, search, info, outdated, install, doctor)
+        \\  --installed             With list: show what is installed
+        \\  --bug, --malware        With report: file a bug report, or a suspicious-package report
+        \\  -q, --quiet             Suppress progress lines (errors still print)
+        \\  -v, --verbose           Also print urls, store paths and timings per package
+        \\  --no-color              Disable colour
+        \\  -h, --help              This message, or help for the command before it
+        \\  -V, --version           Version
         \\
-    , .{
-        term.bold,   term.cyan, term.reset, version,
-        term.bold,   term.reset,
-        term.bold,   term.reset,
-        term.bold,   term.reset,
-        term.bold,   term.reset,
-        term.bold,   term.reset,
-        term.bold,   term.reset,
-        platform.defaultPlatformTag(),
-    });
+    );
+    try heading(w, "EXIT CODES");
+    try w.writeAll(
+        \\  0  success
+        \\  1  the operation failed (a download, a check, or a package)
+        \\  2  usage error (unknown command, option or argument)
+        \\
+    );
+}
+
+fn printUsage() void {
+    renderUsage(term.writer()) catch {};
+}
+
+/// `abv0 <cmd> --help`: synopsis, one line of description, the relevant flags
+/// and one example.
+fn renderCommandHelp(w: anytype, cmd: Command) !void {
+    try w.print("{s}abv0 {s}{s} - {s}\n", .{ term.bold, cmd.name, term.reset, cmd.summary });
+    try heading(w, "USAGE");
+    try w.print("  abv0 {s}{s}{s}", .{ cmd.name, if (cmd.args.len > 0) " " else "", cmd.args });
+    if (cmd.flags.len > 0) try w.writeAll(" [options]");
+    try w.writeAll("\n");
+    if (cmd.flags.len > 0) {
+        try heading(w, "OPTIONS");
+        for (cmd.flags) |flag| try w.print("  {s:<26} {s}\n", .{ flag.name, flag.help });
+    }
+    try heading(w, "EXAMPLE");
+    try w.print("  {s}\n", .{cmd.example});
+    try w.writeAll("\nGlobal options and exit codes: abv0 help\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -194,6 +578,16 @@ fn registryPaths(a: std.mem.Allocator, st: *const store.Store) ![2][]u8 {
     const json = try std.fs.path.join(a, &.{ st.registry_root, "index.json" });
     const idx = try std.fs.path.join(a, &.{ st.registry_root, "index.abv" });
     return .{ json, idx };
+}
+
+/// True when the registry index is already on disk, so a dry run can read it
+/// without downloading anything.
+fn registryCached(a: std.mem.Allocator, st: *const store.Store) bool {
+    const paths = registryPaths(a, st) catch return false;
+    defer a.free(paths[0]);
+    defer a.free(paths[1]);
+    std.fs.cwd().access(paths[0], .{}) catch return false;
+    return true;
 }
 
 // The manifest is trusted only after its detached signature (`<url>.sig`)
@@ -283,11 +677,11 @@ fn vetManifest(
     const s = scratch.allocator();
 
     const bytes = std.fs.cwd().readFileAlloc(s, manifest_path, max_manifest_bytes) catch |e| {
-        term.err("{s}error{s}: cannot read manifest: {s}\n", .{ term.red, term.reset, @errorName(e) });
+        term.err("{s}error{s}: cannot read manifest: {s}\n", .{ term.red, term.reset, explain(e) });
         return e;
     };
     const sig = std.fs.cwd().readFileAlloc(s, sig_path, max_sig_bytes) catch |e| {
-        term.err("{s}error{s}: cannot read manifest signature: {s}\n", .{ term.red, term.reset, @errorName(e) });
+        term.err("{s}error{s}: cannot read manifest signature: {s}\n", .{ term.red, term.reset, explain(e) });
         return e;
     };
 
@@ -352,11 +746,11 @@ fn storeUpdatedAt(a: std.mem.Allocator, st: *const store.Store, value: []const u
 /// published here.
 fn fetchManifestPair(a: std.mem.Allocator, manifest_tmp: []const u8, sig_tmp: []const u8) !void {
     net.download(a, registry_url, manifest_tmp, .{}) catch |e| {
-        term.err("{s}error{s}: could not download registry manifest: {s}\n", .{ term.red, term.reset, @errorName(e) });
+        term.err("{s}error{s}: could not download registry manifest: {s}\n", .{ term.red, term.reset, explain(e) });
         return e;
     };
     net.download(a, registry_sig_url, sig_tmp, .{}) catch |e| {
-        term.err("{s}error{s}: could not download manifest signature: {s}\n", .{ term.red, term.reset, @errorName(e) });
+        term.err("{s}error{s}: could not download manifest signature: {s}\n", .{ term.red, term.reset, explain(e) });
         return e;
     };
 }
@@ -386,7 +780,7 @@ fn ensureRegistryFile(base: std.mem.Allocator, st: *const store.Store, json_path
     defer std.fs.cwd().deleteFile(tmp_path) catch {};
     defer std.fs.cwd().deleteFile(sig_path) catch {};
 
-    term.print("fetching registry index...\n", .{});
+    say("fetching registry index...\n", .{});
     try fetchManifestPair(a, tmp_path, sig_path);
 
     const updated_at = try vetManifest(a, tmp_path, sig_path, allow_unsigned);
@@ -410,7 +804,7 @@ fn loadRegistry(a: std.mem.Allocator, st: *const store.Store, allow_unsigned: bo
     defer a.free(paths[1]);
 
     const fresh = ensureRegistryFile(a, st, paths[0], allow_unsigned) catch |e| {
-        term.err("{s}error{s}: no package registry available: {s}\n", .{ term.red, term.reset, @errorName(e) });
+        term.err("{s}error{s}: no package registry available: {s}\n", .{ term.red, term.reset, explain(e) });
         return e;
     };
     if (fresh) |parsed| {
@@ -423,7 +817,7 @@ fn loadRegistry(a: std.mem.Allocator, st: *const store.Store, allow_unsigned: bo
     }
 
     return abvindex.loadCached(a, paths[0], paths[1]) catch |e| {
-        term.err("{s}error{s}: could not load registry: {s}\n", .{ term.red, term.reset, @errorName(e) });
+        term.err("{s}error{s}: could not load registry: {s}\n", .{ term.red, term.reset, explain(e) });
         return e;
     };
 }
@@ -440,12 +834,12 @@ fn loadExplicitRegistry(base: std.mem.Allocator, path: []const u8, allow_unsigne
     const sig_path = try std.fmt.allocPrint(a, "{s}.sig", .{path});
 
     _ = vetManifest(a, path, sig_path, allow_unsigned) catch |e| {
-        term.err("{s}error{s}: registry '{s}' was not loaded: {s}\n", .{ term.red, term.reset, path, @errorName(e) });
+        term.err("{s}error{s}: registry '{s}' was not loaded: {s}\n", .{ term.red, term.reset, path, explain(e) });
         return e;
     };
     // The loaded registry outlives the scratch arena, so it uses `base`.
     return registry.loadFromJsonFile(base, path, null) catch |e| {
-        term.err("{s}error{s}: could not load registry '{s}': {s}\n", .{ term.red, term.reset, path, @errorName(e) });
+        term.err("{s}error{s}: could not load registry '{s}': {s}\n", .{ term.red, term.reset, path, explain(e) });
         return e;
     };
 }
@@ -540,8 +934,20 @@ fn planInstall(a: std.mem.Allocator, reg: *const registry.Registry, roots: []con
 
 fn reportInstallError(name: []const u8, e: anyerror) void {
     if (!store.alreadyDiagnosed(e)) {
-        term.err("{s}error{s}: {}: {s}\n", .{ term.red, term.reset, safe(name), @errorName(e) });
+        term.err("{s}error{s}: {}: {s}\n", .{ term.red, term.reset, safe(name), explain(e) });
     }
+}
+
+/// `-v`: where one package landed and how long it took. Runs on the worker that
+/// installed it, and only reads.
+fn reportVerbose(a: std.mem.Allocator, st: *const store.Store, pkg: registry.Package, platform_name: []const u8, started: i128) void {
+    if (!output.verbose) return;
+    const elapsed_ns: u64 = @intCast(std.time.nanoTimestamp() - started);
+    if (pkg.platform(platform_name)) |info| detail("  {}  url    {}\n", .{ safe(pkg.name), safe(info.url) });
+    if (st.pkgStorePath(a, pkg, platform_name)) |p| {
+        detail("  {}  store  {s}\n", .{ safe(pkg.name), p });
+    } else |_| {}
+    detail("  {}  took   {d:.2}ms\n", .{ safe(pkg.name), ms(elapsed_ns) });
 }
 
 /// One install pool shared by every wave of one command.
@@ -575,17 +981,20 @@ const Batch = struct {
     }
 
     fn installOne(self: *Batch, scratch: std.mem.Allocator, name: []const u8) bool {
+        const started = std.time.nanoTimestamp();
         if (store.Store.resolveRequest(self.reg, name)) |pkg| {
             self.st.install(pkg, self.platform_name, self.opts) catch |e| {
                 reportInstallError(name, e);
                 return false;
             };
+            reportVerbose(scratch, self.st, pkg, self.platform_name, started);
             return true;
         }
-        _ = self.st.installDynamic(scratch, name, self.platform_name, self.opts) catch |e| {
+        const pkg = self.st.installDynamic(scratch, name, self.platform_name, self.opts) catch |e| {
             reportInstallError(name, e);
             return false;
         };
+        reportVerbose(scratch, self.st, pkg, self.platform_name, started);
         return true;
     }
 };
@@ -759,6 +1168,223 @@ fn writeOutdatedJson(w: anytype, name: []const u8, installed: []const u8, availa
     try w.writeAll("}");
 }
 
+/// The registry name closest to `name`, for a name the registry does not have.
+fn suggestPackage(a: std.mem.Allocator, reg: *const registry.Registry, name: []const u8) ?[]const u8 {
+    const names = a.alloc([]const u8, reg.packages.len) catch return null;
+    defer a.free(names);
+    for (reg.packages, names) |pkg, *slot| slot.* = pkg.name;
+    // The result points at registry memory, so it outlives `names`.
+    return closest(name, names);
+}
+
+/// Under an error about an unknown package, the closest registry name.
+fn hintPackage(a: std.mem.Allocator, reg: *const registry.Registry, name: []const u8) void {
+    if (suggestPackage(a, reg, name)) |s| term.err("  did you mean '{}'?\n", .{safe(s)});
+}
+
+/// Before a name the registry lacks goes to a GitHub search, say which registry
+/// name it may have been meant to be. Silent when nothing is close.
+fn noteUnknownName(a: std.mem.Allocator, reg: *const registry.Registry, name: []const u8) void {
+    if (store.Store.resolveRequest(reg, name) != null) return;
+    if (suggestPackage(a, reg, name)) |s| {
+        term.err("{s}note{s}: '{}' is not in the registry; did you mean '{}'?\n", .{ term.yellow, term.reset, safe(name), safe(s) });
+    }
+}
+
+fn supportsDryRun(cmd: []const u8) bool {
+    const names = [_][]const u8{ "install", "upgrade", "uninstall", "bundle" };
+    for (names) |n| {
+        if (std.mem.eql(u8, n, cmd)) return true;
+    }
+    return false;
+}
+
+/// What an install or upgrade of `names` would do, one line per package in
+/// install order. It reads the registry and the store and writes nothing.
+fn writeDryRunPlan(
+    w: anytype,
+    a: std.mem.Allocator,
+    st: *const store.Store,
+    reg: *const registry.Registry,
+    names: []const []const u8,
+    platform_name: []const u8,
+    verb: []const u8,
+) !void {
+    if (output.json) {
+        try w.writeAll("[");
+        for (names, 0..) |name, i| {
+            if (i > 0) try w.writeAll(",");
+            const pkg = store.Store.resolveRequest(reg, name);
+            const status: []const u8 = if (pkg == null)
+                "unknown"
+            else if (st.isInstalled(pkg.?, platform_name))
+                "cached"
+            else
+                "would_install";
+            try w.writeAll("{\"name\":");
+            try writeJsonString(w, name);
+            try w.writeAll(",\"version\":");
+            if (pkg) |p| {
+                try writeJsonString(w, p.version);
+            } else {
+                try w.writeAll("null");
+            }
+            try w.print(",\"status\":\"{s}\"}}", .{status});
+        }
+        try w.writeAll("]\n");
+        return;
+    }
+
+    for (names) |name| {
+        const pkg = store.Store.resolveRequest(reg, name) orelse {
+            try w.print("  {s}unknown{s}   {} is not in the registry; it would be fetched from GitHub\n", .{ term.yellow, term.reset, safe(name) });
+            continue;
+        };
+        const info = pkg.platform(platform_name) orelse {
+            try w.print("  {s}blocked{s}   {} {} has no build for {s}\n", .{ term.red, term.reset, safe(pkg.name), safe(pkg.version), platform_name });
+            continue;
+        };
+        if (st.isInstalled(pkg, platform_name)) {
+            try w.print("  {s}{s:<8}{s} {} {} (already installed)\n", .{ term.dim, "cached", term.reset, safe(pkg.name), safe(pkg.version) });
+        } else {
+            try w.print("  {s}{s:<8}{s} {} {} from {}\n", .{ term.green, verb, term.reset, safe(pkg.name), safe(pkg.version), safe(urlHost(info.url)) });
+        }
+        if (output.verbose) {
+            try w.print("           url   {}\n", .{safe(info.url)});
+            if (st.pkgStorePath(a, pkg, platform_name)) |p| {
+                try w.print("           store {s}\n", .{p});
+            } else |_| {}
+        }
+    }
+    try w.print("\ndry run: {d} packages, nothing was changed\n", .{names.len});
+}
+
+/// `install --json`: one entry per planned package, with how it ended.
+fn writeInstallJson(w: anytype, reg: *const registry.Registry, names: []const []const u8, levels: []const usize, ok: []const bool) !void {
+    try w.writeAll("[");
+    for (names, 0..) |name, i| {
+        if (i > 0) try w.writeAll(",");
+        const status: []const u8 = if (ok[i])
+            "installed"
+        else if (failedDependency(reg, names, levels, ok, i) != null)
+            "skipped"
+        else
+            "failed";
+        try w.writeAll("{\"name\":");
+        try writeJsonString(w, name);
+        try w.writeAll(",\"version\":");
+        if (store.Store.resolveRequest(reg, name)) |pkg| {
+            try writeJsonString(w, pkg.version);
+        } else {
+            try w.writeAll("null");
+        }
+        try w.print(",\"status\":\"{s}\"}}", .{status});
+    }
+    try w.writeAll("]\n");
+}
+
+const InstalledRow = struct {
+    name: []const u8,
+    version: []const u8,
+};
+
+fn lessThanInstalled(_: void, x: InstalledRow, y: InstalledRow) bool {
+    const by_name = std.mem.order(u8, x.name, y.name);
+    if (by_name != .eq) return by_name == .lt;
+    return registry.compareVersions(x.version, y.version) == .lt;
+}
+
+/// `list --installed`: the versions in the store for `platform_name`, read from
+/// the store's directory names. No registry is needed, so packages the registry
+/// has dropped still show.
+fn writeInstalled(w: anytype, a: std.mem.Allocator, st: *const store.Store, platform_name: []const u8, json: bool) !u8 {
+    var rows = std.ArrayList(InstalledRow).init(a);
+    defer rows.deinit();
+
+    if (std.fs.cwd().openDir(st.store_root, .{ .iterate = true })) |opened| {
+        var dir = opened;
+        defer dir.close();
+        var it = dir.iterate();
+        while (try it.next()) |entry| {
+            if (entry.kind != .directory) continue;
+            const parsed = store.Store.parseStoreDirName(entry.name) orelse continue;
+            if (!std.mem.eql(u8, parsed.platform, platform_name)) continue;
+            // The iterator reuses `entry.name`, so the kept strings are copied.
+            try rows.append(.{ .name = try a.dupe(u8, parsed.name), .version = try a.dupe(u8, parsed.version) });
+        }
+    } else |_| {}
+    std.mem.sort(InstalledRow, rows.items, {}, lessThanInstalled);
+
+    if (json) {
+        try w.writeAll("[");
+        for (rows.items, 0..) |row, i| {
+            if (i > 0) try w.writeAll(",");
+            try w.writeAll("{\"name\":");
+            try writeJsonString(w, row.name);
+            try w.writeAll(",\"version\":");
+            try writeJsonString(w, row.version);
+            try w.writeAll("}");
+        }
+        try w.writeAll("]\n");
+        return 0;
+    }
+    if (rows.items.len == 0) {
+        try w.print("no packages installed for {s}\n", .{platform_name});
+        return 0;
+    }
+    for (rows.items) |row| {
+        try w.print("{s}{:<24}{s} {}\n", .{ term.bold, safe(row.name), term.reset, safe(row.version) });
+    }
+    try w.print("\n{d} installed\n", .{rows.items.len});
+    return 0;
+}
+
+/// `doctor --json`: the checks `Store.doctor` makes, as one JSON document. The
+/// text form prints as it goes, so it cannot be reused; the checks are the same.
+fn cmdDoctorJson(a: std.mem.Allocator, st: *const store.Store, reg: *const registry.Registry, platform_name: []const u8) !u8 {
+    var path_ok = false;
+    if (platform.envOwned(a, "PATH")) |env_path| {
+        defer a.free(env_path);
+        path_ok = std.mem.indexOf(u8, env_path, st.bin_root) != null;
+    }
+    const store_writable = if (std.fs.cwd().access(st.store_root, .{ .mode = .read_write })) |_| true else |_| false;
+
+    const w = term.writer();
+    try w.writeAll("{\"path\":{\"ok\":");
+    try w.writeAll(if (path_ok) "true" else "false");
+    try w.writeAll(",\"bin_root\":");
+    try writeJsonString(w, st.bin_root);
+    try w.writeAll("},\"store\":{\"ok\":");
+    try w.writeAll(if (store_writable) "true" else "false");
+    try w.writeAll(",\"root\":");
+    try writeJsonString(w, st.store_root);
+    try w.writeAll("},\"broken_links\":[");
+
+    var broken: usize = 0;
+    for (reg.packages) |pkg| {
+        if (!st.isInstalled(pkg, platform_name)) continue;
+        for (pkg.bin) |bin_name| {
+            const dst_name = try std.fmt.allocPrint(a, "{s}{s}", .{ bin_name, platform.exe_suffix });
+            defer a.free(dst_name);
+            const p = try std.fs.path.join(a, &.{ st.bin_root, dst_name });
+            defer a.free(p);
+            std.fs.cwd().access(p, .{}) catch {
+                if (broken > 0) try w.writeAll(",");
+                try w.writeAll("{\"package\":");
+                try writeJsonString(w, pkg.name);
+                try w.writeAll(",\"bin\":");
+                try writeJsonString(w, bin_name);
+                try w.writeAll("}");
+                broken += 1;
+            };
+        }
+    }
+
+    const warnings: usize = (if (path_ok) @as(usize, 0) else 1) + (if (store_writable) @as(usize, 0) else 1);
+    try w.print("],\"warnings\":{d}}}\n", .{warnings});
+    return if (warnings + broken == 0) 0 else 1;
+}
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
@@ -780,7 +1406,7 @@ pub fn main() u8 {
         // Only fall back to the bare error name when nothing more useful has
         // already been printed, so failures are reported exactly once.
         if (!term.anythingReported()) {
-            term.err("{s}error{s}: {s}\n", .{ term.red, term.reset, @errorName(e) });
+            term.err("{s}error{s}: {s}\n", .{ term.red, term.reset, explain(e) });
         }
         term.flush();
         return 1;
@@ -793,13 +1419,12 @@ fn run(base: std.mem.Allocator, a: std.mem.Allocator) !u8 {
     const argv = try std.process.argsAlloc(a);
     const rest_argv = if (argv.len > 1) argv[1..] else &[_][]const u8{};
 
-    var args = parseArgs(a, rest_argv) catch |e| {
+    var diag = ArgDiag{};
+    var args = parseArgsDiag(a, rest_argv, &diag) catch |e| {
         term.init(false);
-        switch (e) {
-            error.MissingOptionValue => term.err("error: option requires a value\n", .{}),
-            error.UnknownOption => term.err("error: unknown option\n", .{}),
-            else => return e,
-        }
+        if (e == error.OutOfMemory) return e;
+        var buf: [512]u8 = undefined;
+        term.err("{s}error{s}: {s}\n", .{ term.red, term.reset, argErrorMessage(&buf, e, diag) });
         return 2;
     };
     defer args.deinit();
@@ -810,21 +1435,44 @@ fn run(base: std.mem.Allocator, a: std.mem.Allocator) !u8 {
         term.print("abv0 {s} ({s})\n", .{ version, platform.defaultPlatformTag() });
         return 0;
     }
-    // Help must not touch the filesystem at all.
-    if (args.want_help or args.command == null) {
+    // Help must not touch the filesystem at all. `abv0 <cmd> --help` gets that
+    // command's page; anything else gets the overview.
+    if (args.want_help) {
+        if (args.command) |name| {
+            if (findCommand(name)) |spec| {
+                try renderCommandHelp(term.writer(), spec);
+                return 0;
+            }
+        }
         printUsage();
         return 0;
     }
-
-    const cmd = args.command.?;
-    if (std.mem.eql(u8, cmd, "help")) {
+    const cmd = args.command orelse {
         printUsage();
         return 0;
+    };
+    if (std.mem.eql(u8, cmd, "help")) {
+        if (args.rest.items.len == 0) {
+            printUsage();
+            return 0;
+        }
+        const topic = args.rest.items[0];
+        if (findCommand(topic)) |spec| {
+            try renderCommandHelp(term.writer(), spec);
+            return 0;
+        }
+        reportUnknownCommand(topic);
+        return 2;
     }
     // `abv0 version` is as natural as `abv0 --version`; accept both.
     if (std.mem.eql(u8, cmd, "version")) {
         term.print("abv0 {s} ({s})\n", .{ version, platform.defaultPlatformTag() });
         return 0;
+    }
+    // A typo is a usage error. Catch it before the store or the registry is touched.
+    if (findCommand(cmd) == null and !std.mem.eql(u8, cmd, "hybrid-sync")) {
+        reportUnknownCommand(cmd);
+        return 2;
     }
 
     const platform_name = args.platform_name orelse platform.defaultPlatformTag();
@@ -833,10 +1481,24 @@ fn run(base: std.mem.Allocator, a: std.mem.Allocator) !u8 {
         return 2;
     }
 
+    // --json keeps stdout to the document alone, so it implies quiet. Verbose
+    // lines are free text, so they are dropped under --json as well.
+    output = .{
+        .quiet = args.quiet or args.json,
+        .verbose = args.verbose and !args.json,
+        .dry_run = args.dry_run,
+        .json = args.json,
+    };
+    if (output.dry_run and !supportsDryRun(cmd)) {
+        term.err("{s}error{s}: --dry-run applies to install, upgrade, uninstall and bundle install\n", .{ term.red, term.reset });
+        return 2;
+    }
+
     const opts = store.InstallOptions{
         .micro_split = args.micro_split,
         .allow_unverified = args.allow_unverified,
         .force = args.force,
+        .quiet = output.quiet,
     };
 
     var timer = try std.time.Timer.start();
@@ -847,7 +1509,7 @@ fn run(base: std.mem.Allocator, a: std.mem.Allocator) !u8 {
     // ---- commands that need no registry ----
     if (std.mem.eql(u8, cmd, "gc")) {
         const n = try st.gc(a);
-        term.print("reclaimed {d} items in {d:.2}ms\n", .{ n, ms(timer.read()) });
+        say("reclaimed {d} items in {d:.2}ms\n", .{ n, ms(timer.read()) });
         return 0;
     }
     if (std.mem.eql(u8, cmd, "update")) {
@@ -855,6 +1517,15 @@ fn run(base: std.mem.Allocator, a: std.mem.Allocator) !u8 {
     }
     if (std.mem.eql(u8, cmd, "report")) {
         return cmdReport(a, &args, platform_name);
+    }
+    if (std.mem.eql(u8, cmd, "list") and args.installed) {
+        return writeInstalled(term.writer(), a, &st, platform_name, args.json);
+    }
+
+    // A dry run reads the registry but must not download it, so it needs one already cached.
+    if (output.dry_run and args.registry_path == null and !registryCached(a, &st)) {
+        term.err("{s}error{s}: no registry cached yet; run `abv0 update` first (--dry-run does not download)\n", .{ term.red, term.reset });
+        return 1;
     }
 
     var reg = if (args.registry_path) |p|
@@ -864,39 +1535,40 @@ fn run(base: std.mem.Allocator, a: std.mem.Allocator) !u8 {
     defer reg.deinit();
 
     if (std.mem.eql(u8, cmd, "list")) return cmdList(&reg, args.json);
-    if (std.mem.eql(u8, cmd, "search")) return cmdSearch(&reg, args.rest.items);
-    if (std.mem.eql(u8, cmd, "info")) return cmdInfo(&reg, args.rest.items, args.json);
+    if (std.mem.eql(u8, cmd, "search")) return cmdSearch(&reg, args.rest.items, args.json);
+    if (std.mem.eql(u8, cmd, "info")) return cmdInfo(a, &reg, args.rest.items, args.json);
     if (std.mem.eql(u8, cmd, "install")) return cmdInstall(a, &st, &reg, &args, platform_name, opts, &timer);
-    if (std.mem.eql(u8, cmd, "uninstall")) return cmdUninstall(a, &st, &reg, args.rest.items);
+    if (std.mem.eql(u8, cmd, "uninstall")) return cmdUninstall(a, &st, &reg, args.rest.items, platform_name);
     if (std.mem.eql(u8, cmd, "outdated")) return cmdOutdated(a, &st, &reg, platform_name, args.json);
     if (std.mem.eql(u8, cmd, "upgrade")) return cmdUpgrade(a, &st, &reg, args.rest.items, platform_name, opts, args.jobs);
     if (std.mem.eql(u8, cmd, "run")) return cmdRun(a, &st, &reg, args.rest.items, platform_name, opts);
     if (std.mem.eql(u8, cmd, "shell")) return cmdShell(a, &st, &reg, args.rest.items, platform_name, opts);
     if (std.mem.eql(u8, cmd, "bundle")) return cmdBundle(a, &st, &reg, &args, platform_name, opts);
     if (std.mem.eql(u8, cmd, "doctor")) {
+        if (args.json) return cmdDoctorJson(a, &st, &reg, platform_name);
         const h = try st.doctor(a, &reg, platform_name);
         term.print("\n{d} warnings, {d} broken links ({d:.2}ms)\n", .{ h.warnings, h.broken_links, ms(timer.read()) });
         return if (h.warnings + h.broken_links == 0) 0 else 1;
     }
     if (std.mem.eql(u8, cmd, "fix")) {
         const n = try st.fix(a, &reg, platform_name);
-        term.print("repaired {d} packages in {d:.2}ms\n", .{ n, ms(timer.read()) });
+        say("repaired {d} packages in {d:.2}ms\n", .{ n, ms(timer.read()) });
         return 0;
     }
     if (std.mem.eql(u8, cmd, "detect")) return cmdDetect(a, &st, &reg, args.rest.items, platform_name);
     if (std.mem.eql(u8, cmd, "reset")) {
         const n = try st.resetAll(a, &reg, platform_name);
-        term.print("uninstalled {d} packages; store reset\n", .{n});
+        say("uninstalled {d} packages; store reset\n", .{n});
         return 0;
     }
     if (std.mem.eql(u8, cmd, "sync") or std.mem.eql(u8, cmd, "hybrid-sync")) {
         try st.exportRegistry(a, &reg);
-        term.print("\nsynchronised in {d:.2}ms\n", .{ms(timer.read())});
+        say("\nsynchronised in {d:.2}ms\n", .{ms(timer.read())});
         return 0;
     }
     if (std.mem.eql(u8, cmd, "benchmark")) return cmdBenchmark(a, &st, &reg, platform_name);
 
-    term.err("{s}error{s}: unknown command '{s}' (try `abv0 help`)\n", .{ term.red, term.reset, cmd });
+    reportUnknownCommand(cmd);
     return 2;
 }
 
@@ -932,35 +1604,44 @@ fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     return std.ascii.indexOfIgnoreCase(haystack, needle) != null;
 }
 
-fn cmdSearch(reg: *const registry.Registry, rest: []const []const u8) !u8 {
+fn cmdSearch(reg: *const registry.Registry, rest: []const []const u8, json: bool) !u8 {
     if (rest.len == 0) {
         term.err("usage: abv0 search <query>\n", .{});
         return 2;
     }
     const q = rest[0];
+    const w = term.writer();
+    if (json) try w.writeAll("[");
     var found: usize = 0;
     for (reg.packages) |pkg| {
-        if (containsIgnoreCase(pkg.name, q) or containsIgnoreCase(pkg.description, q)) {
-            found += 1;
+        if (!containsIgnoreCase(pkg.name, q) and !containsIgnoreCase(pkg.description, q)) continue;
+        if (json) {
+            if (found > 0) try w.writeAll(",");
+            try writePackageJson(w, pkg);
+        } else {
             term.print("{s}{}{s} {s}{}{s}\n    {}\n", .{
                 term.bold, safe(pkg.name), term.reset, term.dim, safe(pkg.version), term.reset, safe(pkg.description),
             });
         }
+        found += 1;
     }
-    if (found == 0) {
+    if (json) {
+        try w.writeAll("]\n");
+    } else if (found == 0) {
+        // No match is an answer, not a failure.
         term.print("no packages match '{}'\n", .{safe(q)});
-        return 1;
     }
     return 0;
 }
 
-fn cmdInfo(reg: *const registry.Registry, rest: []const []const u8, json: bool) !u8 {
+fn cmdInfo(a: std.mem.Allocator, reg: *const registry.Registry, rest: []const []const u8, json: bool) !u8 {
     if (rest.len == 0) {
         term.err("usage: abv0 info <pkg>\n", .{});
         return 2;
     }
     const pkg = store.Store.resolveRequest(reg, rest[0]) orelse {
-        term.err("{s}error{s}: '{s}' not found\n", .{ term.red, term.reset, rest[0] });
+        term.err("{s}error{s}: '{}' not found\n", .{ term.red, term.reset, safe(rest[0]) });
+        hintPackage(a, reg, rest[0]);
         return 1;
     };
     if (json) {
@@ -1009,19 +1690,30 @@ fn cmdInstall(
         term.err("usage: abv0 install <pkg>...\n", .{});
         return 2;
     }
+    for (args.rest.items) |name| noteUnknownName(a, reg, name);
 
     // Dependencies come along, and always install before what needs them.
     const plan = try planInstall(a, reg, args.rest.items);
     defer a.free(plan.names);
     defer a.free(plan.levels);
 
+    if (output.dry_run) {
+        try writeDryRunPlan(term.writer(), a, st, reg, plan.names, platform_name, "install");
+        return 0;
+    }
+
     const ok = try a.alloc(bool, plan.names.len);
     defer a.free(ok);
     const failures = try installWaves(a, st, reg, plan.names, plan.levels, ok, platform_name, opts, args.jobs);
 
+    if (output.json) {
+        try writeInstallJson(term.writer(), reg, plan.names, plan.levels, ok);
+        return if (failures == 0) 0 else 1;
+    }
+
     const elapsed = ms(timer.read());
     if (failures == 0) {
-        term.print("\n{s}done{s} {d} packages in {d:.2}ms\n", .{ term.green, term.reset, plan.names.len, elapsed });
+        say("\n{s}done{s} {d} packages in {d:.2}ms\n", .{ term.green, term.reset, plan.names.len, elapsed });
         return 0;
     }
     term.print("\n{s}{d} of {d} packages failed{s} ({d:.2}ms)\n", .{ term.red, failures, plan.names.len, term.reset, elapsed });
@@ -1033,6 +1725,7 @@ fn cmdUninstall(
     st: *store.Store,
     reg: *const registry.Registry,
     rest: []const []const u8,
+    platform_name: []const u8,
 ) !u8 {
     if (rest.len == 0) {
         term.err("usage: abv0 uninstall <pkg>\n", .{});
@@ -1042,15 +1735,25 @@ fn cmdUninstall(
     for (rest) |name| {
         const pkg = store.Store.resolveRequest(reg, name) orelse {
             term.err("{s}error{s}: '{}' not found in registry\n", .{ term.red, term.reset, safe(name) });
+            hintPackage(a, reg, name);
             failed = 1;
             continue;
         };
+        if (output.dry_run) {
+            if (st.isInstalled(pkg, platform_name)) {
+                term.print("would remove {}\n", .{safe(pkg.name)});
+            } else {
+                term.print("{} is not installed; nothing to remove\n", .{safe(pkg.name)});
+            }
+            continue;
+        }
         if (try st.uninstall(a, pkg)) {
-            term.print("removed {}\n", .{safe(pkg.name)});
+            say("removed {}\n", .{safe(pkg.name)});
         } else {
-            term.print("{} was not installed\n", .{safe(pkg.name)});
+            say("{} was not installed\n", .{safe(pkg.name)});
         }
     }
+    if (output.dry_run) term.print("\ndry run: nothing was changed\n", .{});
     return failed;
 }
 
@@ -1114,6 +1817,7 @@ fn cmdUpgrade(
             } else {
                 unknown += 1;
                 term.err("{s}warning{s}: '{}' not in registry\n", .{ term.yellow, term.reset, safe(name) });
+                hintPackage(a, reg, name);
             }
         }
         // Asking only for names that do not exist is a failed request.
@@ -1121,7 +1825,7 @@ fn cmdUpgrade(
     }
 
     if (targets.items.len == 0) {
-        term.print("nothing to upgrade\n", .{});
+        say("nothing to upgrade\n", .{});
         return 0;
     }
 
@@ -1147,6 +1851,11 @@ fn cmdUpgrade(
         if (!wanted.contains(name)) continue;
         try names.append(name);
         try levels.append(lv);
+    }
+
+    if (output.dry_run) {
+        try writeDryRunPlan(term.writer(), a, st, reg, names.items, platform_name, "upgrade");
+        return 0;
     }
 
     // Install the new version first; each version has its own store
@@ -1177,6 +1886,7 @@ fn cmdRun(
         term.err("usage: abv0 run <pkg> [-- args...]\n", .{});
         return 2;
     }
+    noteUnknownName(a, reg, rest[0]);
     return st.runPackage(a, reg, rest[0], rest[1..], platform_name, opts);
 }
 
@@ -1192,6 +1902,7 @@ fn cmdShell(
         term.err("usage: abv0 shell <pkg>...\n", .{});
         return 2;
     }
+    for (rest) |name| noteUnknownName(a, reg, name);
     return st.spawnShell(a, reg, rest, platform_name, opts);
 }
 
@@ -1216,7 +1927,12 @@ fn cmdBundle(
         defer a.free(plan.names);
         defer a.free(plan.levels);
 
-        term.print("installing {d} packages from {s}\n\n", .{ plan.names.len, path });
+        if (output.dry_run) {
+            try writeDryRunPlan(term.writer(), a, st, reg, plan.names, platform_name, "install");
+            return 0;
+        }
+
+        say("installing {d} packages from {s}\n\n", .{ plan.names.len, path });
         const ok = try a.alloc(bool, plan.names.len);
         defer a.free(ok);
         // A package that fails is reported and the rest still run, as before.
@@ -1224,6 +1940,10 @@ fn cmdBundle(
         return 0;
     }
     if (std.mem.eql(u8, sub, "dump")) {
+        if (output.dry_run) {
+            term.err("{s}error{s}: --dry-run does not apply to bundle dump\n", .{ term.red, term.reset });
+            return 2;
+        }
         try st.bundleDump(a, reg, path, args.force, platform_name);
         return 0;
     }
@@ -1243,7 +1963,8 @@ fn cmdDetect(
         return 2;
     }
     const pkg = store.Store.resolveRequest(reg, rest[0]) orelse {
-        term.err("{s}error{s}: '{s}' not found\n", .{ term.red, term.reset, rest[0] });
+        term.err("{s}error{s}: '{}' not found\n", .{ term.red, term.reset, safe(rest[0]) });
+        hintPackage(a, reg, rest[0]);
         return 1;
     };
     if (!st.isInstalled(pkg, platform_name)) {
@@ -1284,7 +2005,7 @@ fn cmdUpdate(a: std.mem.Allocator, st: *store.Store, allow_unsigned: bool) !u8 {
     defer std.fs.cwd().deleteFile(tmp) catch {};
     defer std.fs.cwd().deleteFile(tmp_sig) catch {};
 
-    term.print("fetching {s}\n", .{registry_url});
+    say("fetching {s}\n", .{registry_url});
     fetchManifestPair(a, tmp, tmp_sig) catch return 1;
 
     // Nothing below may touch the working registry until the signature and
@@ -1295,7 +2016,7 @@ fn cmdUpdate(a: std.mem.Allocator, st: *store.Store, allow_unsigned: bool) !u8 {
     // Validate before replacing the working registry. This one parse is also
     // the registry the index is built from, so the file is parsed only once.
     var reg = registry.loadFromJsonFile(a, tmp, null) catch |e| {
-        term.err("{s}error{s}: downloaded registry is invalid ({s}); keeping the existing one\n", .{ term.red, term.reset, @errorName(e) });
+        term.err("{s}error{s}: downloaded registry is invalid ({s}); keeping the existing one\n", .{ term.red, term.reset, explain(e) });
         return 1;
     };
     defer reg.deinit();
@@ -1307,7 +2028,7 @@ fn cmdUpdate(a: std.mem.Allocator, st: *store.Store, allow_unsigned: bool) !u8 {
     const stamp = try abvindex.Stamp.ofFile(paths[0]);
     abvindex.build(a, &reg, paths[1], stamp) catch {};
 
-    term.print("{s}updated{s} {d} packages\n", .{ term.green, term.reset, n });
+    say("{s}updated{s} {d} packages\n", .{ term.green, term.reset, n });
     return 0;
 }
 
@@ -1643,6 +2364,166 @@ test "levelize refuses a list where a dependency comes after its dependent" {
         .{ .name = "a" },
     };
     try testing.expectError(error.NotDependencyOrdered, levelize(testing.allocator, &pkgs));
+}
+
+test "global flags parse, including the short forms" {
+    var a = try parseArgs(testing.allocator, &.{ "install", "jq", "-q", "--dry-run", "-v", "--installed" });
+    defer a.deinit();
+    try testing.expect(a.quiet and a.dry_run and a.verbose and a.installed);
+    try testing.expectEqualStrings("install", a.command.?);
+}
+
+test "-j with a non-number is an InvalidNumber error that names -j and the value" {
+    var diag = ArgDiag{};
+    try testing.expectError(error.InvalidNumber, parseArgsDiag(testing.allocator, &.{ "install", "jq", "-j", "abc" }, &diag));
+    try testing.expectEqualStrings("-j", diag.option);
+    try testing.expectEqualStrings("abc", diag.value);
+
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings(
+        "option '-j' requires a number, got 'abc'",
+        argErrorMessage(&buf, error.InvalidNumber, diag),
+    );
+}
+
+test "an unknown option is reported by name" {
+    var diag = ArgDiag{};
+    try testing.expectError(error.UnknownOption, parseArgsDiag(testing.allocator, &.{ "install", "--foo" }, &diag));
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings(
+        "unknown option '--foo' (see `abv0 help`)",
+        argErrorMessage(&buf, error.UnknownOption, diag),
+    );
+    try testing.expectEqualStrings(
+        "option '--platform' requires a value",
+        argErrorMessage(&buf, error.MissingOptionValue, .{ .option = "--platform" }),
+    );
+}
+
+test "editDistance counts an adjacent swap as one edit" {
+    try testing.expectEqual(@as(usize, 1), editDistance("ab", "ba"));
+    try testing.expectEqual(@as(usize, 3), editDistance("kitten", "sitting"));
+    try testing.expectEqual(@as(usize, 0), editDistance("jq", "jq"));
+}
+
+test "closest suggests a near name, a transposition or a prefix, and nothing far off" {
+    const names = [_][]const u8{ "install", "info", "list", "uninstall" };
+    try testing.expectEqualStrings("install", closest("instal", &names).?);
+    try testing.expectEqualStrings("install", closest("isntall", &names).?);
+    try testing.expectEqualStrings("list", closest("lsit", &names).?);
+    try testing.expectEqualStrings("uninstall", closest("uninstal", &names).?);
+    try testing.expect(closest("zzzzzz", &names) == null);
+    try testing.expect(closest("", &names) == null);
+
+    const pkgs = [_][]const u8{ "jq", "ripgrep" };
+    try testing.expectEqualStrings("ripgrep", closest("ripg", &pkgs).?);
+    try testing.expect(closest("zzz", &pkgs) == null);
+}
+
+test "an unknown command is matched against the command table" {
+    try testing.expectEqualStrings("install", closest("instal", &command_names).?);
+    try testing.expect(findCommand("instal") == null);
+}
+
+test "explain turns common failures into a sentence with a next step" {
+    try testing.expect(std.mem.indexOf(u8, explain(error.FileNotFound), "file not found") != null);
+    try testing.expect(std.mem.indexOf(u8, explain(store.StoreError.ChecksumMismatch), "checksum mismatch") != null);
+    try testing.expectEqualStrings("SomethingOdd", explain(error.SomethingOdd));
+}
+
+test "urlHost names the host an artifact comes from" {
+    try testing.expectEqualStrings("github.com", urlHost("https://github.com/x/y/releases/a.tar.gz"));
+    try testing.expectEqualStrings("h.example:8443", urlHost("https://user@h.example:8443/a"));
+    try testing.expectEqualStrings("?", urlHost("not a url"));
+}
+
+test "top-level help lists every command" {
+    var buf = std.ArrayList(u8).init(testing.allocator);
+    defer buf.deinit();
+    try renderUsage(buf.writer());
+    for (commands) |cmd| {
+        const line = try std.fmt.allocPrint(testing.allocator, "\n  {s}", .{cmd.name});
+        defer testing.allocator.free(line);
+        try testing.expect(std.mem.indexOf(u8, buf.items, line) != null);
+    }
+}
+
+test "every command has per-command help with usage, options and an example" {
+    for (commands) |cmd| {
+        var buf = std.ArrayList(u8).init(testing.allocator);
+        defer buf.deinit();
+        try renderCommandHelp(buf.writer(), cmd);
+        try testing.expect(std.mem.indexOf(u8, buf.items, "USAGE") != null);
+        try testing.expect(std.mem.indexOf(u8, buf.items, "EXAMPLE") != null);
+        try testing.expect(std.mem.indexOf(u8, buf.items, cmd.example) != null);
+        try testing.expect(findCommand(cmd.name) != null);
+    }
+}
+
+/// A Store whose only live field is `store_root`. The read-only helpers the
+/// tests call use no other path, so the remaining fields are left undefined.
+fn storeAt(store_root: []u8) store.Store {
+    var st: store.Store = undefined;
+    st.store_root = store_root;
+    return st;
+}
+
+test "dry run describes an install and touches neither the store nor the registry" {
+    output = .{ .dry_run = true };
+    defer output = .{};
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // jq is already in the store; fzf is not.
+    try tmp.dir.makePath("store/jq@1.0@x86_64-linux");
+    const root = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(root);
+    const store_root = try std.fs.path.join(testing.allocator, &.{ root, "store" });
+    defer testing.allocator.free(store_root);
+    var st = storeAt(store_root);
+
+    var packages = [_]registry.Package{
+        .{ .name = "fzf", .version = "0.5", .platforms = &.{.{ .name = "x86_64-linux", .url = "https://releases.example.org/fzf.tar.gz", .archive_type = "tar.gz", .sha256 = "SKIP" }} },
+        .{ .name = "jq", .version = "1.0", .platforms = &.{.{ .name = "x86_64-linux", .url = "https://example.com/jq.tar.gz", .archive_type = "tar.gz", .sha256 = "SKIP" }} },
+    };
+    var reg = registry.Registry{ .allocator = testing.allocator, .packages = &packages };
+
+    const wanted = [_][]const u8{ "fzf", "jq" };
+    var buf = std.ArrayList(u8).init(testing.allocator);
+    defer buf.deinit();
+    try writeDryRunPlan(buf.writer(), testing.allocator, &st, &reg, &wanted, "x86_64-linux", "install");
+
+    try testing.expect(std.mem.indexOf(u8, buf.items, "from releases.example.org") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "already installed") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.items, "dry run: 2 packages, nothing was changed") != null);
+
+    // Nothing was created: fzf is still absent.
+    try testing.expectError(error.FileNotFound, tmp.dir.access("store/fzf@0.5@x86_64-linux", .{}));
+}
+
+test "list --installed reads the store directory names for one platform, in version order" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("store/jq@1.10@x86_64-linux");
+    try tmp.dir.makePath("store/jq@1.9@x86_64-linux");
+    try tmp.dir.makePath("store/jq@1.9@aarch64-linux");
+    try tmp.dir.makePath("store/jq@1.9@x86_64-linux.tmp");
+    const root = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(root);
+    const store_root = try std.fs.path.join(testing.allocator, &.{ root, "store" });
+    defer testing.allocator.free(store_root);
+    var st = storeAt(store_root);
+
+    var buf = std.ArrayList(u8).init(testing.allocator);
+    defer buf.deinit();
+    _ = try writeInstalled(buf.writer(), arena.allocator(), &st, "x86_64-linux", true);
+    try testing.expectEqualStrings(
+        "[{\"name\":\"jq\",\"version\":\"1.9\"},{\"name\":\"jq\",\"version\":\"1.10\"}]\n",
+        buf.items,
+    );
 }
 
 comptime {
