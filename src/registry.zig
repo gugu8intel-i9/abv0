@@ -16,6 +16,7 @@ const std = @import("std");
 const safepath = @import("safepath.zig");
 const platform_mod = @import("platform.zig");
 const bloom = @import("bloom.zig");
+const net = @import("net.zig");
 
 pub const sha256_skip = "SKIP";
 
@@ -43,9 +44,9 @@ pub fn isReservedBinName(name: []const u8) bool {
 
 /// A manifest URL is only usable over https. Prevents a manifest pointing at
 /// file:// or a plaintext http mirror that an on-path attacker can rewrite.
-pub fn isSafeUrl(url: []const u8) bool {
-    return std.mem.startsWith(u8, url, "https://");
-}
+/// Shares the downloader's check, so a URL is never admitted here and then
+/// refused at download time.
+pub const isSafeUrl = net.isSafeUrl;
 
 /// A single executable name: a valid id that is not reserved.
 pub fn isUsableBinName(name: []const u8) bool {
