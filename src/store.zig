@@ -20,6 +20,9 @@ pub const InstallOptions = struct {
     /// Permit installing a payload whose checksum does not match, or that has
     /// no pinned checksum at all. Off by default.
     allow_unverified: bool = false,
+    /// Replace bin links that already exist and were not installed by this
+    /// package. Without it such a conflict is refused.
+    force: bool = false,
     quiet: bool = false,
 };
 
@@ -35,6 +38,9 @@ pub const StoreError = error{
     UnknownArchiveType,
     ExecutableNotFound,
     RefusedUnverifiedInstall,
+    BinaryConflict,
+    ReservedBinaryName,
+    UnsafeDefaultBranch,
 };
 
 /// `install` prints a specific, actionable diagnostic for every failure it
@@ -49,6 +55,9 @@ pub fn alreadyDiagnosed(e: anyerror) bool {
         StoreError.ChecksumMissing,
         StoreError.DownloadLooksLikeErrorPage,
         StoreError.RefusedUnverifiedInstall,
+        StoreError.BinaryConflict,
+        StoreError.ReservedBinaryName,
+        StoreError.UnsafeDefaultBranch,
         => true,
         else => false,
     };
@@ -97,9 +106,10 @@ pub const Store = struct {
         errdefer allocator.free(apps_root);
 
         // These used to be four makePath calls plus three `chmod` subprocess
-        // spawns on every single invocation, including `abv0 help`.
+        // spawns on every single invocation, including `abv0 help`. Now the
+        // chmod is only paid for a directory that is new or has the wrong mode.
         for ([_][]const u8{ root, store_root, bin_root, shells_root, registry_root, locks_root }) |d| {
-            platform.makeSecureDir(d) catch {};
+            platform.ensureSecureDir(d) catch {};
         }
 
         return .{
@@ -132,6 +142,10 @@ pub const Store = struct {
     // Paths
     // -----------------------------------------------------------------------
 
+    /// Store directory name: `name@version@platform`. '@' is not allowed in a
+    /// valid identifier, so the three fields can always be split apart again.
+    /// (The old `name-version-platform` form was ambiguous: `a-1` + `2` and
+    /// `a` + `1-2` produced the same directory.)
     pub fn storeDirName(
         allocator: std.mem.Allocator,
         pkg: Package,
@@ -143,7 +157,36 @@ pub const Store = struct {
         {
             return StoreError.InvalidPackageIdentifier;
         }
-        return std.fmt.allocPrint(allocator, "{s}-{s}-{s}", .{ pkg.name, pkg.version, platform_name });
+        return std.fmt.allocPrint(allocator, "{s}@{s}@{s}", .{ pkg.name, pkg.version, platform_name });
+    }
+
+    pub const StoreDirName = struct {
+        name: []const u8,
+        version: []const u8,
+        platform: []const u8,
+    };
+
+    /// Inverse of `storeDirName`. Returns null for anything that is not a
+    /// current-format package directory: old `-`-separated directories, temp
+    /// directories, the WAL directory and so on. Those are ignored, not removed.
+    pub fn parseStoreDirName(dir_name: []const u8) ?StoreDirName {
+        if (std.mem.endsWith(u8, dir_name, ".tmp")) return null;
+        const first = std.mem.indexOfScalar(u8, dir_name, '@') orelse return null;
+        const rest = dir_name[first + 1 ..];
+        const second = std.mem.indexOfScalar(u8, rest, '@') orelse return null;
+        const parsed = StoreDirName{
+            .name = dir_name[0..first],
+            .version = rest[0..second],
+            .platform = rest[second + 1 ..],
+        };
+        if (std.mem.indexOfScalar(u8, parsed.platform, '@') != null) return null;
+        if (!safepath.isValidId(parsed.name) or
+            !safepath.isValidId(parsed.version) or
+            !safepath.isValidId(parsed.platform))
+        {
+            return null;
+        }
+        return parsed;
     }
 
     pub fn pkgStorePath(
@@ -180,25 +223,17 @@ pub const Store = struct {
         var dir = std.fs.cwd().openDir(self.store_root, .{ .iterate = true }) catch return out.toOwnedSlice();
         defer dir.close();
 
-        const prefix = try std.fmt.allocPrint(allocator, "{s}-", .{name});
-        defer allocator.free(prefix);
-        const suffix = try std.fmt.allocPrint(allocator, "-{s}", .{platform_name});
-        defer allocator.free(suffix);
-
+        // Exact comparison of the parsed name field. A prefix match would make
+        // `jq` claim the directories of `jq-extra`.
         var it = dir.iterate();
         while (try it.next()) |entry| {
             if (entry.kind != .directory) continue;
-            if (!std.mem.startsWith(u8, entry.name, prefix)) continue;
-            if (!std.mem.endsWith(u8, entry.name, suffix)) continue;
-            if (entry.name.len <= prefix.len + suffix.len) continue;
-
-            const version = entry.name[prefix.len .. entry.name.len - suffix.len];
-            // Guard against `foo-1.0-x86_64-linux` matching name `foo-1`.
-            if (std.mem.indexOfScalar(u8, version, '-') != null and
-                !safepath.isValidId(version)) continue;
+            const parsed = parseStoreDirName(entry.name) orelse continue;
+            if (!std.mem.eql(u8, parsed.name, name)) continue;
+            if (!std.mem.eql(u8, parsed.platform, platform_name)) continue;
 
             try out.append(.{
-                .version = try allocator.dupe(u8, version),
+                .version = try allocator.dupe(u8, parsed.version),
                 .dir_name = try allocator.dupe(u8, entry.name),
             });
         }
@@ -212,6 +247,10 @@ pub const Store = struct {
     /// Blocking, cross-process exclusive lock for one package.
     /// Replaces the "lock-free file semaphore" that was a file containing the
     /// text LOCKED_BY_WORKER and enforced nothing.
+    /// Lock name guarding the bin/app ownership file. Taken after the package
+    /// lock where both are needed, so the order is always package, then owners.
+    const owners_lock = "bin-owners";
+
     const Guard = struct {
         file: std.fs.File,
 
@@ -438,7 +477,7 @@ pub const Store = struct {
         var dir = std.fs.cwd().openDir(self.store_root, .{ .iterate = true }) catch return;
         defer dir.close();
 
-        const prefix = try std.fmt.allocPrint(a, "{s}-", .{name});
+        const prefix = try std.fmt.allocPrint(a, "{s}@", .{name});
         defer a.free(prefix);
 
         var it = dir.iterate();
@@ -504,35 +543,179 @@ pub const Store = struct {
             }
         }
 
-        var linked: usize = 0;
+        // Plan every link before touching the bin directory, so a refusal
+        // leaves it exactly as it was.
+        const Plan = struct { bin: []const u8, src: []const u8, dst: []const u8 };
+        var plans = std.ArrayList(Plan).init(a);
         var it = wanted.iterator();
         while (it.next()) |entry| {
             const bin_name = entry.key_ptr.*;
-            const src = entry.value_ptr.* orelse alias_path orelse {
-                continue;
-            };
+            const src = entry.value_ptr.* orelse alias_path orelse continue;
+
+            if (!safepath.isValidId(bin_name)) return StoreError.InvalidPackageIdentifier;
+            if (isReservedBin(bin_name)) {
+                term.err("{s}error{s}: '{s}' is reserved for abv0 itself; not linking it\n", .{ term.red, term.reset, bin_name });
+                return StoreError.ReservedBinaryName;
+            }
 
             const dst_name = try std.fmt.allocPrint(a, "{s}{s}", .{ bin_name, platform.exe_suffix });
-            defer a.free(dst_name);
             const dst = try std.fs.path.join(a, &.{ self.bin_root, dst_name });
-            defer a.free(dst);
+            try plans.append(.{ .bin = bin_name, .src = src, .dst = dst });
+        }
+        if (plans.items.len == 0) return 0;
 
-            platform.setExecutable(src); // was a `chmod +x` subprocess per binary
-            const kind = platform.fastLink(src, dst) catch |e| {
-                term.err("{s}warning{s}: could not link {s}: {s}\n", .{ term.yellow, term.reset, bin_name, @errorName(e) });
+        var guard = try Guard.acquire(a, self.locks_root, owners_lock);
+        defer guard.release();
+        var owners: Owners = undefined;
+        try self.readOwners(&owners, a);
+        defer owners.deinit();
+
+        // Anything already sitting at a destination must be a link this same
+        // package made earlier. Otherwise it belongs to someone else.
+        for (plans.items) |p| {
+            if (!platform.pathExists(p.dst)) continue;
+            if (ownerOf(owners.recs.items, "bin", p.bin)) |owner| {
+                if (std.mem.eql(u8, owner, pkg.name)) continue;
+            }
+            if (opts.force) continue;
+            term.err(
+                "{s}error{s}: '{s}' already exists in {s} and was not installed by '{s}'\n  Re-run with --force to replace it.\n",
+                .{ term.red, term.reset, p.bin, self.bin_root, pkg.name },
+            );
+            return StoreError.BinaryConflict;
+        }
+
+        var linked: usize = 0;
+        for (plans.items) |p| {
+            platform.setExecutable(p.src); // was a `chmod +x` subprocess per binary
+            dropOwner(&owners.recs, "bin", p.bin);
+            const kind = platform.fastLink(p.src, p.dst) catch |e| {
+                term.err("{s}warning{s}: could not link {s}: {s}\n", .{ term.yellow, term.reset, p.bin, @errorName(e) });
                 continue;
             };
+            try owners.recs.append(.{ .kind = "bin", .name = p.bin, .pkg = pkg.name });
             linked += 1;
             if (!opts.quiet) {
-                term.print("  {s}link{s}     {s} {s}({s}){s}\n", .{ term.green, term.reset, bin_name, term.dim, kind.label(), term.reset });
+                term.print("  {s}link{s}     {s} {s}({s}){s}\n", .{ term.green, term.reset, p.bin, term.dim, kind.label(), term.reset });
             }
         }
+        try self.writeOwners(a, owners.recs.items);
         return linked;
     }
 
     fn stripExeSuffix(name: []const u8) []const u8 {
         if (std.mem.endsWith(u8, name, ".exe")) return name[0 .. name.len - 4];
         return name;
+    }
+
+    /// abv0 must never be shadowed by, or shadow itself through, a package's
+    /// executable. Checked case-insensitively, with or without `.exe`.
+    fn isReservedBin(name: []const u8) bool {
+        return std.ascii.eqlIgnoreCase(name, "abv0") or std.ascii.eqlIgnoreCase(name, "abv0.exe");
+    }
+
+    // -----------------------------------------------------------------------
+    // Ownership of linked bins and app bundles
+    // -----------------------------------------------------------------------
+
+    /// One line of `<root>/state/bin-owners`: `kind<TAB>name<TAB>package`.
+    /// `kind` is "bin" for a link in the bin directory or "app" for a bundle
+    /// in the apps directory. abv0 only replaces or removes entries it can
+    /// find here, so anything else in those directories is left alone.
+    const OwnerRec = struct {
+        kind: []const u8,
+        name: []const u8,
+        pkg: []const u8,
+    };
+
+    const Owners = struct {
+        arena: std.heap.ArenaAllocator,
+        recs: std.ArrayList(OwnerRec),
+
+        fn deinit(self: *Owners) void {
+            self.arena.deinit();
+        }
+    };
+
+    fn ownersPath(self: *const Store, a: std.mem.Allocator) ![]u8 {
+        return std.fs.path.join(a, &.{ self.root, "state", "bin-owners" });
+    }
+
+    /// Load the ownership file into `out`, which the caller owns and must
+    /// `deinit`. A missing file is an empty list. Malformed lines are skipped.
+    /// `out` is written in place: its arena's allocator is captured by address,
+    /// so it must not be moved after this call.
+    fn readOwners(self: *const Store, out: *Owners, base: std.mem.Allocator) !void {
+        out.arena = std.heap.ArenaAllocator.init(base);
+        errdefer out.arena.deinit();
+        const aa = out.arena.allocator();
+        out.recs = std.ArrayList(OwnerRec).init(aa);
+
+        const path = try self.ownersPath(aa);
+        const data = std.fs.cwd().readFileAlloc(aa, path, 4 * 1024 * 1024) catch |e| switch (e) {
+            error.FileNotFound => return,
+            else => return e,
+        };
+
+        var lines = std.mem.splitScalar(u8, data, '\n');
+        while (lines.next()) |line| {
+            var fields = std.mem.splitScalar(u8, line, '\t');
+            const kind = fields.next() orelse continue;
+            const name = fields.next() orelse continue;
+            const owner = fields.next() orelse continue;
+            if (fields.next() != null) continue;
+            try out.recs.append(.{ .kind = kind, .name = name, .pkg = owner });
+        }
+    }
+
+    /// Write the whole list to a temp file, then rename it over the old one,
+    /// so a crash leaves either the old file or the new one, never a mix.
+    fn writeOwners(self: *const Store, a: std.mem.Allocator, recs: []const OwnerRec) !void {
+        const state_dir = try std.fs.path.join(a, &.{ self.root, "state" });
+        defer a.free(state_dir);
+        try platform.makeSecureDir(state_dir);
+
+        const path = try self.ownersPath(a);
+        defer a.free(path);
+        const tmp = try std.fmt.allocPrint(a, "{s}.{x}.tmp", .{ path, std.crypto.random.int(u64) });
+        defer a.free(tmp);
+
+        writeOwnersFile(tmp, recs) catch |e| {
+            std.fs.cwd().deleteFile(tmp) catch {};
+            return e;
+        };
+        std.fs.cwd().rename(tmp, path) catch |e| {
+            std.fs.cwd().deleteFile(tmp) catch {};
+            return e;
+        };
+    }
+
+    fn writeOwnersFile(path: []const u8, recs: []const OwnerRec) !void {
+        const file = try std.fs.cwd().createFile(path, .{ .mode = platform.mode_private });
+        defer file.close();
+        var bw = std.io.bufferedWriter(file.writer());
+        for (recs) |r| try bw.writer().print("{s}\t{s}\t{s}\n", .{ r.kind, r.name, r.pkg });
+        try bw.flush();
+        try file.sync();
+    }
+
+    fn ownerOf(recs: []const OwnerRec, kind: []const u8, name: []const u8) ?[]const u8 {
+        for (recs) |r| {
+            if (std.mem.eql(u8, r.kind, kind) and std.mem.eql(u8, r.name, name)) return r.pkg;
+        }
+        return null;
+    }
+
+    fn dropOwner(recs: *std.ArrayList(OwnerRec), kind: []const u8, name: []const u8) void {
+        var i: usize = 0;
+        while (i < recs.items.len) {
+            const r = recs.items[i];
+            if (std.mem.eql(u8, r.kind, kind) and std.mem.eql(u8, r.name, name)) {
+                _ = recs.orderedRemove(i);
+            } else {
+                i += 1;
+            }
+        }
     }
 
     fn linkAppBundles(
@@ -545,27 +728,61 @@ pub const Store = struct {
         if (pkg.app_bundles.len == 0) return;
         platform.makeSecureDir(self.apps_root) catch {};
 
+        var guard = try Guard.acquire(a, self.locks_root, owners_lock);
+        defer guard.release();
+        var owners: Owners = undefined;
+        try self.readOwners(&owners, a);
+        defer owners.deinit();
+
         for (pkg.app_bundles) |app_name| {
-            if (!safepath.isSafeRelPath(app_name)) continue;
+            if (!isSafeAppName(app_name)) {
+                term.err("{s}warning{s}: {s}: refusing app bundle name '{s}'\n", .{ term.yellow, term.reset, pkg.name, app_name });
+                continue;
+            }
 
             const src = try std.fs.path.join(a, &.{ pkg_dir, app_name });
             defer a.free(src);
             const dst = try std.fs.path.join(a, &.{ self.apps_root, app_name });
             defer a.free(dst);
 
-            std.fs.cwd().deleteTree(dst) catch {};
+            // Only a bundle this package put there may be replaced.
+            if (platform.pathExists(dst)) {
+                const owner = ownerOf(owners.recs.items, "app", app_name);
+                if (owner == null or !std.mem.eql(u8, owner.?, pkg.name)) {
+                    term.err("{s}warning{s}: {s} already exists at {s} and was not installed by '{s}'; leaving it alone\n", .{ term.yellow, term.reset, app_name, dst, pkg.name });
+                    continue;
+                }
+                std.fs.cwd().deleteTree(dst) catch {};
+            }
+            dropOwner(&owners.recs, "app", app_name);
 
             // The original reported "APFS Clone" on the success branch even
             // when fastLink had fallen back to a symlink.
-            if (platform.fastLink(src, dst)) |kind| {
-                if (!opts.quiet) {
-                    term.print("  {s}app{s}      {s} {s}({s}){s}\n", .{ term.green, term.reset, app_name, term.dim, kind.label(), term.reset });
-                }
-            } else |_| {
-                platform.copyTree(src, dst) catch continue;
+            const ok = blk: {
+                if (platform.fastLink(src, dst)) |kind| {
+                    if (!opts.quiet) {
+                        term.print("  {s}app{s}      {s} {s}({s}){s}\n", .{ term.green, term.reset, app_name, term.dim, kind.label(), term.reset });
+                    }
+                    break :blk true;
+                } else |_| {}
+                platform.copyTree(src, dst) catch break :blk false;
                 if (!opts.quiet) term.print("  {s}app{s}      {s} {s}(copy){s}\n", .{ term.green, term.reset, app_name, term.dim, term.reset });
-            }
+                break :blk true;
+            };
+            if (!ok) continue;
+            try owners.recs.append(.{ .kind = "app", .name = app_name, .pkg = pkg.name });
         }
+        try self.writeOwners(a, owners.recs.items);
+    }
+
+    /// A bundle name abv0 may create or delete under the apps directory: one
+    /// plain `*.app` path component, with no separators, drive colons, control
+    /// characters or traversal.
+    fn isSafeAppName(name: []const u8) bool {
+        if (name.len <= ".app".len) return false;
+        if (!std.mem.endsWith(u8, name, ".app")) return false;
+        if (std.mem.indexOfAny(u8, name, "/\\:\t\r\n\x00") != null) return false;
+        return safepath.isSafeRelPath(name);
     }
 
     // -----------------------------------------------------------------------
@@ -641,23 +858,41 @@ pub const Store = struct {
     pub fn uninstall(self: *Store, a: std.mem.Allocator, pkg: Package) !bool {
         var removed = false;
 
-        for (pkg.bin) |bin_name| {
-            const dst_name = try std.fmt.allocPrint(a, "{s}{s}", .{ bin_name, platform.exe_suffix });
-            defer a.free(dst_name);
-            const p = try std.fs.path.join(a, &.{ self.bin_root, dst_name });
-            defer a.free(p);
-            if (std.fs.cwd().deleteFile(p)) |_| {
-                removed = true;
-            } else |_| {}
-        }
+        // Remove only what this package linked or copied in, as recorded in the
+        // ownership file. Bins are not taken from pkg.bin: a link belongs to
+        // whoever created it, not to whatever the registry says now.
+        {
+            var guard = try Guard.acquire(a, self.locks_root, owners_lock);
+            defer guard.release();
+            var owners: Owners = undefined;
+            try self.readOwners(&owners, a);
+            defer owners.deinit();
 
-        for (pkg.app_bundles) |app_name| {
-            if (!safepath.isSafeRelPath(app_name)) continue;
-            const p = try std.fs.path.join(a, &.{ self.apps_root, app_name });
-            defer a.free(p);
-            if (std.fs.cwd().deleteTree(p)) |_| {
-                removed = true;
-            } else |_| {}
+            var i: usize = 0;
+            while (i < owners.recs.items.len) {
+                const r = owners.recs.items[i];
+                if (!std.mem.eql(u8, r.pkg, pkg.name)) {
+                    i += 1;
+                    continue;
+                }
+                if (std.mem.eql(u8, r.kind, "bin") and safepath.isValidId(r.name)) {
+                    const dst_name = try std.fmt.allocPrint(a, "{s}{s}", .{ r.name, platform.exe_suffix });
+                    defer a.free(dst_name);
+                    const p = try std.fs.path.join(a, &.{ self.bin_root, dst_name });
+                    defer a.free(p);
+                    if (std.fs.cwd().deleteFile(p)) |_| {
+                        removed = true;
+                    } else |_| {}
+                } else if (std.mem.eql(u8, r.kind, "app") and isSafeAppName(r.name)) {
+                    const p = try std.fs.path.join(a, &.{ self.apps_root, r.name });
+                    defer a.free(p);
+                    if (std.fs.cwd().deleteTree(p)) |_| {
+                        removed = true;
+                    } else |_| {}
+                }
+                _ = owners.recs.orderedRemove(i);
+            }
+            try self.writeOwners(a, owners.recs.items);
         }
 
         for (pkg.platforms) |plat| {
@@ -702,6 +937,8 @@ pub const Store = struct {
             while (try it.next()) |entry| {
                 const p = try std.fs.path.join(a, &.{ self.shells_root, entry.name });
                 defer a.free(p);
+                // A sandbox may belong to another abv0 that is still running.
+                if (!shellIsStale(p, entry.name)) continue;
                 if (std.fs.cwd().deleteTree(p)) |_| reclaimed += 1 else |_| {}
             }
         } else |_| {}
@@ -713,6 +950,32 @@ pub const Store = struct {
         if (std.fs.cwd().deleteTree(legacy)) |_| reclaimed += 1 else |_| {}
 
         return reclaimed;
+    }
+
+    /// Whether an ephemeral sandbox is safe to delete. Names are
+    /// `shell-<time>-<pid>-<random>`, and the pid decides: it is stale once that
+    /// process has exited. Names without a pid, and every name on Windows, fall
+    /// back to age: untouched for more than 24 hours.
+    fn shellIsStale(dir_path: []const u8, dir_name: []const u8) bool {
+        if (platform.is_posix) {
+            if (shellPid(dir_name)) |pid| return !platform.processAlive(pid);
+        }
+        const st = std.fs.cwd().statFile(dir_path) catch return false;
+        const age = std.time.nanoTimestamp() - st.mtime;
+        return age > 24 * std.time.ns_per_hour;
+    }
+
+    /// The pid embedded by `shellIsStale`'s naming scheme, or null for the
+    /// older `shell-<time>-<random>` form.
+    fn shellPid(dir_name: []const u8) ?i32 {
+        if (!std.mem.startsWith(u8, dir_name, "shell-")) return null;
+        var parts = std.mem.splitScalar(u8, dir_name["shell-".len..], '-');
+        _ = parts.next() orelse return null; // time
+        const pid_text = parts.next() orelse return null;
+        _ = parts.next() orelse return null; // random suffix
+        if (parts.next() != null) return null;
+        const pid = std.fmt.parseInt(i32, pid_text, 10) catch return null;
+        return if (pid > 0) pid else null;
     }
 
     pub fn resetAll(self: *Store, a: std.mem.Allocator, reg: *const registry.Registry, platform_name: []const u8) !usize {
@@ -1203,7 +1466,7 @@ pub const Store = struct {
             try pkgs.append(try self.ensureInstalled(a, reg, n, platform_name, opts));
         }
 
-        const dir_name = try std.fmt.allocPrint(a, "shell-{d}-{x}", .{ std.time.timestamp(), std.crypto.random.int(u32) });
+        const dir_name = try std.fmt.allocPrint(a, "shell-{d}-{d}-{x}", .{ std.time.timestamp(), platform.processId(), std.crypto.random.int(u32) });
         defer a.free(dir_name);
         const base = try std.fs.path.join(a, &.{ self.shells_root, dir_name });
         defer a.free(base);
@@ -1525,7 +1788,12 @@ pub const Store = struct {
 
         if (download_url == null) {
             // The original hardcoded refs/heads/master, which 404s on every
-            // repository that has since renamed its default branch.
+            // repository that has since renamed its default branch. The name
+            // comes from the API response and goes into a URL, so check it.
+            if (!isSafeBranch(default_branch)) {
+                term.err("{s}error{s}: GitHub reported an unsafe default branch for '{s}'\n", .{ term.red, term.reset, full_name });
+                return StoreError.UnsafeDefaultBranch;
+            }
             download_url = try std.fmt.allocPrint(
                 a,
                 "https://github.com/{s}/archive/refs/heads/{s}.tar.gz",
@@ -1573,6 +1841,19 @@ pub const Store = struct {
         return slashes == 1 and s[0] != '/' and s[s.len - 1] != '/';
     }
 
+    /// A branch name that may be spliced into a download URL: 1..255 bytes of
+    /// [A-Za-z0-9._/-], no "..", and not starting with '-' or '/'.
+    fn isSafeBranch(b: []const u8) bool {
+        if (b.len == 0 or b.len > 255) return false;
+        if (b[0] == '-' or b[0] == '/') return false;
+        if (std.mem.indexOf(u8, b, "..") != null) return false;
+        for (b) |c| switch (c) {
+            'a'...'z', 'A'...'Z', '0'...'9', '-', '_', '.', '/' => {},
+            else => return false,
+        };
+        return true;
+    }
+
     fn assetMatchesPlatform(asset_name: []const u8, platform_name: []const u8) bool {
         const want_macos = std.mem.indexOf(u8, platform_name, "macos") != null;
         const want_linux = std.mem.indexOf(u8, platform_name, "linux") != null;
@@ -1618,7 +1899,7 @@ test "storeDirName rejects hostile identifiers" {
 
     const ok = try Store.storeDirName(a, .{ .name = "jq", .version = "1.7.1" }, "x86_64-linux");
     defer a.free(ok);
-    try testing.expectEqualStrings("jq-1.7.1-x86_64-linux", ok);
+    try testing.expectEqualStrings("jq@1.7.1@x86_64-linux", ok);
 
     try testing.expectError(
         StoreError.InvalidPackageIdentifier,
@@ -1715,10 +1996,14 @@ test "installedVersions parses store directory names" {
     };
     defer s.deinit();
 
-    try tmp.dir.makePath("jq-1.6-x86_64-linux");
-    try tmp.dir.makePath("jq-1.7.1-x86_64-linux");
-    try tmp.dir.makePath("jq-1.7.1-aarch64-macos");
-    try tmp.dir.makePath("other-2.0-x86_64-linux");
+    try tmp.dir.makePath("jq@1.6@x86_64-linux");
+    try tmp.dir.makePath("jq@1.7.1@x86_64-linux");
+    try tmp.dir.makePath("jq@1.7.1@aarch64-macos");
+    try tmp.dir.makePath("jq-extra@9.0@x86_64-linux");
+    try tmp.dir.makePath("other@2.0@x86_64-linux");
+    // Old-format and temp directories are ignored, never matched.
+    try tmp.dir.makePath("jq-9.1-x86_64-linux");
+    try tmp.dir.makePath("jq@9.2@x86_64-linux.abcd.tmp");
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -1731,4 +2016,188 @@ test "installedVersions parses store directory names" {
         if (registry.compareVersions(f.version, newest) == .gt) newest = f.version;
     }
     try testing.expectEqualStrings("1.7.1", newest);
+}
+
+/// A Store whose every directory lives under a fresh temp dir.
+fn testStore(tmp: *testing.TmpDir) !Store {
+    const a = testing.allocator;
+    const root = try tmp.dir.realpathAlloc(a, ".");
+    defer a.free(root);
+    const s = Store{
+        .allocator = a,
+        .home = try a.dupe(u8, root),
+        .root = try a.dupe(u8, root),
+        .store_root = try std.fs.path.join(a, &.{ root, "store" }),
+        .bin_root = try std.fs.path.join(a, &.{ root, "bin" }),
+        .shells_root = try std.fs.path.join(a, &.{ root, "shells" }),
+        .apps_root = try std.fs.path.join(a, &.{ root, "apps" }),
+        .registry_root = try std.fs.path.join(a, &.{ root, "registry" }),
+        .locks_root = try std.fs.path.join(a, &.{ root, "locks" }),
+    };
+    for ([_][]const u8{ s.store_root, s.bin_root, s.shells_root, s.apps_root, s.registry_root, s.locks_root }) |d| {
+        try std.fs.cwd().makePath(d);
+    }
+    return s;
+}
+
+test "store dir names round-trip and cannot collide" {
+    const a = testing.allocator;
+    const d1 = try Store.storeDirName(a, .{ .name = "a-1", .version = "2" }, "x86_64-linux");
+    defer a.free(d1);
+    const d2 = try Store.storeDirName(a, .{ .name = "a", .version = "1-2" }, "x86_64-linux");
+    defer a.free(d2);
+
+    try testing.expectEqualStrings("a-1@2@x86_64-linux", d1);
+    try testing.expect(!std.mem.eql(u8, d1, d2));
+
+    const p = Store.parseStoreDirName(d1) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("a-1", p.name);
+    try testing.expectEqualStrings("2", p.version);
+    try testing.expectEqualStrings("x86_64-linux", p.platform);
+
+    const q = Store.parseStoreDirName(d2) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("a", q.name);
+    try testing.expectEqualStrings("1-2", q.version);
+
+    try testing.expect(Store.parseStoreDirName("jq-1.7.1-x86_64-linux") == null);
+    try testing.expect(Store.parseStoreDirName("jq@1.7.1@x86_64-linux.abc.tmp") == null);
+}
+
+test "uninstall foo leaves foo-bar alone" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var s = try testStore(&tmp);
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try tmp.dir.makePath("store/foo@1.0@x86_64-linux");
+    try tmp.dir.makePath("store/foo-bar@1.0@x86_64-linux");
+    try tmp.dir.writeFile(.{ .sub_path = "bin/foo", .data = "foo" });
+    try tmp.dir.writeFile(.{ .sub_path = "bin/foo-bar", .data = "foo-bar" });
+    const recs = [_]Store.OwnerRec{
+        .{ .kind = "bin", .name = "foo", .pkg = "foo" },
+        .{ .kind = "bin", .name = "foo-bar", .pkg = "foo-bar" },
+    };
+    try s.writeOwners(a, &recs);
+
+    const plats = [_]registry.PlatformInfo{.{ .name = "x86_64-linux" }};
+    const pkg = Package{ .name = "foo", .version = "1.0", .platforms = &plats };
+    try testing.expect(try s.uninstall(a, pkg));
+
+    try tmp.dir.access("store/foo-bar@1.0@x86_64-linux", .{});
+    try tmp.dir.access("bin/foo-bar", .{});
+    try testing.expectError(error.FileNotFound, tmp.dir.access("store/foo@1.0@x86_64-linux", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.access("bin/foo", .{}));
+}
+
+test "bin conflicts are refused unless forced" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var s = try testStore(&tmp);
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try tmp.dir.makePath("store/tool@1.0@x86_64-linux");
+    try tmp.dir.writeFile(.{ .sub_path = "store/tool@1.0@x86_64-linux/tool", .data = "new" });
+    try tmp.dir.writeFile(.{ .sub_path = "bin/tool", .data = "user's own file" });
+
+    const pkg_dir = try std.fs.path.join(a, &.{ s.store_root, "tool@1.0@x86_64-linux" });
+    const plats = [_]registry.PlatformInfo{.{ .name = "x86_64-linux" }};
+    const bins = [_][]const u8{"tool"};
+    const pkg = Package{ .name = "tool", .version = "1.0", .bin = &bins, .platforms = &plats };
+
+    try testing.expectError(StoreError.BinaryConflict, s.linkBinaries(a, pkg, plats[0], pkg_dir, .{ .quiet = true }));
+    const kept = try tmp.dir.readFileAlloc(a, "bin/tool", 64);
+    try testing.expectEqualStrings("user's own file", kept);
+
+    try testing.expectEqual(@as(usize, 1), try s.linkBinaries(a, pkg, plats[0], pkg_dir, .{ .quiet = true, .force = true }));
+    // Now recorded as ours, so a plain re-link is allowed.
+    try testing.expectEqual(@as(usize, 1), try s.linkBinaries(a, pkg, plats[0], pkg_dir, .{ .quiet = true }));
+
+    // Owned by a different package: refused again without force.
+    const other = [_]Store.OwnerRec{.{ .kind = "bin", .name = "tool", .pkg = "other" }};
+    try s.writeOwners(a, &other);
+    try testing.expectError(StoreError.BinaryConflict, s.linkBinaries(a, pkg, plats[0], pkg_dir, .{ .quiet = true }));
+}
+
+test "a package can never link a bin named abv0" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var s = try testStore(&tmp);
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try tmp.dir.makePath("store/evil@1.0@x86_64-linux");
+    try tmp.dir.writeFile(.{ .sub_path = "store/evil@1.0@x86_64-linux/ABV0", .data = "x" });
+
+    const pkg_dir = try std.fs.path.join(a, &.{ s.store_root, "evil@1.0@x86_64-linux" });
+    const plats = [_]registry.PlatformInfo{.{ .name = "x86_64-linux" }};
+    const bins = [_][]const u8{"ABV0"};
+    const pkg = Package{ .name = "evil", .version = "1.0", .bin = &bins, .platforms = &plats };
+
+    try testing.expectError(StoreError.ReservedBinaryName, s.linkBinaries(a, pkg, plats[0], pkg_dir, .{ .quiet = true }));
+    try testing.expectError(error.FileNotFound, tmp.dir.access("bin/ABV0", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.access("bin/abv0", .{}));
+}
+
+test "app bundles must end in .app and are never replaced unless abv0 installed them" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var s = try testStore(&tmp);
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try tmp.dir.makePath("store/evil@1.0@x86_64-linux/evil");
+    try tmp.dir.writeFile(.{ .sub_path = "store/evil@1.0@x86_64-linux/evil/payload", .data = "x" });
+    try tmp.dir.makePath("apps/evil");
+    try tmp.dir.writeFile(.{ .sub_path = "apps/evil/keep", .data = "precious" });
+    try tmp.dir.makePath("apps/Other.app");
+    try tmp.dir.writeFile(.{ .sub_path = "apps/Other.app/keep", .data = "precious" });
+
+    const pkg_dir = try std.fs.path.join(a, &.{ s.store_root, "evil@1.0@x86_64-linux" });
+    const plats = [_]registry.PlatformInfo{.{ .name = "x86_64-linux" }};
+
+    // Not *.app, and a traversal name: both refused, nothing deleted.
+    const bad = [_][]const u8{ "evil", "../x.app" };
+    const pkg_bad = Package{ .name = "evil", .version = "1.0", .app_bundles = &bad, .platforms = &plats };
+    try s.linkAppBundles(a, pkg_bad, pkg_dir, .{ .quiet = true });
+    const kept = try tmp.dir.readFileAlloc(a, "apps/evil/keep", 64);
+    try testing.expectEqualStrings("precious", kept);
+
+    // A *.app that is there but was not installed by this package is left alone.
+    const foreign = [_][]const u8{"Other.app"};
+    const pkg_foreign = Package{ .name = "evil", .version = "1.0", .app_bundles = &foreign, .platforms = &plats };
+    try s.linkAppBundles(a, pkg_foreign, pkg_dir, .{ .quiet = true });
+    const kept2 = try tmp.dir.readFileAlloc(a, "apps/Other.app/keep", 64);
+    try testing.expectEqualStrings("precious", kept2);
+}
+
+test "default_branch must be a plain git ref name" {
+    try testing.expect(Store.isSafeBranch("main"));
+    try testing.expect(Store.isSafeBranch("release/v1.2"));
+    try testing.expect(Store.isSafeBranch("feature.x_y-z"));
+    try testing.expect(Store.isSafeBranch("a" ** 255));
+    try testing.expect(!Store.isSafeBranch(""));
+    try testing.expect(!Store.isSafeBranch("a" ** 256));
+    try testing.expect(!Store.isSafeBranch("-x"));
+    try testing.expect(!Store.isSafeBranch("/main"));
+    try testing.expect(!Store.isSafeBranch("a..b"));
+    try testing.expect(!Store.isSafeBranch("a b"));
+    try testing.expect(!Store.isSafeBranch("main?x=1"));
+    try testing.expect(!Store.isSafeBranch("a\n"));
+}
+
+test "shell sandbox names carry a pid only in the new form" {
+    try testing.expectEqual(@as(?i32, 4242), Store.shellPid("shell-1700000000-4242-beef"));
+    try testing.expectEqual(@as(?i32, null), Store.shellPid("shell-1700000000-beef"));
+    try testing.expectEqual(@as(?i32, null), Store.shellPid("jq@1.0@x86_64-linux"));
+    try testing.expect(platform.processAlive(platform.processId()));
 }

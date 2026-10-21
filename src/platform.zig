@@ -137,6 +137,46 @@ pub fn makeSecureDir(path: []const u8) !void {
     chmodPath(path, 0o700);
 }
 
+/// `makeSecureDir` for directories touched on every run. The chmod is only
+/// paid when the directory is missing or does not already have mode 0700.
+pub fn ensureSecureDir(path: []const u8) !void {
+    if (comptime is_posix) {
+        if (std.fs.cwd().statFile(path)) |st| {
+            if (st.kind == .directory and (st.mode & 0o777) == 0o700) return;
+        } else |_| {}
+    }
+    try makeSecureDir(path);
+}
+
+/// True when anything exists at `path`, including a dangling symlink.
+pub fn pathExists(path: []const u8) bool {
+    if (std.fs.cwd().statFile(path)) |_| return true else |_| {}
+    if (comptime is_posix) {
+        var buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        if (std.posix.readlink(path, &buf)) |_| return true else |e| return e != error.FileNotFound;
+    }
+    return false;
+}
+
+extern "c" fn getpid() c_int;
+
+/// Id of the current process, embedded in ephemeral directory names so that
+/// cleanup can tell whether the owner is still running. 0 on Windows.
+pub fn processId() i32 {
+    if (comptime is_windows) return 0;
+    if (comptime builtin.os.tag == .linux) return std.os.linux.getpid();
+    return getpid();
+}
+
+/// Whether process `pid` exists. Unclear answers (such as EPERM) count as
+/// alive, so a live process's directory is never reclaimed by mistake.
+pub fn processAlive(pid: i32) bool {
+    if (comptime is_posix) {
+        std.posix.kill(pid, 0) catch |e| return e != error.ProcessNotFound;
+    }
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Fast linking
 // ---------------------------------------------------------------------------
@@ -177,10 +217,11 @@ pub fn fastLink(src_path: []const u8, dst_path: []const u8) !LinkKind {
     if (src_path.len >= std.fs.MAX_PATH_BYTES or dst_path.len >= std.fs.MAX_PATH_BYTES)
         return error.NameTooLong;
 
-    // Every strategy below requires the destination to be absent.
+    // Every strategy below requires the destination to be absent. A directory
+    // here is never removed recursively on the caller's behalf.
     std.fs.cwd().deleteFile(dst_path) catch |e| switch (e) {
         error.FileNotFound => {},
-        error.IsDir => std.fs.cwd().deleteTree(dst_path) catch {},
+        error.IsDir => return error.DestinationIsDirectory,
         else => {},
     };
 
