@@ -14,11 +14,17 @@ const archive = @import("archive.zig");
 const bloom = @import("bloom.zig");
 const wal = @import("wal.zig");
 const sign = @import("sign.zig");
+const cmds_extra = @import("cmds_extra.zig");
 
 pub const version = "2.0.0";
 
-const registry_url = "https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/packages/index.json";
-const registry_sig_url = registry_url ++ ".sig";
+const default_registry_url = "https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/packages/index.json";
+
+/// ABV0_REGISTRY_URL points abv0 at a mirror. The manifest is still checked
+/// against the compiled-in key, so a mirror can serve it but not alter it.
+fn registryUrl() []const u8 {
+    return platform.registryUrlOverride() orelse default_registry_url;
+}
 const issues_url = "https://github.com/gugu8intel-i9/abv0/issues/new";
 
 // ---------------------------------------------------------------------------
@@ -47,6 +53,7 @@ const Args = struct {
     report_malware: bool = false,
     /// `list --installed`: show what is in the store instead of the registry.
     installed: bool = false,
+    check: bool = false,
     /// `--dry-run`: describe what would change and change nothing.
     dry_run: bool = false,
     /// `-q` / `--quiet`: no progress or summary lines. Errors still print.
@@ -123,6 +130,8 @@ fn parseArgsDiag(allocator: std.mem.Allocator, argv: []const []const u8, diag: *
             args.report_malware = true;
         } else if (std.mem.eql(u8, arg, "--installed")) {
             args.installed = true;
+        } else if (std.mem.eql(u8, arg, "--check")) {
+            args.check = true;
         } else if (std.mem.eql(u8, arg, "--dry-run")) {
             args.dry_run = true;
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
@@ -434,6 +443,47 @@ const commands = [_]Command{
         .example = "abv0 report --malware jq",
     },
     .{
+        .name = "pin",
+        .args = "<pkg>",
+        .summary = "Hold a package at its installed version; `upgrade` skips it.",
+        .example = "abv0 pin jq",
+    },
+    .{
+        .name = "unpin",
+        .args = "<pkg>",
+        .summary = "Let `upgrade` update a pinned package again.",
+        .example = "abv0 unpin jq",
+    },
+    .{
+        .name = "pinned",
+        .summary = "List pinned packages.",
+        .example = "abv0 pinned",
+    },
+    .{
+        .name = "cleanup",
+        .summary = "Remove old versions and stale temporary files, keeping the newest install.",
+        .flags = &.{dry_run_flag},
+        .example = "abv0 cleanup --dry-run",
+    },
+    .{
+        .name = "completions",
+        .args = "<bash|zsh|fish|pwsh>",
+        .summary = "Print a shell completion script.",
+        .example = "abv0 completions zsh > ~/.zfunc/_abv0",
+    },
+    .{
+        .name = "which",
+        .args = "<bin>",
+        .summary = "Show which package owns a command in abv0's bin directory.",
+        .example = "abv0 which rg",
+    },
+    .{
+        .name = "self-update",
+        .summary = "Update abv0 itself from a signed release.",
+        .flags = &.{.{ .name = "--check", .help = "Only report whether an update exists" }},
+        .example = "abv0 self-update --check",
+    },
+    .{
         .name = "version",
         .summary = "Print the version and platform.",
         .example = "abv0 version",
@@ -491,6 +541,10 @@ fn renderUsage(w: anytype) !void {
         \\  list [--installed]      List registry packages, or what is installed
         \\  search <query>          Search the registry
         \\  info <pkg>              Show package metadata
+        \\  pin <pkg>               Hold a package at its installed version
+        \\  unpin <pkg>             Let upgrade update it again
+        \\  pinned                  List pinned packages
+        \\  which <bin>             Show which package owns a command
         \\
     );
     try heading(w, "EXECUTION");
@@ -513,6 +567,9 @@ fn renderUsage(w: anytype) !void {
         \\  detect <pkg>            Scan an installed package for malware patterns
         \\  benchmark               Measure local store and index performance
         \\  gc                      Remove temporary files and stale sandboxes
+        \\  cleanup                 Remove old versions, keeping the newest
+        \\  completions <shell>     Print a bash, zsh, fish or pwsh completion script
+        \\  self-update [--check]   Update abv0 from a signed release
         \\  reset                   Uninstall everything
         \\  report [--bug]          Open a prefilled GitHub issue
         \\  version                 Print the version
@@ -529,7 +586,7 @@ fn renderUsage(w: anytype) !void {
         \\  --allow-unverified      Permit installs without a verified checksum
         \\  --micro-split           Parallel ranged download for large assets
         \\  --force                 Overwrite output files and replace conflicting bin links
-        \\  --dry-run               Show what install, upgrade, uninstall or bundle would do; change nothing
+        \\  --dry-run               Show what install, upgrade, uninstall, bundle or cleanup would do; change nothing
         \\  --json                  Machine-readable output (list, search, info, outdated, install, doctor)
         \\  --installed             With list: show what is installed
         \\  --bug, --malware        With report: file a bug report, or a suspicious-package report
@@ -745,11 +802,14 @@ fn storeUpdatedAt(a: std.mem.Allocator, st: *const store.Store, value: []const u
 /// Download the manifest and its signature to staging names. Nothing is
 /// published here.
 fn fetchManifestPair(a: std.mem.Allocator, manifest_tmp: []const u8, sig_tmp: []const u8) !void {
-    net.download(a, registry_url, manifest_tmp, .{}) catch |e| {
+    const url = registryUrl();
+    const sig_url = try std.fmt.allocPrint(a, "{s}.sig", .{url});
+    defer a.free(sig_url);
+    net.download(a, url, manifest_tmp, .{}) catch |e| {
         term.err("{s}error{s}: could not download registry manifest: {s}\n", .{ term.red, term.reset, explain(e) });
         return e;
     };
-    net.download(a, registry_sig_url, sig_tmp, .{}) catch |e| {
+    net.download(a, sig_url, sig_tmp, .{}) catch |e| {
         term.err("{s}error{s}: could not download manifest signature: {s}\n", .{ term.red, term.reset, explain(e) });
         return e;
     };
@@ -1192,7 +1252,7 @@ fn noteUnknownName(a: std.mem.Allocator, reg: *const registry.Registry, name: []
 }
 
 fn supportsDryRun(cmd: []const u8) bool {
-    const names = [_][]const u8{ "install", "upgrade", "uninstall", "bundle" };
+    const names = [_][]const u8{ "install", "upgrade", "uninstall", "bundle", "cleanup" };
     for (names) |n| {
         if (std.mem.eql(u8, n, cmd)) return true;
     }
@@ -1518,6 +1578,18 @@ fn run(base: std.mem.Allocator, a: std.mem.Allocator) !u8 {
     if (std.mem.eql(u8, cmd, "report")) {
         return cmdReport(a, &args, platform_name);
     }
+    if (std.mem.eql(u8, cmd, "pinned")) return cmds_extra.cmdPinned(a, &st, null, args.rest.items);
+    if (std.mem.eql(u8, cmd, "unpin")) return cmds_extra.cmdUnpin(a, &st, null, args.rest.items);
+    if (std.mem.eql(u8, cmd, "completions")) return cmds_extra.cmdCompletions(a, &st, null, args.rest.items);
+    if (std.mem.eql(u8, cmd, "which")) return cmds_extra.cmdWhich(a, &st, null, args.rest.items);
+    if (std.mem.eql(u8, cmd, "cleanup")) {
+        const extra: []const []const u8 = if (output.dry_run) &.{"--dry-run"} else &.{};
+        return cmds_extra.cmdCleanup(a, &st, null, if (args.rest.items.len > 0) args.rest.items else extra);
+    }
+    if (std.mem.eql(u8, cmd, "self-update")) {
+        const extra: []const []const u8 = if (args.check) &.{"--check"} else &.{};
+        return cmds_extra.cmdSelfUpdate(a, &st, null, if (args.rest.items.len > 0) args.rest.items else extra);
+    }
     if (std.mem.eql(u8, cmd, "list") and args.installed) {
         return writeInstalled(term.writer(), a, &st, platform_name, args.json);
     }
@@ -1534,6 +1606,7 @@ fn run(base: std.mem.Allocator, a: std.mem.Allocator) !u8 {
         try loadRegistry(base, &st, args.allow_unsigned_manifest);
     defer reg.deinit();
 
+    if (std.mem.eql(u8, cmd, "pin")) return cmds_extra.cmdPin(a, &st, &reg, args.rest.items);
     if (std.mem.eql(u8, cmd, "list")) return cmdList(&reg, args.json);
     if (std.mem.eql(u8, cmd, "search")) return cmdSearch(&reg, args.rest.items, args.json);
     if (std.mem.eql(u8, cmd, "info")) return cmdInfo(a, &reg, args.rest.items, args.json);
@@ -1808,7 +1881,14 @@ fn cmdUpgrade(
     if (rest.len == 0) {
         const list = try st.getOutdated(a, reg, platform_name);
         defer a.free(list);
-        for (list) |e| try targets.append(e.pkg);
+        for (list) |e| {
+            // `upgrade` with no names respects pins; naming a package overrides it.
+            if (cmds_extra.isPinned(st, a, e.pkg.name)) {
+                say("  {s}pinned{s}   {} stays at {}\n", .{ term.dim, term.reset, safe(e.pkg.name), safe(e.installed) });
+                continue;
+            }
+            try targets.append(e.pkg);
+        }
     } else {
         var unknown: usize = 0;
         for (rest) |name| {
@@ -2005,7 +2085,7 @@ fn cmdUpdate(a: std.mem.Allocator, st: *store.Store, allow_unsigned: bool) !u8 {
     defer std.fs.cwd().deleteFile(tmp) catch {};
     defer std.fs.cwd().deleteFile(tmp_sig) catch {};
 
-    say("fetching {s}\n", .{registry_url});
+    say("fetching {s}\n", .{registryUrl()});
     fetchManifestPair(a, tmp, tmp_sig) catch return 1;
 
     // Nothing below may touch the working registry until the signature and
@@ -2538,4 +2618,5 @@ comptime {
     _ = @import("abvindex.zig");
     _ = @import("net.zig");
     _ = @import("store.zig");
+    _ = @import("cmds_extra.zig");
 }

@@ -28,7 +28,9 @@ pub var dim: []const u8 = "";
 
 /// `no_color` forces colour off regardless of TTY state (used by --no-color).
 pub fn init(no_color: bool) void {
-    const stdout_file = std.io.getStdOut();
+    // Under `zig build test` stdout is the build runner's control channel, so
+    // output from code under test goes to stderr instead of corrupting it.
+    const stdout_file = if (builtin.is_test) std.io.getStdErr() else std.io.getStdOut();
     buffered = .{ .unbuffered_writer = stdout_file.writer() };
     ready = true;
 
