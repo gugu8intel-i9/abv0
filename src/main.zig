@@ -366,8 +366,11 @@ fn fetchManifestPair(a: std.mem.Allocator, manifest_tmp: []const u8, sig_tmp: []
 /// The manifest is always downloaded: a file in the current directory is never
 /// used. Download to unique temporary names, verify, validate, and rename into
 /// place, so a reader sees either no file or a complete, verified one.
-fn ensureRegistryFile(base: std.mem.Allocator, st: *const store.Store, json_path: []const u8, allow_unsigned: bool) !void {
-    if (std.fs.cwd().access(json_path, .{})) |_| return else |_| {}
+///
+/// Returns the registry it parsed while validating, so the caller does not parse
+/// the same bytes again. Returns null when a manifest was already in place.
+fn ensureRegistryFile(base: std.mem.Allocator, st: *const store.Store, json_path: []const u8, allow_unsigned: bool) !?registry.Registry {
+    if (std.fs.cwd().access(json_path, .{})) |_| return null else |_| {}
 
     // Scratch for paths and the verified manifest. The caller's allocator is
     // long-lived (it is the GPA in `main`), so nothing is left in it.
@@ -390,12 +393,15 @@ fn ensureRegistryFile(base: std.mem.Allocator, st: *const store.Store, json_path
     if (updated_at) |u| try checkReplay(a, st, u);
 
     // Never publish something the parser would reject: a corrupt download must
-    // not become the registry every later command reads.
-    var probe = try registry.loadFromJsonFile(a, tmp_path, null);
-    probe.deinit();
+    // not become the registry every later command reads. The parse is kept
+    // (not freed) because it is the registry the caller wants. It lives in
+    // `base`, not the scratch arena, so it outlives this function.
+    var fresh = try registry.loadFromJsonFile(base, tmp_path, null);
+    errdefer fresh.deinit();
 
     try std.fs.cwd().rename(tmp_path, json_path);
     if (updated_at) |u| try storeUpdatedAt(a, st, u);
+    return fresh;
 }
 
 fn loadRegistry(a: std.mem.Allocator, st: *const store.Store, allow_unsigned: bool) !registry.Registry {
@@ -403,10 +409,18 @@ fn loadRegistry(a: std.mem.Allocator, st: *const store.Store, allow_unsigned: bo
     defer a.free(paths[0]);
     defer a.free(paths[1]);
 
-    ensureRegistryFile(a, st, paths[0], allow_unsigned) catch |e| {
+    const fresh = ensureRegistryFile(a, st, paths[0], allow_unsigned) catch |e| {
         term.err("{s}error{s}: no package registry available: {s}\n", .{ term.red, term.reset, @errorName(e) });
         return e;
     };
+    if (fresh) |parsed| {
+        // Just downloaded and already parsed: build the index from that
+        // registry rather than parsing the same file again.
+        var reg = parsed;
+        const stamp = try abvindex.Stamp.ofFile(paths[0]);
+        abvindex.build(a, &reg, paths[1], stamp) catch {};
+        return reg;
+    }
 
     return abvindex.loadCached(a, paths[0], paths[1]) catch |e| {
         term.err("{s}error{s}: could not load registry: {s}\n", .{ term.red, term.reset, @errorName(e) });
@@ -437,59 +451,233 @@ fn loadExplicitRegistry(base: std.mem.Allocator, path: []const u8, allow_unsigne
 }
 
 // ---------------------------------------------------------------------------
-// Parallel install
+// Dependency-ordered parallel install
 // ---------------------------------------------------------------------------
 
+/// Wave number for each package. `pkgs` must list every dependency before its
+/// dependents, as `registry.resolveOrder` returns them. A package's wave is one
+/// more than the highest wave of its dependencies that are in `pkgs`, so it runs
+/// after everything it depends on, and packages in one wave are independent.
+/// Dependencies outside `pkgs` are not waited for.
+fn levelize(a: std.mem.Allocator, pkgs: []const registry.Package) ![]usize {
+    var index = std.StringHashMap(usize).init(a);
+    defer index.deinit();
+    for (pkgs, 0..) |pkg, i| try index.put(pkg.name, i);
+
+    const levels = try a.alloc(usize, pkgs.len);
+    errdefer a.free(levels);
+    @memset(levels, 0);
+
+    for (pkgs, 0..) |pkg, i| {
+        for (pkg.deps) |dep| {
+            const j = index.get(dep) orelse continue;
+            if (j >= i) return error.NotDependencyOrdered;
+            levels[i] = @max(levels[i], levels[j] + 1);
+        }
+    }
+    return levels;
+}
+
+/// What to install, dependencies first: `names[i]` runs in wave `levels[i]`.
+const Plan = struct {
+    names: []const []const u8,
+    levels: []const usize,
+};
+
+/// Plan the installation of `roots` and what they depend on. Names the registry
+/// does not know go last, in a wave of their own. If the registry graph cannot
+/// be ordered (a cycle, or an unknown dependency), everything goes in one wave.
+fn planInstall(a: std.mem.Allocator, reg: *const registry.Registry, roots: []const []const u8) !Plan {
+    var known = std.ArrayList([]const u8).init(a);
+    defer known.deinit();
+    var unknown = std.ArrayList([]const u8).init(a);
+    defer unknown.deinit();
+    var seen = std.StringHashMap(void).init(a);
+    defer seen.deinit();
+
+    for (roots) |root| {
+        if (store.Store.resolveRequest(reg, root)) |pkg| {
+            if (try seen.fetchPut(pkg.name, {}) == null) try known.append(pkg.name);
+        } else {
+            if (try seen.fetchPut(root, {}) == null) try unknown.append(root);
+        }
+    }
+
+    var names = std.ArrayList([]const u8).init(a);
+    errdefer names.deinit();
+    var levels = std.ArrayList(usize).init(a);
+    errdefer levels.deinit();
+
+    if (known.items.len > 0) {
+        if (registry.resolveOrder(a, reg, known.items)) |ordered| {
+            defer a.free(ordered);
+            const wave = try levelize(a, ordered);
+            defer a.free(wave);
+            for (ordered, wave) |pkg, lv| {
+                try names.append(pkg.name);
+                try levels.append(lv);
+            }
+        } else |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => {
+                term.err("{s}warning{s}: no dependency order ({s}); installing without one\n", .{ term.yellow, term.reset, @errorName(err) });
+                for (known.items) |name| {
+                    try names.append(name);
+                    try levels.append(0);
+                }
+            },
+        }
+    }
+
+    const after_known: usize = if (levels.items.len == 0) 0 else std.mem.max(usize, levels.items) + 1;
+    for (unknown.items) |name| {
+        try names.append(name);
+        try levels.append(after_known);
+    }
+
+    return .{ .names = try names.toOwnedSlice(), .levels = try levels.toOwnedSlice() };
+}
+
+fn reportInstallError(name: []const u8, e: anyerror) void {
+    if (!store.alreadyDiagnosed(e)) {
+        term.err("{s}error{s}: {}: {s}\n", .{ term.red, term.reset, safe(name), @errorName(e) });
+    }
+}
+
+/// One install pool shared by every wave of one command.
 const Batch = struct {
     st: *store.Store,
     reg: *const registry.Registry,
     names: []const []const u8,
+    /// Indices into `names` that make up the wave being run.
+    slots: []const usize,
+    /// `ok[i]` is set once `names[i]` is installed. Each index is written by
+    /// exactly one worker, and the main thread reads it after the join.
+    ok: []bool,
     platform_name: []const u8,
     opts: store.InstallOptions,
     next: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
-    failures: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
 
     fn worker(self: *Batch) void {
+        // Per-worker arena for each job's temporary memory. It is backed by
+        // page_allocator, so it never takes the shared thread-safe allocator's
+        // lock. Each job's allocations are released by reset when it finishes.
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer arena.deinit();
+
         while (true) {
-            const i = self.next.fetchAdd(1, .monotonic);
-            if (i >= self.names.len) return;
-            const name = self.names[i];
-
-            var arena = std.heap.ArenaAllocator.init(self.st.allocator);
-            defer arena.deinit();
-
-            if (store.Store.resolveRequest(self.reg, name)) |pkg| {
-                self.st.install(pkg, self.platform_name, self.opts) catch |e| {
-                    if (!store.alreadyDiagnosed(e)) {
-                        term.err("{s}error{s}: {s}: {s}\n", .{ term.red, term.reset, name, @errorName(e) });
-                    }
-                    _ = self.failures.fetchAdd(1, .monotonic);
-                };
-            } else {
-                _ = self.st.installDynamic(arena.allocator(), name, self.platform_name, self.opts) catch |e| {
-                    if (!store.alreadyDiagnosed(e)) {
-                        term.err("{s}error{s}: {s}: {s}\n", .{ term.red, term.reset, name, @errorName(e) });
-                    }
-                    _ = self.failures.fetchAdd(1, .monotonic);
-                };
-            }
+            const slot = self.next.fetchAdd(1, .monotonic);
+            if (slot >= self.slots.len) return;
+            const i = self.slots[slot];
+            self.ok[i] = self.installOne(arena.allocator(), self.names[i]);
+            _ = arena.reset(.retain_capacity);
         }
+    }
+
+    fn installOne(self: *Batch, scratch: std.mem.Allocator, name: []const u8) bool {
+        if (store.Store.resolveRequest(self.reg, name)) |pkg| {
+            self.st.install(pkg, self.platform_name, self.opts) catch |e| {
+                reportInstallError(name, e);
+                return false;
+            };
+            return true;
+        }
+        _ = self.st.installDynamic(scratch, name, self.platform_name, self.opts) catch |e| {
+            reportInstallError(name, e);
+            return false;
+        };
+        return true;
     }
 };
 
-fn runBatch(a: std.mem.Allocator, batch: *Batch, requested_jobs: ?usize) !usize {
+/// Run one wave on a pool of at most `min(requested or CPUs, wave size, 8)`
+/// threads. Returns once every package in the wave has finished.
+fn runWave(batch: *Batch, requested_jobs: ?usize) void {
     const cpus = std.Thread.getCpuCount() catch 2;
     // The original spawned one OS thread per package with no bound, so a
     // 50-entry Brewfile created 50 threads all contending for bandwidth.
-    const jobs = @max(1, @min(requested_jobs orelse cpus, @min(batch.names.len, 8)));
+    const jobs = @max(1, @min(requested_jobs orelse cpus, @min(batch.slots.len, 8)));
 
-    const threads = try a.alloc(std.Thread, jobs);
-    defer a.free(threads);
+    var threads: [8]std.Thread = undefined;
+    var spawned: usize = 0;
+    // Join whatever started, even if a later spawn failed.
+    defer for (threads[0..spawned]) |t| t.join();
+    while (spawned < jobs) : (spawned += 1) {
+        threads[spawned] = std.Thread.spawn(.{}, Batch.worker, .{batch}) catch break;
+    }
+    // If no thread could be started, the calling thread does the work itself.
+    if (spawned == 0) batch.worker();
+}
 
-    for (threads) |*t| t.* = try std.Thread.spawn(.{}, Batch.worker, .{batch});
-    for (threads) |t| t.join();
+/// The first dependency of `names[i]` that sits in an earlier wave and did not
+/// install. A package is never started while one of its dependencies is missing.
+fn failedDependency(
+    reg: *const registry.Registry,
+    names: []const []const u8,
+    levels: []const usize,
+    ok: []const bool,
+    i: usize,
+) ?[]const u8 {
+    const pkg = store.Store.resolveRequest(reg, names[i]) orelse return null;
+    for (pkg.deps) |dep| {
+        for (names, levels, ok) |name, lv, done| {
+            if (lv < levels[i] and !done and std.mem.eql(u8, name, dep)) return dep;
+        }
+    }
+    return null;
+}
 
-    return batch.failures.load(.monotonic);
+/// Install `names` one wave at a time. Every package in a wave runs on the pool
+/// before the next wave starts, so nothing begins before its dependencies have
+/// finished. A package whose dependency failed is skipped. Sets `ok[i]` for each
+/// name that is installed, and returns how many names were not.
+fn installWaves(
+    a: std.mem.Allocator,
+    st: *store.Store,
+    reg: *const registry.Registry,
+    names: []const []const u8,
+    levels: []const usize,
+    ok: []bool,
+    platform_name: []const u8,
+    opts: store.InstallOptions,
+    requested_jobs: ?usize,
+) !usize {
+    std.debug.assert(levels.len == names.len and ok.len == names.len);
+    @memset(ok, false);
+    if (names.len == 0) return 0;
+
+    const last_wave = std.mem.max(usize, levels);
+    for (0..last_wave + 1) |wave_no| {
+        var slots = std.ArrayList(usize).init(a);
+        defer slots.deinit();
+
+        for (levels, 0..) |lv, i| {
+            if (lv != wave_no) continue;
+            if (failedDependency(reg, names, levels, ok, i)) |dep| {
+                term.err("{s}skipped{s} {}: dependency {} did not install\n", .{ term.yellow, term.reset, safe(names[i]), safe(dep) });
+                continue;
+            }
+            try slots.append(i);
+        }
+        if (slots.items.len == 0) continue;
+
+        var batch = Batch{
+            .st = st,
+            .reg = reg,
+            .names = names,
+            .slots = slots.items,
+            .ok = ok,
+            .platform_name = platform_name,
+            .opts = opts,
+        };
+        runWave(&batch, requested_jobs);
+    }
+
+    var failures: usize = 0;
+    for (ok) |done| {
+        if (!done) failures += 1;
+    }
+    return failures;
 }
 
 // ---------------------------------------------------------------------------
@@ -681,7 +869,7 @@ fn run(base: std.mem.Allocator, a: std.mem.Allocator) !u8 {
     if (std.mem.eql(u8, cmd, "install")) return cmdInstall(a, &st, &reg, &args, platform_name, opts, &timer);
     if (std.mem.eql(u8, cmd, "uninstall")) return cmdUninstall(a, &st, &reg, args.rest.items);
     if (std.mem.eql(u8, cmd, "outdated")) return cmdOutdated(a, &st, &reg, platform_name, args.json);
-    if (std.mem.eql(u8, cmd, "upgrade")) return cmdUpgrade(a, &st, &reg, args.rest.items, platform_name, opts);
+    if (std.mem.eql(u8, cmd, "upgrade")) return cmdUpgrade(a, &st, &reg, args.rest.items, platform_name, opts, args.jobs);
     if (std.mem.eql(u8, cmd, "run")) return cmdRun(a, &st, &reg, args.rest.items, platform_name, opts);
     if (std.mem.eql(u8, cmd, "shell")) return cmdShell(a, &st, &reg, args.rest.items, platform_name, opts);
     if (std.mem.eql(u8, cmd, "bundle")) return cmdBundle(a, &st, &reg, &args, platform_name, opts);
@@ -822,32 +1010,21 @@ fn cmdInstall(
         return 2;
     }
 
-    // Pull in declared dependencies where the registry knows about them.
-    var names = std.ArrayList([]const u8).init(a);
-    defer names.deinit();
+    // Dependencies come along, and always install before what needs them.
+    const plan = try planInstall(a, reg, args.rest.items);
+    defer a.free(plan.names);
+    defer a.free(plan.levels);
 
-    if (registry.resolveOrder(a, reg, args.rest.items)) |ordered| {
-        defer a.free(ordered);
-        for (ordered) |p| try names.append(p.name);
-    } else |_| {
-        try names.appendSlice(args.rest.items);
-    }
-
-    var batch = Batch{
-        .st = st,
-        .reg = reg,
-        .names = names.items,
-        .platform_name = platform_name,
-        .opts = opts,
-    };
-    const failures = try runBatch(a, &batch, args.jobs);
+    const ok = try a.alloc(bool, plan.names.len);
+    defer a.free(ok);
+    const failures = try installWaves(a, st, reg, plan.names, plan.levels, ok, platform_name, opts, args.jobs);
 
     const elapsed = ms(timer.read());
     if (failures == 0) {
-        term.print("\n{s}done{s} {d} packages in {d:.2}ms\n", .{ term.green, term.reset, names.items.len, elapsed });
+        term.print("\n{s}done{s} {d} packages in {d:.2}ms\n", .{ term.green, term.reset, plan.names.len, elapsed });
         return 0;
     }
-    term.print("\n{s}{d} of {d} packages failed{s} ({d:.2}ms)\n", .{ term.red, failures, names.items.len, term.reset, elapsed });
+    term.print("\n{s}{d} of {d} packages failed{s} ({d:.2}ms)\n", .{ term.red, failures, plan.names.len, term.reset, elapsed });
     return 1;
 }
 
@@ -920,6 +1097,7 @@ fn cmdUpgrade(
     rest: []const []const u8,
     platform_name: []const u8,
     opts: store.InstallOptions,
+    jobs: ?usize,
 ) !u8 {
     var targets = std.ArrayList(registry.Package).init(a);
     defer targets.deinit();
@@ -947,20 +1125,44 @@ fn cmdUpgrade(
         return 0;
     }
 
+    // Only the requested packages are upgraded, so their dependencies are
+    // dropped from the plan. What remains keeps dependency order among itself.
+    var roots = std.ArrayList([]const u8).init(a);
+    defer roots.deinit();
+    var wanted = std.StringHashMap(void).init(a);
+    defer wanted.deinit();
+    for (targets.items) |pkg| {
+        try roots.append(pkg.name);
+        try wanted.put(pkg.name, {});
+    }
+
+    const plan = try planInstall(a, reg, roots.items);
+    defer a.free(plan.names);
+    defer a.free(plan.levels);
+    var names = std.ArrayList([]const u8).init(a);
+    defer names.deinit();
+    var levels = std.ArrayList(usize).init(a);
+    defer levels.deinit();
+    for (plan.names, plan.levels) |name, lv| {
+        if (!wanted.contains(name)) continue;
+        try names.append(name);
+        try levels.append(lv);
+    }
+
     // Install the new version first; each version has its own store
     // directory, so the old one stays usable until the new one is in place.
     // Only a successful install lets the older versions go, so a failed
     // download leaves the package exactly as it was.
-    var failures: u8 = 0;
-    for (targets.items) |pkg| {
-        st.install(pkg, platform_name, opts) catch |e| {
-            term.err("{s}error{s}: {}: {s}\n", .{ term.red, term.reset, safe(pkg.name), @errorName(e) });
-            failures = 1;
-            continue;
-        };
+    const ok = try a.alloc(bool, names.items.len);
+    defer a.free(ok);
+    const failures = try installWaves(a, st, reg, names.items, levels.items, ok, platform_name, opts, jobs);
+
+    for (names.items, ok) |name, done| {
+        if (!done) continue;
+        const pkg = store.Store.resolveRequest(reg, name) orelse continue;
         _ = try st.pruneOtherVersions(a, pkg.name, pkg.version, platform_name);
     }
-    return failures;
+    return if (failures == 0) 0 else 1;
 }
 
 fn cmdRun(
@@ -1005,7 +1207,20 @@ fn cmdBundle(
     const path = args.file orelse "Brewfile";
 
     if (std.mem.eql(u8, sub, "install")) {
-        try st.bundleInstall(a, reg, path, platform_name, opts);
+        const requested = try store.Store.bundleInstall(a, reg, path);
+        if (requested.len == 0) {
+            term.print("no installable entries in {s}\n", .{path});
+            return 0;
+        }
+        const plan = try planInstall(a, reg, requested);
+        defer a.free(plan.names);
+        defer a.free(plan.levels);
+
+        term.print("installing {d} packages from {s}\n\n", .{ plan.names.len, path });
+        const ok = try a.alloc(bool, plan.names.len);
+        defer a.free(ok);
+        // A package that fails is reported and the rest still run, as before.
+        _ = try installWaves(a, st, reg, plan.names, plan.levels, ok, platform_name, opts, args.jobs);
         return 0;
     }
     if (std.mem.eql(u8, sub, "dump")) {
@@ -1077,20 +1292,19 @@ fn cmdUpdate(a: std.mem.Allocator, st: *store.Store, allow_unsigned: bool) !u8 {
     const updated_at = vetManifest(a, tmp, tmp_sig, allow_unsigned) catch return 1;
     if (updated_at) |u| checkReplay(a, st, u) catch return 1;
 
-    // Validate before replacing the working registry.
-    var probe = registry.loadFromJsonFile(a, tmp, null) catch |e| {
+    // Validate before replacing the working registry. This one parse is also
+    // the registry the index is built from, so the file is parsed only once.
+    var reg = registry.loadFromJsonFile(a, tmp, null) catch |e| {
         term.err("{s}error{s}: downloaded registry is invalid ({s}); keeping the existing one\n", .{ term.red, term.reset, @errorName(e) });
         return 1;
     };
-    const n = probe.count();
-    probe.deinit();
+    defer reg.deinit();
+    const n = reg.count();
 
     try std.fs.cwd().rename(tmp, paths[0]);
     if (updated_at) |u| try storeUpdatedAt(a, st, u);
 
     const stamp = try abvindex.Stamp.ofFile(paths[0]);
-    var reg = try registry.loadFromJsonFile(a, paths[0], null);
-    defer reg.deinit();
     abvindex.build(a, &reg, paths[1], stamp) catch {};
 
     term.print("{s}updated{s} {d} packages\n", .{ term.green, term.reset, n });
@@ -1385,6 +1599,50 @@ test "manifestUpdatedAt reads the top-level field only" {
     try testing.expectError(error.MissingUpdatedAt, manifestUpdatedAt(a, "{\"packages\":{}}"));
     try testing.expectError(error.MissingUpdatedAt, manifestUpdatedAt(a, "[1,2]"));
     try testing.expectError(error.InvalidUpdatedAt, manifestUpdatedAt(a, "{\"updated_at\":\"bad\\nvalue\"}"));
+}
+
+test "levelize puts a dependency chain in successive waves and independent packages in the first" {
+    // a <- b <- c, and d is independent: waves are [a, d], [b], [c].
+    const pkgs = [_]registry.Package{
+        .{ .name = "a" },
+        .{ .name = "b", .deps = &.{"a"} },
+        .{ .name = "c", .deps = &.{"b"} },
+        .{ .name = "d" },
+    };
+    const levels = try levelize(testing.allocator, &pkgs);
+    defer testing.allocator.free(levels);
+    try testing.expectEqualSlices(usize, &.{ 0, 1, 2, 0 }, levels);
+}
+
+test "levelize waits for the deepest of several dependencies" {
+    // c needs a and b; d needs c; e needs only a.
+    const pkgs = [_]registry.Package{
+        .{ .name = "a" },
+        .{ .name = "b" },
+        .{ .name = "c", .deps = &.{ "a", "b" } },
+        .{ .name = "d", .deps = &.{"c"} },
+        .{ .name = "e", .deps = &.{"a"} },
+    };
+    const levels = try levelize(testing.allocator, &pkgs);
+    defer testing.allocator.free(levels);
+    try testing.expectEqualSlices(usize, &.{ 0, 0, 1, 2, 1 }, levels);
+}
+
+test "levelize ignores dependencies outside the list" {
+    const pkgs = [_]registry.Package{
+        .{ .name = "app", .deps = &.{"not-in-this-plan"} },
+    };
+    const levels = try levelize(testing.allocator, &pkgs);
+    defer testing.allocator.free(levels);
+    try testing.expectEqualSlices(usize, &.{0}, levels);
+}
+
+test "levelize refuses a list where a dependency comes after its dependent" {
+    const pkgs = [_]registry.Package{
+        .{ .name = "b", .deps = &.{"a"} },
+        .{ .name = "a" },
+    };
+    try testing.expectError(error.NotDependencyOrdered, levelize(testing.allocator, &pkgs));
 }
 
 comptime {

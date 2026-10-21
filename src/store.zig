@@ -1598,14 +1598,14 @@ pub const Store = struct {
     /// The v1.5.0 changelog claims a "Streaming Zero-Allocation Bundle Parser"
     /// built on std.io.bufferedReader. The code actually called
     /// readToEndAlloc(2 MB). This is the advertised implementation.
+    /// Returns the registry names the file asks for, in file order, with unknown
+    /// names skipped. Nothing is installed here. The caller plans and runs the
+    /// list, so a bundle gets dependency order and the parallel installer.
     pub fn bundleInstall(
-        self: *Store,
         a: std.mem.Allocator,
         reg: *const registry.Registry,
         file_path: []const u8,
-        platform_name: []const u8,
-        opts: InstallOptions,
-    ) !void {
+    ) ![]const []const u8 {
         const file = std.fs.cwd().openFile(file_path, .{}) catch |e| {
             term.err("{s}error{s}: cannot open bundle '{s}': {s}\n", .{ term.red, term.reset, file_path, @errorName(e) });
             return e;
@@ -1653,27 +1653,7 @@ pub const Store = struct {
             try names.append(try a.dupe(u8, name));
         }
 
-        if (names.items.len == 0) {
-            term.print("no installable entries in {s}\n", .{file_path});
-            return;
-        }
-
-        // Honour declared dependencies where the registry provides them.
-        const ordered = registry.resolveOrder(a, reg, names.items) catch blk: {
-            var fallback = std.ArrayList(Package).init(a);
-            for (names.items) |n| {
-                if (resolveRequest(reg, n)) |p| try fallback.append(p);
-            }
-            break :blk try fallback.toOwnedSlice();
-        };
-        defer a.free(ordered);
-
-        term.print("installing {d} packages from {s}\n\n", .{ ordered.len, file_path });
-        for (ordered) |pkg| {
-            self.install(pkg, platform_name, opts) catch |e| {
-                term.err("{s}error{s}: {s}: {s}\n", .{ term.red, term.reset, pkg.name, @errorName(e) });
-            };
-        }
+        return names.toOwnedSlice();
     }
 
     pub fn bundleDump(
