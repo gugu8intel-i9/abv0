@@ -54,7 +54,7 @@
 
 ### Performance
 
-- **Streaming verified install.** For tar, tar.gz and tar.xz archives, bytes from curl
+- **Streaming verified install.** For tar, tar.gz, tar.xz, tar.zst and single-binary packages, bytes from curl
   are hashed, decompressed and unpacked in one pass into a private staging directory.
   Nothing is published until the digest matches. Ten rounds installing ripgrep, bat and
   jq: median 346 ms streamed against 404 ms downloading to a file first.
@@ -76,6 +76,9 @@
 - **`abv0 list --installed`** lists the versions in the store for the current platform.
 - **`--dry-run`** for `install`, `upgrade`, `uninstall`, `bundle install` and `cleanup`.
   It prints what would happen and changes nothing. It needs an already-cached registry.
+- **Live download progress.** On a terminal, each streaming download shows bytes received
+  and speed, redrawn in place. Nothing extra is printed into pipes, files or `--json`.
+- **`--color=auto|always|never`.** `--no-color` is the same as `never`.
 - **`-q` / `--quiet`** suppresses progress lines. Errors still print.
 - **`-v` / `--verbose`** also prints the URL, store path and timing for each package.
 - **`abv0 <cmd> --help`** and **`abv0 help <cmd>`** show help for one command.
@@ -109,7 +112,7 @@
 - Output from code under test goes to stderr in test builds. This fixes a deadlock in
   `zig build test`.
 - `abv0 help` lists every command, the new flags and the exit codes.
-- The test suite has 146 `test` blocks across `src/*.zig`.
+- The test suite has 151 `test` blocks across `src/*.zig`.
 
 ## Migration notes
 

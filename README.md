@@ -141,7 +141,7 @@ MAINTENANCE
 | `--bug`, `--malware` | With `report`: a bug report, or a suspicious-package report |
 | `-q, --quiet` | Suppress progress lines (errors still print) |
 | `-v, --verbose` | Also print URLs, store paths and timings per package |
-| `--no-color` | Disable colour |
+| `--color=auto\|always\|never` | When to use colour (`--no-color` is the same as `never`) |
 | `-h, --help` | Help for the command |
 | `-V, --version` | Version |
 
@@ -251,7 +251,7 @@ Other performance work in 2.0.0:
 
 ### Streaming install
 
-For tar, tar.gz and tar.xz packages, `abv0` does not wait for the download to finish
+For tar, tar.gz, tar.xz, tar.zst and single-binary packages, `abv0` does not wait for the download to finish
 before it starts on the package:
 
 1. curl writes the response to a pipe.
@@ -404,7 +404,7 @@ zig-out/bin/sign-manifest verify keys/manifest.pub packages/index.json
 
 ```bash
 zig build                       # debug build
-zig build test                  # 146 test blocks across src/*.zig
+zig build test                  # 151 test blocks across src/*.zig
 zig build check                 # type-check Linux, macOS and Windows targets
 zig build release               # stripped ReleaseFast binaries for all 6 targets
 zig build sign-tool             # the sign-manifest CLI
