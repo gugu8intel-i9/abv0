@@ -48,7 +48,8 @@ const Args = struct {
     no_stream: bool = false,
     allow_unverified: bool = false,
     allow_unsigned_manifest: bool = false,
-    no_color: bool = false,
+    /// `--color=auto|always|never`; `--no-color` means `never`.
+    color: term.ColorMode = .auto,
     want_help: bool = false,
     want_version: bool = false,
     report_bug: bool = false,
@@ -127,7 +128,16 @@ fn parseArgsDiag(allocator: std.mem.Allocator, argv: []const []const u8, diag: *
             if (i >= argv.len) return failArg(diag, arg, "", error.MissingOptionValue);
             args.registry_path = argv[i];
         } else if (std.mem.eql(u8, arg, "--no-color")) {
-            args.no_color = true;
+            args.color = .never;
+        } else if (std.mem.eql(u8, arg, "--color") or std.mem.startsWith(u8, arg, "--color=")) {
+            // `--color=when` or `--color when`.
+            const value = if (arg.len > "--color".len) arg["--color=".len..] else blk: {
+                i += 1;
+                if (i >= argv.len) return failArg(diag, arg, "", error.MissingOptionValue);
+                break :blk argv[i];
+            };
+            args.color = std.meta.stringToEnum(term.ColorMode, value) orelse
+                return failArg(diag, arg, value, error.UnknownOption);
         } else if (std.mem.eql(u8, arg, "--bug")) {
             args.report_bug = true;
         } else if (std.mem.eql(u8, arg, "--malware")) {
@@ -597,7 +607,7 @@ fn renderUsage(w: anytype) !void {
         \\  --bug, --malware        With report: file a bug report, or a suspicious-package report
         \\  -q, --quiet             Suppress progress lines (errors still print)
         \\  -v, --verbose           Also print urls, store paths and timings per package
-        \\  --no-color              Disable colour
+        \\  --color <when>          auto (default), always or never; --no-color means never
         \\  -h, --help              This message, or help for the command before it
         \\  -V, --version           Version
         \\
@@ -1495,7 +1505,7 @@ fn run(base: std.mem.Allocator, a: std.mem.Allocator) !u8 {
 
     var diag = ArgDiag{};
     var args = parseArgsDiag(a, rest_argv, &diag) catch |e| {
-        term.init(false);
+        term.init(.auto);
         if (e == error.OutOfMemory) return e;
         var buf: [512]u8 = undefined;
         term.err("{s}error{s}: {s}\n", .{ term.red, term.reset, argErrorMessage(&buf, e, diag) });
@@ -1503,7 +1513,8 @@ fn run(base: std.mem.Allocator, a: std.mem.Allocator) !u8 {
     };
     defer args.deinit();
 
-    term.init(args.no_color);
+    term.init(args.color);
+    term.progress_enabled = !args.quiet and !args.json and term.stdoutIsTty();
 
     if (args.want_version) {
         term.print("abv0 {s} ({s})\n", .{ version, platform.defaultPlatformTag() });

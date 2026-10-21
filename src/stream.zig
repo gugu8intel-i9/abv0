@@ -18,6 +18,7 @@ const archive = @import("archive.zig");
 const net = @import("net.zig");
 const platform = @import("platform.zig");
 const safepath = @import("safepath.zig");
+const term = @import("term.zig");
 
 const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -49,6 +50,8 @@ pub fn HashingReader(comptime R: type) type {
         head_buf: [archive.head_len]u8 = undefined,
         head_len: usize = 0,
         head_pos: usize = 0,
+        /// Live progress slot for this download, if one is drawn.
+        progress: ?term.Download = null,
 
         pub fn init(inner: R, limit: u64) Self {
             return .{ .inner = inner, .limit = limit };
@@ -90,6 +93,7 @@ pub fn HashingReader(comptime R: type) type {
             if (n > self.limit - self.bytes) return error.DownloadTooLarge;
             self.bytes += n;
             self.hasher.update(buf[0..n]);
+            term.addBytes(self.progress, n);
             return n;
         }
     };
@@ -147,6 +151,10 @@ pub fn streamInstall(
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
+    // Shown as a live line on a TTY; cleared again when this function returns.
+    const progress = term.beginDownload(url);
+    defer term.endDownload(progress);
+
     // No --output: curl writes the body to its stdout, which is our pipe.
     const argv = try net.buildCurlArgv(arena, url, null, .{}, &.{});
 
@@ -158,7 +166,7 @@ pub fn streamInstall(
     child.stderr_behavior = .Ignore;
     try child.spawn();
 
-    const result = unpackStream(a, child.stdout.?.reader(), declared, raw_name, dest) catch |e| {
+    const result = unpackStream(a, child.stdout.?.reader(), declared, raw_name, dest, progress) catch |e| {
         // Stop the transfer; its bytes are no longer wanted.
         _ = child.kill() catch {};
         return e;
@@ -166,8 +174,8 @@ pub fn streamInstall(
 
     // A transfer cut short ends the stream early. The digest would not match
     // either, but this reports the real cause.
-    const term = try child.wait();
-    switch (term) {
+    const child_term = try child.wait();
+    switch (child_term) {
         .Exited => |code| if (code != 0) return error.DownloadFailed,
         else => return error.DownloadFailed,
     }
@@ -182,8 +190,10 @@ pub fn unpackStream(
     declared: archive.Kind,
     raw_name: []const u8,
     dest: std.fs.Dir,
+    progress: ?term.Download,
 ) !Result {
     var hashing = HashingReader(@TypeOf(reader)).init(reader, net.max_download_bytes);
+    hashing.progress = progress;
 
     // Peeking is free: these bytes are replayed, not read twice.
     const head = try hashing.peekHead();
@@ -388,7 +398,7 @@ test "a tar.gz streamed through unpackStream extracts the file and hashes every 
     defer tmp.cleanup();
 
     var fbs = std.io.fixedBufferStream(@as([]const u8, gz.items));
-    const res = try unpackStream(testing.allocator, fbs.reader(), .tar_gz, "tool", tmp.dir);
+    const res = try unpackStream(testing.allocator, fbs.reader(), .tar_gz, "tool", tmp.dir, null);
 
     try testing.expectEqualSlices(u8, &digestOf(gz.items), &res.digest);
     try testing.expectEqual(@as(u64, gz.items.len), res.bytes);
@@ -406,7 +416,7 @@ test "unpackStream refuses an HTML error page before decoding anything" {
     var fbs = std.io.fixedBufferStream(@as([]const u8, page));
     try testing.expectError(
         error.DownloadLooksLikeErrorPage,
-        unpackStream(testing.allocator, fbs.reader(), .tar_gz, "tool", tmp.dir),
+        unpackStream(testing.allocator, fbs.reader(), .tar_gz, "tool", tmp.dir, null),
     );
 }
 
@@ -418,7 +428,7 @@ test "unpackStream trusts the bytes over the manifest and refuses a zip in disgu
     var fbs = std.io.fixedBufferStream(@as([]const u8, zip_head));
     try testing.expectError(
         error.NotStreamable,
-        unpackStream(testing.allocator, fbs.reader(), .tar_gz, "tool", tmp.dir),
+        unpackStream(testing.allocator, fbs.reader(), .tar_gz, "tool", tmp.dir, null),
     );
 }
 
@@ -428,7 +438,7 @@ test "unpackStream keeps a raw payload whole and executable" {
     defer tmp.cleanup();
 
     var fbs = std.io.fixedBufferStream(@as([]const u8, data));
-    const res = try unpackStream(testing.allocator, fbs.reader(), .raw, "rg", tmp.dir);
+    const res = try unpackStream(testing.allocator, fbs.reader(), .raw, "rg", tmp.dir, null);
     try testing.expectEqualSlices(u8, &digestOf(data), &res.digest);
 
     const got = try tmp.dir.readFileAlloc(testing.allocator, "rg", 1 << 20);
