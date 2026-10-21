@@ -2138,6 +2138,16 @@ pub const Store = struct {
         }
         return removed;
     }
+
+    /// Package that owns bin `bin_name` in `state/bin-owners`, or null when abv0
+    /// does not manage it. The returned slice is allocated from `a`.
+    pub fn binOwnerOf(self: *const Store, a: std.mem.Allocator, bin_name: []const u8) !?[]const u8 {
+        var owners: Owners = undefined;
+        try self.readOwners(&owners, a);
+        defer owners.deinit();
+        const owner = ownerOf(owners.recs.items, "bin", bin_name) orelse return null;
+        return try a.dupe(u8, owner);
+    }
 };
 
 // ---------------------------------------------------------------------------
