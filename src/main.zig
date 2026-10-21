@@ -339,8 +339,8 @@ const commands = [_]Command{
         .args = "<pkg>...",
         .summary = "Install packages and their dependencies, verified, in parallel.",
         .flags = &.{
-            dry_run_flag,                                                  json_flag,      jobs_flag,      platform_flag,
-            unverified_flag,                                               force_flag,     quiet_flag,     verbose_flag,
+            dry_run_flag,                                                                      json_flag,  jobs_flag,  platform_flag,
+            unverified_flag,                                                                   force_flag, quiet_flag, verbose_flag,
             .{ .name = "--micro-split", .help = "Parallel ranged download for large assets" },
         },
         .example = "abv0 install jq ripgrep",
@@ -1894,9 +1894,9 @@ fn cmdOutdated(
     }
     for (list) |e| {
         term.print("{s}{}{s}  {} {s}->{s} {s}{}{s}\n", .{
-            term.bold, safe(e.pkg.name), term.reset,
-            safe(e.installed), term.dim, term.reset,
-            term.green, safe(e.pkg.version), term.reset,
+            term.bold,         safe(e.pkg.name),    term.reset,
+            safe(e.installed), term.dim,            term.reset,
+            term.green,        safe(e.pkg.version), term.reset,
         });
     }
     term.print("\n{d} outdated; run `abv0 upgrade`\n", .{list.len});

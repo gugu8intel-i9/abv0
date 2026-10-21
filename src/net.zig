@@ -101,15 +101,21 @@ pub fn buildCurlArgv(
         "--silent",
         "--show-error",
         "--location", // follow redirects...
-        "--max-redirs", "5",
+        "--max-redirs",
+        "5",
         "--proto",       "=https", // ...but only ever over https
         "--proto-redir", "=https",
         "--tlsv1.2", // no TLS 1.0/1.1
-        "--max-filesize", maxsize,
-        "--connect-timeout", connect,
-        "--max-time",        maxtime,
-        "--retry",           retries,
-        "--user-agent",      opts.user_agent,
+        "--max-filesize",
+        maxsize,
+        "--connect-timeout",
+        connect,
+        "--max-time",
+        maxtime,
+        "--retry",
+        retries,
+        "--user-agent",
+        opts.user_agent,
     });
     try args.appendSlice(extra);
     if (dest) |d| try args.appendSlice(&.{ "--output", d });
