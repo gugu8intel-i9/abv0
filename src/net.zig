@@ -44,11 +44,24 @@ pub fn isSafeUrl(url: []const u8) bool {
     // being parsed as an option by any downstream tool.
     if (url[0] == '-') return false;
 
+    // Reject userinfo (`https://user:pass@host`, or `https://host@evil.com`
+    // where the browser and the user see different hosts). Only the authority
+    // part is checked, so an '@' in the path or query is still allowed.
     const host_start = "https://".len;
     if (host_start >= url.len) return false;
-    if (url[host_start] == '/' or url[host_start] == '@') return false;
+    if (url[host_start] == '/') return false;
+
+    var authority_end = host_start;
+    while (authority_end < url.len and url[authority_end] != '/' and
+        url[authority_end] != '?' and url[authority_end] != '#') : (authority_end += 1)
+    {}
+    if (std.mem.indexOfScalar(u8, url[host_start..authority_end], '@') != null) return false;
     return true;
 }
+
+/// Largest response curl will accept. Enforced by curl itself via
+/// `--max-filesize`, so a hostile or runaway server cannot fill the disk.
+pub const max_download_bytes: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Percent-encode a value for safe inclusion in a query string.
 pub fn urlEncode(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
@@ -63,7 +76,10 @@ pub fn urlEncode(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
     return out.toOwnedSlice();
 }
 
-fn curlArgs(
+/// Build the curl argv. Pure (no spawning) so it can be unit tested.
+/// `-q` must stay first: it stops curl from reading ~/.curlrc or
+/// $CURL_HOME, which could otherwise add proxies, headers or `--insecure`.
+pub fn buildCurlArgv(
     allocator: std.mem.Allocator,
     url: []const u8,
     dest: ?[]const u8,
@@ -76,9 +92,11 @@ fn curlArgs(
     const connect = try std.fmt.allocPrint(allocator, "{d}", .{opts.connect_timeout_s});
     const maxtime = try std.fmt.allocPrint(allocator, "{d}", .{opts.max_time_s});
     const retries = try std.fmt.allocPrint(allocator, "{d}", .{opts.retries});
+    const maxsize = try std.fmt.allocPrint(allocator, "{d}", .{max_download_bytes});
 
     try args.appendSlice(&.{
         "curl",
+        "-q", // must be first: ignore ~/.curlrc
         "--fail", // non-zero exit on HTTP >= 400
         "--silent",
         "--show-error",
@@ -86,6 +104,8 @@ fn curlArgs(
         "--max-redirs", "5",
         "--proto",       "=https", // ...but only ever over https
         "--proto-redir", "=https",
+        "--tlsv1.2", // no TLS 1.0/1.1
+        "--max-filesize", maxsize,
         "--connect-timeout", connect,
         "--max-time",        maxtime,
         "--retry",           retries,
@@ -110,14 +130,14 @@ pub fn download(
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const argv = try curlArgs(arena, url, dest_path, opts, &.{});
+    const argv = try buildCurlArgv(arena, url, dest_path, opts, &.{});
 
     const res = std.process.Child.run(.{
         .allocator = arena,
         .argv = argv,
         .max_output_bytes = 64 * 1024,
     }) catch |e| switch (e) {
-        error.FileNotFound => return downloadFallback(arena, url, dest_path),
+        error.FileNotFound => return downloadFallback(arena, url, dest_path, opts),
         else => return Error.DownloadFailed,
     };
 
@@ -129,13 +149,34 @@ pub fn download(
 
 /// Windows ships curl.exe since Windows 10 1803, but fall back to PowerShell
 /// if it is missing.
-fn downloadFallback(allocator: std.mem.Allocator, url: []const u8, dest_path: []const u8) !void {
+fn downloadFallback(
+    allocator: std.mem.Allocator,
+    url: []const u8,
+    dest_path: []const u8,
+    opts: Options,
+) !void {
     if (!platform.is_windows) return Error.NoDownloaderAvailable;
+
+    // Any failure removes the partial file. The script checks that the final
+    // URL after redirects is still https; Invoke-WebRequest cannot be told to
+    // refuse a plain-http hop, so that case is caught after the fact and the
+    // bytes are discarded.
+    errdefer std.fs.cwd().deleteFile(dest_path) catch {};
 
     const script = try std.fmt.allocPrint(
         allocator,
-        "$ProgressPreference='SilentlyContinue'; Invoke-WebRequest -UseBasicParsing -Uri $env:ABV0_URL -OutFile $env:ABV0_DEST",
-        .{},
+        \\$ProgressPreference='SilentlyContinue';
+        \\try {{
+        \\  $r = Invoke-WebRequest -UseBasicParsing -ErrorAction Stop -MaximumRedirection 5 -TimeoutSec {d} -Uri $env:ABV0_URL -OutFile $env:ABV0_DEST -PassThru;
+        \\  $final = $r.BaseResponse.ResponseUri;
+        \\  if ($null -eq $final) {{ $final = $r.BaseResponse.RequestMessage.RequestUri }};
+        \\  if ($null -eq $final -or $final.Scheme -ne 'https') {{ throw 'redirected to a non-https URL' }};
+        \\}} catch {{
+        \\  Remove-Item -LiteralPath $env:ABV0_DEST -Force -ErrorAction SilentlyContinue;
+        \\  exit 1;
+        \\}}
+    ,
+        .{opts.max_time_s},
     );
 
     var env = try std.process.getEnvMap(allocator);
@@ -169,7 +210,7 @@ pub fn fetchToString(
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const argv = try curlArgs(arena, url, null, opts, &.{});
+    const argv = try buildCurlArgv(arena, url, null, opts, &.{});
 
     const res = std.process.Child.run(.{
         .allocator = arena,
@@ -194,7 +235,7 @@ pub fn head(allocator: std.mem.Allocator, url: []const u8, opts: Options) !Remot
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const argv = try curlArgs(arena, url, null, opts, &.{ "--head", "--request", "GET" });
+    const argv = try buildCurlArgv(arena, url, null, opts, &.{ "--head", "--request", "GET" });
     const res = std.process.Child.run(.{
         .allocator = arena,
         .argv = argv,
@@ -240,7 +281,7 @@ pub const ChunkJob = struct {
         const arena = arena_state.allocator();
 
         const range = std.fmt.allocPrint(arena, "{d}-{d}", .{ self.start, self.end }) catch return;
-        const argv = curlArgs(arena, self.url, self.dest, self.opts, &.{ "--range", range }) catch return;
+        const argv = buildCurlArgv(arena, self.url, self.dest, self.opts, &.{ "--range", range }) catch return;
 
         const res = std.process.Child.run(.{
             .allocator = arena,
@@ -307,6 +348,52 @@ test "parseHeaders reads length and range support" {
     const none = parseHeaders("HTTP/1.1 200 OK\r\n\r\n");
     try testing.expect(none.content_length == null);
     try testing.expect(!none.accepts_ranges);
+}
+
+test "isSafeUrl rejects userinfo, spaces and backslashes" {
+    try testing.expect(!isSafeUrl("https://github.com@evil.com/x")); // host confusion
+    try testing.expect(!isSafeUrl("https://user:pw@github.com/x"));
+    try testing.expect(!isSafeUrl("https://a b"));
+    try testing.expect(!isSafeUrl("https://github.com\\@evil.com/x"));
+    try testing.expect(!isSafeUrl("https://github.com/x\\..\\y"));
+    try testing.expect(!isSafeUrl("http://x"));
+
+    // An '@' outside the authority is just a path character.
+    try testing.expect(isSafeUrl("https://github.com/owner/repo/releases/download/v1/@scope.tgz"));
+    try testing.expect(isSafeUrl("https://github.com/a/b?x=y@z"));
+}
+
+test "isSafeUrl accepts normal GitHub release URLs" {
+    try testing.expect(isSafeUrl("https://github.com/owner/repo/releases/download/v1.2.3/pkg-x86_64-linux.tar.gz"));
+    try testing.expect(isSafeUrl("https://api.github.com/repos/owner/repo/releases/latest"));
+    try testing.expect(isSafeUrl("https://objects.githubusercontent.com/github-production-release-asset/123?X-Amz-Expires=300"));
+}
+
+test "buildCurlArgv starts with -q and enforces https, tls 1.2 and a size cap" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const argv = try buildCurlArgv(arena, "https://github.com/a/b", null, .{}, &.{});
+    try testing.expectEqualStrings("curl", argv[0]);
+    try testing.expectEqualStrings("-q", argv[1]);
+    try testing.expectEqualStrings("https://github.com/a/b", argv[argv.len - 1]);
+
+    const cap = try std.fmt.allocPrint(arena, "{d}", .{max_download_bytes});
+    var saw_cap = false;
+    var saw_tls12 = false;
+    var saw_proto = false;
+    for (argv, 0..) |a, i| {
+        if (std.mem.eql(u8, a, "--max-filesize")) {
+            try testing.expectEqualStrings(cap, argv[i + 1]);
+            saw_cap = true;
+        } else if (std.mem.eql(u8, a, "--tlsv1.2")) {
+            saw_tls12 = true;
+        } else if (std.mem.eql(u8, a, "--proto") and std.mem.eql(u8, argv[i + 1], "=https")) {
+            saw_proto = true;
+        }
+    }
+    try testing.expect(saw_cap and saw_tls12 and saw_proto);
 }
 
 test "download refuses an unsafe url before spawning anything" {
