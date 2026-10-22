@@ -154,9 +154,10 @@ pub fn extract(
         .zip => {
             const file = try std.fs.cwd().openFile(archive_path, .{});
             defer file.close();
-            try checkZipLimits(file, options);
-            // std.zip rejects absolute paths and `..` components internally.
-            // It only creates files and directories, so it cannot plant a link.
+            try checkZipEntries(file, options);
+            // Every name was checked above. std.zip only rejects a leading
+            // '/' and `..`, so it cannot be trusted on its own. It only
+            // creates files and directories, so it cannot plant a link.
             try std.zip.extract(dest, file.seekableStream(), .{});
         },
         .tar, .tar_gz, .tar_xz, .tar_zst => try extractTar(allocator, kind, archive_path, dest, options),
@@ -198,12 +199,20 @@ fn extractTar(
     }
 }
 
-/// std.zip has no limits of its own, so read the central directory first and
-/// refuse before anything is written.
-fn checkZipLimits(file: std.fs.File, options: Options) !void {
+/// std.zip has no limits of its own and cannot skip a member, so read the
+/// whole central directory first. Refuse the archive, before anything is
+/// written, when it is over the limits or when ANY name is not a plain relative
+/// path.
+///
+/// std.zip only rejects a leading '/' and `..` components. A name such as
+/// `C:/Users/x/Startup/x.cmd` passes that check. On Windows, `Dir.createFile`
+/// treats a drive-absolute path as absolute and ignores the directory handle,
+/// so the file would land outside the store.
+fn checkZipEntries(file: std.fs.File, options: Options) !void {
     const Stream = @TypeOf(file.seekableStream());
     var iter = try std.zip.Iterator(Stream).init(file.seekableStream());
 
+    var name_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
     var members: usize = 0;
     var total: u64 = 0;
     while (try iter.next()) |entry| {
@@ -211,7 +220,29 @@ fn checkZipLimits(file: std.fs.File, options: Options) !void {
         if (members > options.max_members) return error.ArchiveTooManyMembers;
         total +|= entry.uncompressed_size;
         if (total > options.max_bytes) return error.ArchiveTooLarge;
+
+        // Read the name from the same offset that std.zip.extract uses.
+        if (entry.filename_len > name_buf.len) return error.UnsafeArchiveMember;
+        const name = name_buf[0..entry.filename_len];
+        try iter.stream.seekTo(entry.header_zip_offset + @sizeOf(std.zip.CentralDirectoryFileHeader));
+        const got = try iter.stream.context.reader().readAll(name);
+        if (got != name.len) return error.ZipTruncated;
+
+        // Backslashes are rejected too. std.zip would refuse them by default,
+        // but this makes the whole archive fail the same way.
+        if (!safepath.isSafeRelPath(name) or hasColon(name) or
+            std.mem.indexOfScalar(u8, name, '\\') != null)
+        {
+            return error.UnsafeArchiveMember;
+        }
     }
+}
+
+/// True when a member name contains a ':'. On Windows that is a drive prefix
+/// (`C:x`) or an NTFS alternate data stream (`a.exe:evil`). `isSafeRelPath`
+/// only looks at the second byte, so it does not catch these.
+fn hasColon(name: []const u8) bool {
+    return std.mem.indexOfScalar(u8, name, ':') != null;
 }
 
 fn stripComponents(path: []const u8, count: u32) []const u8 {
@@ -258,6 +289,8 @@ pub fn pipeTar(
 
         // Refuse anything that could land outside the extraction root.
         if (!safepath.isSafeRelPath(name)) continue;
+        // On Windows a colon is a drive prefix or an alternate data stream.
+        if (platform.is_windows and hasColon(name)) continue;
 
         // createFile and makePath follow links. An earlier member may have
         // created a link on disk (`a/l -> ..`), so a later name can route
@@ -693,4 +726,158 @@ test "byte-slice checks agree with the path checks and probe 256 bytes" {
     try testing.expect(looksLikeErrorPageBytes(&late));
 
     try testing.expectEqual(Kind.tar_gz, sniffBytes(&.{ 0x1f, 0x8b, 0x08 }).?);
+}
+
+const ZipMember = struct { name: []const u8, data: []const u8 };
+
+/// Appends a zip with one stored (uncompressed) record per member, followed
+/// by the central directory and end record. Only the fields std.zip reads
+/// are meaningful. Times are zero, which matches on both sides.
+fn buildZip(list: *std.ArrayList(u8), members: []const ZipMember) !void {
+    var cd = std.ArrayList(u8).init(testing.allocator);
+    defer cd.deinit();
+    const w = list.writer();
+    const cdw = cd.writer();
+
+    for (members) |m| {
+        const offset: u32 = @intCast(list.items.len);
+        const crc = std.hash.Crc32.hash(m.data);
+        const size: u32 = @intCast(m.data.len);
+        const name_len: u16 = @intCast(m.name.len);
+
+        try w.writeAll(&std.zip.local_file_header_sig);
+        try w.writeInt(u16, 20, .little); // version needed
+        try w.writeInt(u16, 0, .little); // flags
+        try w.writeInt(u16, 0, .little); // method: stored
+        try w.writeInt(u32, 0, .little); // time and date
+        try w.writeInt(u32, crc, .little);
+        try w.writeInt(u32, size, .little);
+        try w.writeInt(u32, size, .little);
+        try w.writeInt(u16, name_len, .little);
+        try w.writeInt(u16, 0, .little); // extra length
+        try w.writeAll(m.name);
+        try w.writeAll(m.data);
+
+        try cdw.writeAll(&std.zip.central_file_header_sig);
+        try cdw.writeInt(u16, 20, .little); // version made by
+        try cdw.writeInt(u16, 20, .little); // version needed
+        try cdw.writeInt(u16, 0, .little); // flags
+        try cdw.writeInt(u16, 0, .little); // method
+        try cdw.writeInt(u32, 0, .little); // time and date
+        try cdw.writeInt(u32, crc, .little);
+        try cdw.writeInt(u32, size, .little);
+        try cdw.writeInt(u32, size, .little);
+        try cdw.writeInt(u16, name_len, .little);
+        try cdw.writeInt(u16, 0, .little); // extra length
+        try cdw.writeInt(u16, 0, .little); // comment length
+        try cdw.writeInt(u16, 0, .little); // disk number
+        try cdw.writeInt(u16, 0, .little); // internal attributes
+        try cdw.writeInt(u32, 0, .little); // external attributes
+        try cdw.writeInt(u32, offset, .little);
+        try cdw.writeAll(m.name);
+    }
+
+    const cd_offset: u32 = @intCast(list.items.len);
+    try w.writeAll(cd.items);
+    try w.writeAll(&std.zip.end_record_sig);
+    try w.writeInt(u16, 0, .little); // disk number
+    try w.writeInt(u16, 0, .little); // central directory disk
+    try w.writeInt(u16, @intCast(members.len), .little);
+    try w.writeInt(u16, @intCast(members.len), .little);
+    try w.writeInt(u32, @intCast(cd.items.len), .little);
+    try w.writeInt(u32, cd_offset, .little);
+    try w.writeInt(u16, 0, .little); // comment length
+}
+
+/// Writes `members` as `in.zip` in a fresh temporary directory with an empty
+/// `out` directory beside it. Returns both as absolute paths the caller frees.
+fn zipFixture(
+    tmp: *testing.TmpDir,
+    members: []const ZipMember,
+) !struct { archive: []u8, out: []u8 } {
+    var list = std.ArrayList(u8).init(testing.allocator);
+    defer list.deinit();
+    try buildZip(&list, members);
+    try tmp.dir.writeFile(.{ .sub_path = "in.zip", .data = list.items });
+    try tmp.dir.makeDir("out");
+
+    const archive = try tmp.dir.realpathAlloc(testing.allocator, "in.zip");
+    errdefer testing.allocator.free(archive);
+    const out = try tmp.dir.realpathAlloc(testing.allocator, "out");
+    return .{ .archive = archive, .out = out };
+}
+
+test "zip extraction extracts plain members" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const paths = try zipFixture(&tmp, &.{
+        .{ .name = "ok/a.txt", .data = "hello" },
+        .{ .name = "top.txt", .data = "world" },
+    });
+    defer testing.allocator.free(paths.archive);
+    defer testing.allocator.free(paths.out);
+
+    try extract(testing.allocator, .zip, paths.archive, paths.out, .{});
+
+    var out = try tmp.dir.openDir("out", .{});
+    defer out.close();
+    const a = try out.readFileAlloc(testing.allocator, "ok/a.txt", 64);
+    defer testing.allocator.free(a);
+    try testing.expectEqualStrings("hello", a);
+    const top = try out.readFileAlloc(testing.allocator, "top.txt", 64);
+    defer testing.allocator.free(top);
+    try testing.expectEqualStrings("world", top);
+}
+
+test "zip extraction refuses unsafe member names and writes nothing" {
+    const bad_names = [_][]const u8{
+        "C:/x.txt", // drive-absolute: Windows ignores the directory handle
+        "C:x.txt", // drive-relative
+        "//srv/share/x", // UNC
+        "/abs.txt",
+        "../up.txt",
+        "a.txt:stream", // NTFS alternate data stream
+        "dir\\x.txt", // backslash separator
+        "a//b.txt", // empty component
+    };
+    for (bad_names) |name| {
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const paths = try zipFixture(&tmp, &.{.{ .name = name, .data = "pwned" }});
+        defer testing.allocator.free(paths.archive);
+        defer testing.allocator.free(paths.out);
+
+        try testing.expectError(
+            error.UnsafeArchiveMember,
+            extract(testing.allocator, .zip, paths.archive, paths.out, .{}),
+        );
+
+        var out = try tmp.dir.openDir("out", .{ .iterate = true });
+        defer out.close();
+        var it = out.iterate();
+        try testing.expect((try it.next()) == null);
+    }
+}
+
+test "zip extraction rejects the whole archive when one member is unsafe" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // The safe member comes first, so it would be written before the bad one
+    // was reached. The archive must be refused before that happens.
+    const paths = try zipFixture(&tmp, &.{
+        .{ .name = "ok/a.txt", .data = "hello" },
+        .{ .name = "C:/Users/x/Startup/x.cmd", .data = "pwned" },
+    });
+    defer testing.allocator.free(paths.archive);
+    defer testing.allocator.free(paths.out);
+
+    try testing.expectError(
+        error.UnsafeArchiveMember,
+        extract(testing.allocator, .zip, paths.archive, paths.out, .{}),
+    );
+
+    var out = try tmp.dir.openDir("out", .{ .iterate = true });
+    defer out.close();
+    var it = out.iterate();
+    try testing.expect((try it.next()) == null);
 }
