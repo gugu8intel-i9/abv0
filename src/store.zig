@@ -2585,6 +2585,72 @@ pub const Store = struct {
         const owner = ownerOf(owners.recs.items, "bin", bin_name) orelse return null;
         return try a.dupe(u8, owner);
     }
+
+    /// Names (no `.exe`) of the bins that `state/bin-owners` records for
+    /// package `pkg_name`, in file order. Allocated from `a`.
+    pub fn ownedBins(self: *const Store, a: std.mem.Allocator, pkg_name: []const u8) ![][]const u8 {
+        var owners: Owners = undefined;
+        try self.readOwners(&owners, a);
+        defer owners.deinit();
+        var out = std.ArrayList([]const u8).init(a);
+        errdefer out.deinit();
+        for (owners.recs.items) |r| {
+            if (!std.mem.eql(u8, r.kind, "bin") or !std.mem.eql(u8, r.pkg, pkg_name)) continue;
+            try out.append(try a.dupe(u8, r.name));
+        }
+        return out.toOwnedSlice();
+    }
+
+    /// Point the bin links of an already installed GitHub package at store
+    /// version `version` (`switch` / `rollback`). Reads the store only: no
+    /// network, no download. Returns how many bins were linked.
+    pub fn relinkGithub(
+        self: *Store,
+        a: std.mem.Allocator,
+        repo: []const u8,
+        version: []const u8,
+        platform_name: []const u8,
+        opts: InstallOptions,
+    ) !usize {
+        var pkg = Package{ .name = repo, .version = version };
+        const pkg_dir = try self.pkgStorePath(a, pkg, platform_name);
+        var dir = std.fs.cwd().openDir(pkg_dir, .{ .iterate = true }) catch return StoreError.ExecutableNotFound;
+        defer dir.close();
+
+        // A raw download is one file named after the repository (plus our
+        // source note). Anything else is an archive whose programs are found.
+        const raw_name = if (std.mem.endsWith(u8, platform_name, "-windows"))
+            try std.fmt.allocPrint(a, "{s}.exe", .{repo})
+        else
+            repo;
+        var entries: usize = 0;
+        var only_raw = false;
+        var it = dir.iterate();
+        while (try it.next()) |entry| {
+            if (std.mem.eql(u8, entry.name, source_file)) continue;
+            entries += 1;
+            only_raw = entry.kind == .file and std.mem.eql(u8, entry.name, raw_name);
+        }
+        const is_raw = entries == 1 and only_raw;
+
+        const bins = try detectBins(a, pkg_dir, repo, raw_name, is_raw, platform_name);
+        var plans = std.ArrayList(LinkPlan).init(a);
+        var names = std.ArrayList([]const u8).init(a);
+        for (bins) |b| {
+            if (isReservedBin(b.name)) continue;
+            const src = try safepath.joinSafe(a, pkg_dir, b.path);
+            const dst_name = try std.fmt.allocPrint(a, "{s}{s}", .{ b.name, platform.exe_suffix });
+            const dst = try std.fs.path.join(a, &.{ self.bin_root, dst_name });
+            try plans.append(.{ .bin = b.name, .src = src, .dst = dst });
+            try names.append(b.name);
+        }
+        if (plans.items.len == 0) return StoreError.ExecutableNotFound;
+        pkg.bin = try names.toOwnedSlice();
+
+        var guard = try Guard.acquire(a, self.locks_root, pkg.name);
+        defer guard.release();
+        return self.linkPlans(a, pkg, plans.items, opts);
+    }
 };
 
 // ---------------------------------------------------------------------------

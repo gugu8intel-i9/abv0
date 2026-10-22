@@ -65,6 +65,20 @@ const Args = struct {
     quiet: bool = false,
     /// `-v` / `--verbose`: extra detail per package (urls, store paths, timings).
     verbose: bool = false,
+    /// `deps --tree`: nested instead of flat.
+    tree: bool = false,
+    /// `search --online`: also ask GitHub's repository search.
+    online: bool = false,
+    /// `home --open`: open the page instead of only printing it.
+    open: bool = false,
+    /// `migrate --install`: install what matched.
+    install: bool = false,
+    /// `upgrade --all`: every outdated package, said out loud.
+    all: bool = false,
+    /// `migrate --from-brew-list FILE`: names saved from `brew list --formula`.
+    from_brew_list: ?[]const u8 = null,
+    /// `migrate --brewfile FILE`: names from a Brewfile's `brew "x"` lines.
+    brewfile: ?[]const u8 = null,
 
     fn deinit(self: *Args) void {
         self.rest.deinit();
@@ -154,6 +168,24 @@ fn parseArgsDiag(allocator: std.mem.Allocator, argv: []const []const u8, diag: *
             args.quiet = true;
         } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
             args.verbose = true;
+        } else if (std.mem.eql(u8, arg, "--tree")) {
+            args.tree = true;
+        } else if (std.mem.eql(u8, arg, "--online")) {
+            args.online = true;
+        } else if (std.mem.eql(u8, arg, "--open")) {
+            args.open = true;
+        } else if (std.mem.eql(u8, arg, "--install")) {
+            args.install = true;
+        } else if (std.mem.eql(u8, arg, "--all")) {
+            args.all = true;
+        } else if (std.mem.eql(u8, arg, "--from-brew-list")) {
+            i += 1;
+            if (i >= argv.len) return failArg(diag, arg, "", error.MissingOptionValue);
+            args.from_brew_list = argv[i];
+        } else if (std.mem.eql(u8, arg, "--brewfile")) {
+            i += 1;
+            if (i >= argv.len) return failArg(diag, arg, "", error.MissingOptionValue);
+            args.brewfile = argv[i];
         } else if (std.mem.eql(u8, arg, "--platform")) {
             // The original called args_it.next() with no null check, so a
             // trailing `--platform` silently produced a null platform.
@@ -357,13 +389,20 @@ const commands = [_]Command{
     .{
         .name = "upgrade",
         .args = "[pkg]...",
-        .summary = "Upgrade the named packages, or every outdated one when none are named.",
-        .flags = &.{ dry_run_flag, jobs_flag, platform_flag, quiet_flag, verbose_flag },
-        .example = "abv0 upgrade ripgrep",
+        .summary = "Upgrade the named packages, or every outdated one when none are named (--all says so explicitly). Pinned packages are skipped unless named. The previous version is kept so `abv0 rollback` can return to it.",
+        .flags = &.{
+            .{ .name = "--all", .help = "Upgrade every outdated package (the default with no names)" },
+            dry_run_flag,
+            jobs_flag,
+            platform_flag,
+            quiet_flag,
+            verbose_flag,
+        },
+        .example = "abv0 upgrade --all",
     },
     .{
         .name = "outdated",
-        .summary = "List installed packages that have a newer version in the registry.",
+        .summary = "List installed packages that have a newer version in the registry; pinned ones are marked.",
         .flags = &.{ json_flag, platform_flag },
         .example = "abv0 outdated --json",
     },
@@ -376,16 +415,72 @@ const commands = [_]Command{
     .{
         .name = "search",
         .args = "<query>",
-        .summary = "Find registry packages whose name or description contains <query>.",
-        .flags = &.{json_flag},
-        .example = "abv0 search json --json",
+        .summary = "Find registry packages whose name or description contains <query>. With --online, then ask GitHub's repository search and list projects you can install with gh:owner/repo.",
+        .flags = &.{ .{ .name = "--online", .help = "Also search GitHub repositories by name (10 results, most stars first)" }, json_flag },
+        .example = "abv0 search --online json",
     },
     .{
         .name = "info",
         .args = "<pkg>",
-        .summary = "Show a package's versions, platforms, URLs and checksums.",
-        .flags = &.{json_flag},
+        .summary = "Show a package's catalog entry plus what is installed: versions (active one marked), size on disk, linked executables and where it came from.",
+        .flags = &.{ json_flag, platform_flag },
         .example = "abv0 info jq",
+    },
+    .{
+        .name = "deps",
+        .args = "<pkg>",
+        .summary = "List what a catalog package depends on, dependencies first (the order install uses).",
+        .flags = &.{ .{ .name = "--tree", .help = "Show the dependencies as a tree" }, json_flag },
+        .example = "abv0 deps --tree ffmpeg",
+    },
+    .{
+        .name = "uses",
+        .args = "<pkg>",
+        .summary = "List the installed packages that depend on <pkg>.",
+        .flags = &.{ json_flag, platform_flag },
+        .example = "abv0 uses libfoo",
+    },
+    .{
+        .name = "leaves",
+        .summary = "List installed packages that no other installed package depends on.",
+        .flags = &.{ json_flag, platform_flag },
+        .example = "abv0 leaves",
+    },
+    .{
+        .name = "switch",
+        .args = "<pkg> <version>",
+        .summary = "Make an installed version the active one: relink its executables to that version's store directory. Needs the version to be in the store (see `abv0 info`).",
+        .flags = &.{ json_flag, platform_flag, quiet_flag },
+        .example = "abv0 switch jq 1.6",
+    },
+    .{
+        .name = "rollback",
+        .args = "<pkg>",
+        .summary = "Switch to the version installed just before the active one. `upgrade` keeps that previous version for this; `cleanup` removes it.",
+        .flags = &.{ json_flag, platform_flag, quiet_flag },
+        .example = "abv0 rollback jq",
+    },
+    .{
+        .name = "home",
+        .args = "<pkg>",
+        .summary = "Print a package's homepage (for gh:owner/repo, its GitHub page).",
+        .flags = &.{ .{ .name = "--open", .help = "Open it in the default browser" }, json_flag },
+        .example = "abv0 home --open ripgrep",
+    },
+    .{
+        .name = "migrate",
+        .summary = "Map the package names from a Homebrew install onto the abv0 catalog. Reads names only from a saved `brew list --formula` or a Brewfile (use - for stdin); it never runs brew. Lists what matched and what did not.",
+        .flags = &.{
+            .{ .name = "--from-brew-list <file>", .help = "Names saved from `brew list --formula`, one per line" },
+            .{ .name = "--brewfile <file>", .help = "A Brewfile; its brew \"name\" lines are read" },
+            .{ .name = "--install", .help = "Install the matched packages (parallel, verified)" },
+            dry_run_flag,
+            json_flag,
+            jobs_flag,
+            platform_flag,
+            quiet_flag,
+        },
+        .example = "abv0 migrate --from-brew-list brew.txt --install",
     },
     .{
         .name = "run",
@@ -477,7 +572,7 @@ const commands = [_]Command{
     },
     .{
         .name = "cleanup",
-        .summary = "Remove old versions and stale temporary files, keeping the newest install.",
+        .summary = "Remove old versions (including the previous one `upgrade` keeps for rollback), stale temporary files and the download cache. The active version is always kept.",
         .flags = &.{dry_run_flag},
         .example = "abv0 cleanup --dry-run",
     },
@@ -553,11 +648,17 @@ fn renderUsage(w: anytype) !void {
         \\  install <pkg>...        Install packages and their dependencies (verified, in parallel)
         \\  install gh:owner/repo   Install any GitHub project's release, verified (no recipe needed)
         \\  uninstall <pkg>...      Remove packages and the links they created
-        \\  upgrade [pkg]...        Upgrade outdated packages
-        \\  outdated                List packages with a newer version available
+        \\  upgrade [--all|pkg]...  Upgrade outdated packages (keeps the previous version for rollback)
+        \\  outdated                List packages with a newer version available (pinned ones marked)
         \\  list [--installed]      List registry packages, or what is installed
-        \\  search <query>          Search the registry
-        \\  info <pkg>              Show package metadata
+        \\  search [--online] <q>   Search the registry (and GitHub repositories with --online)
+        \\  info <pkg>              Show metadata, installed versions, size and linked bins
+        \\  deps [--tree] <pkg>     List what a package depends on
+        \\  uses <pkg>              List installed packages that depend on it
+        \\  leaves                  List installed packages nothing else depends on
+        \\  switch <pkg> <version>  Make an installed version the active one
+        \\  rollback <pkg>          Go back to the previously installed version
+        \\  home [--open] <pkg>     Print (or open) a package's homepage
         \\  pin <pkg>               Hold a package at its installed version
         \\  unpin <pkg>             Let upgrade update it again
         \\  pinned                  List pinned packages
@@ -573,6 +674,8 @@ fn renderUsage(w: anytype) !void {
     try heading(w, "MANIFESTS");
     try w.writeAll(
         \\  bundle [install|dump]   Install from, or export to, a Brewfile
+        \\  migrate --from-brew-list F | --brewfile F
+        \\                          Map Homebrew package names to the catalog (--install to install them)
         \\  update                  Refresh the registry index
         \\  sync                    Recompile the local index and SQL export
         \\
@@ -584,7 +687,7 @@ fn renderUsage(w: anytype) !void {
         \\  detect <pkg>            Scan an installed package for malware patterns
         \\  benchmark               Measure local store and index performance
         \\  gc                      Remove temporary files and stale sandboxes
-        \\  cleanup                 Remove old versions, keeping the newest
+        \\  cleanup                 Remove old versions (including rollback's), keeping the newest
         \\  completions <shell>     Print a bash, zsh, fish or pwsh completion script
         \\  self-update [--check]   Update abv0 from a signed release
         \\  reset                   Uninstall everything
@@ -605,8 +708,15 @@ fn renderUsage(w: anytype) !void {
         \\  --no-stream             Download fully before unpacking (disable streaming install)
         \\  --force                 Overwrite output files and replace conflicting bin links
         \\  --dry-run               Show what install, upgrade, uninstall, bundle or cleanup would do; change nothing
-        \\  --json                  Machine-readable output (list, search, info, outdated, install, doctor)
+        \\  --json                  Machine-readable output (list, search, info, outdated, install, doctor, deps, uses, leaves, home, switch, rollback, migrate)
         \\  --installed             With list: show what is installed
+        \\  --tree                  With deps: show a tree
+        \\  --online                With search: also search GitHub repositories
+        \\  --open                  With home: open the page in a browser
+        \\  --all                   With upgrade: every outdated package
+        \\  --from-brew-list <f>    With migrate: names from `brew list --formula` (- for stdin)
+        \\  --brewfile <f>          With migrate: names from a Brewfile (- for stdin)
+        \\  --install               With migrate: install what matched
         \\  --bug, --malware        With report: file a bug report, or a suspicious-package report
         \\  -q, --quiet             Suppress progress lines (errors still print)
         \\  -v, --verbose           Also print urls, store paths and timings per package
@@ -1278,40 +1388,22 @@ fn installWaves(
 // JSON output
 // ---------------------------------------------------------------------------
 
-/// Terminal-safe view of manifest text. Manifest strings come from a remote
-/// index and may carry escape sequences that move the cursor, rewrite earlier
-/// lines or retitle the window. Every control byte (0x00-0x1f, which includes
-/// ESC and tab/newline, and 0x7f) prints as '?'. Use with `{}`. Pads on the
-/// right when a width is given, like `{s:<16}`.
-const Safe = struct {
-    text: []const u8,
-
-    pub fn format(
-        self: Safe,
-        comptime fmt_str: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = fmt_str;
-        for (self.text) |c| try writer.writeByte(if (c < 0x20 or c == 0x7f) '?' else c);
-        if (options.width) |w| {
-            if (w > self.text.len) try writer.writeByteNTimes(' ', w - self.text.len);
-        }
-    }
-};
-
-fn safe(text: []const u8) Safe {
-    return .{ .text = text };
-}
-
-/// Every JSON string value goes through the standard encoder, so quotes,
-/// backslashes and control bytes can never break out of the document.
-fn writeJsonString(w: anytype, s: []const u8) !void {
-    try std.json.encodeJsonString(s, .{}, w);
-}
+/// Terminal-safe text and JSON strings live in cmds_extra.zig so the extra
+/// commands print manifest text the same way.
+const Safe = cmds_extra.Safe;
+const safe = cmds_extra.safe;
+const writeJsonString = cmds_extra.writeJsonString;
 
 fn writePackageJson(w: anytype, pkg: registry.Package) !void {
-    try w.writeAll("{\"name\":");
+    try w.writeAll("{");
+    try writePackageJsonFields(w, pkg);
+    try w.writeAll("}");
+}
+
+/// The members of a package's JSON object, without the braces, so `info` can
+/// add its own members after them.
+fn writePackageJsonFields(w: anytype, pkg: registry.Package) !void {
+    try w.writeAll("\"name\":");
     try writeJsonString(w, pkg.name);
     try w.writeAll(",\"version\":");
     try writeJsonString(w, pkg.version);
@@ -1340,17 +1432,17 @@ fn writePackageJson(w: anytype, pkg: registry.Package) !void {
         try writeJsonString(w, p.url);
         try w.writeAll("}");
     }
-    try w.writeAll("}}");
+    try w.writeAll("}");
 }
 
-fn writeOutdatedJson(w: anytype, name: []const u8, installed: []const u8, available: []const u8) !void {
+fn writeOutdatedJson(w: anytype, name: []const u8, installed: []const u8, available: []const u8, pinned: bool) !void {
     try w.writeAll("{\"name\":");
     try writeJsonString(w, name);
     try w.writeAll(",\"installed\":");
     try writeJsonString(w, installed);
     try w.writeAll(",\"available\":");
     try writeJsonString(w, available);
-    try w.writeAll("}");
+    try w.print(",\"pinned\":{s}}}", .{if (pinned) "true" else "false"});
 }
 
 /// The registry name closest to `name`, for a name the registry does not have.
@@ -1379,7 +1471,7 @@ fn noteUnknownName(a: std.mem.Allocator, reg: *const registry.Registry, name: []
 }
 
 fn supportsDryRun(cmd: []const u8) bool {
-    const names = [_][]const u8{ "install", "upgrade", "uninstall", "bundle", "cleanup" };
+    const names = [_][]const u8{ "install", "upgrade", "uninstall", "bundle", "cleanup", "migrate" };
     for (names) |n| {
         if (std.mem.eql(u8, n, cmd)) return true;
     }
@@ -1452,6 +1544,11 @@ fn writeDryRunPlan(
 
 /// `install --json`: one entry per planned package, with how it ended.
 fn writeInstallJson(w: anytype, reg: *const registry.Registry, names: []const []const u8, levels: []const usize, ok: []const bool) !void {
+    try writeInstallJsonArray(w, reg, names, levels, ok);
+    try w.writeAll("\n");
+}
+
+fn writeInstallJsonArray(w: anytype, reg: *const registry.Registry, names: []const []const u8, levels: []const usize, ok: []const bool) !void {
     try w.writeAll("[");
     for (names, 0..) |name, i| {
         if (i > 0) try w.writeAll(",");
@@ -1471,7 +1568,7 @@ fn writeInstallJson(w: anytype, reg: *const registry.Registry, names: []const []
         }
         try w.print(",\"status\":\"{s}\"}}", .{status});
     }
-    try w.writeAll("]\n");
+    try w.writeAll("]");
 }
 
 const InstalledRow = struct {
@@ -1693,7 +1790,7 @@ fn run(base: std.mem.Allocator, a: std.mem.Allocator) !u8 {
         .json = args.json,
     };
     if (output.dry_run and !supportsDryRun(cmd)) {
-        term.err("{s}error{s}: --dry-run applies to install, upgrade, uninstall and bundle install\n", .{ term.red, term.reset });
+        term.err("{s}error{s}: --dry-run applies to install, upgrade, uninstall, bundle install, cleanup and migrate --install\n", .{ term.red, term.reset });
         return 2;
     }
 
@@ -1709,7 +1806,7 @@ fn run(base: std.mem.Allocator, a: std.mem.Allocator) !u8 {
     // cannot be built, installs download to a file first.
     var session: ?stream.Session = null;
     defer if (session) |*s| s.deinit();
-    if (!args.no_stream and installsPackages(cmd)) {
+    if (!args.no_stream and (installsPackages(cmd) or (args.install and std.mem.eql(u8, cmd, "migrate")))) {
         if (stream.Session.init(base)) |s| {
             session = s;
             opts.session = &session.?;
@@ -1763,12 +1860,19 @@ fn run(base: std.mem.Allocator, a: std.mem.Allocator) !u8 {
 
     if (std.mem.eql(u8, cmd, "pin")) return cmds_extra.cmdPin(a, &st, &reg, args.rest.items);
     if (std.mem.eql(u8, cmd, "list")) return cmdList(&reg, args.json);
-    if (std.mem.eql(u8, cmd, "search")) return cmdSearch(&reg, args.rest.items, args.json);
-    if (std.mem.eql(u8, cmd, "info")) return cmdInfo(a, &reg, args.rest.items, args.json);
+    if (std.mem.eql(u8, cmd, "search")) return cmdSearch(a, &reg, args.rest.items, args.json, args.online);
+    if (std.mem.eql(u8, cmd, "info")) return cmdInfo(a, &st, &reg, args.rest.items, args.json, platform_name);
+    if (std.mem.eql(u8, cmd, "deps")) return cmdDeps(a, &reg, &args);
+    if (std.mem.eql(u8, cmd, "uses")) return cmdUses(a, &st, &reg, &args, platform_name);
+    if (std.mem.eql(u8, cmd, "leaves")) return cmdLeaves(a, &st, &reg, &args, platform_name);
+    if (std.mem.eql(u8, cmd, "switch")) return cmdSwitch(a, &st, &reg, &args, platform_name, opts);
+    if (std.mem.eql(u8, cmd, "rollback")) return cmdSwitch(a, &st, &reg, &args, platform_name, opts);
+    if (std.mem.eql(u8, cmd, "home")) return cmdHome(a, &st, &reg, &args, platform_name);
+    if (std.mem.eql(u8, cmd, "migrate")) return cmdMigrate(a, &st, &reg, &args, platform_name, opts, &timer);
     if (std.mem.eql(u8, cmd, "install")) return cmdInstall(a, &st, &reg, &args, platform_name, opts, &timer);
     if (std.mem.eql(u8, cmd, "uninstall")) return cmdUninstall(a, &st, &reg, args.rest.items, platform_name);
     if (std.mem.eql(u8, cmd, "outdated")) return cmdOutdated(a, &st, &reg, platform_name, args.json);
-    if (std.mem.eql(u8, cmd, "upgrade")) return cmdUpgrade(a, &st, &reg, args.rest.items, platform_name, opts, args.jobs);
+    if (std.mem.eql(u8, cmd, "upgrade")) return cmdUpgrade(a, &st, &reg, args.rest.items, args.all, platform_name, opts, args.jobs);
     if (std.mem.eql(u8, cmd, "run")) return cmdRun(a, &st, &reg, args.rest.items, platform_name, opts);
     if (std.mem.eql(u8, cmd, "shell")) return cmdShell(a, &st, &reg, args.rest.items, platform_name, opts);
     if (std.mem.eql(u8, cmd, "bundle")) return cmdBundle(a, &st, &reg, &args, platform_name, opts);
@@ -1832,13 +1936,19 @@ fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     return std.ascii.indexOfIgnoreCase(haystack, needle) != null;
 }
 
-fn cmdSearch(reg: *const registry.Registry, rest: []const []const u8, json: bool) !u8 {
+fn cmdSearch(a: std.mem.Allocator, reg: *const registry.Registry, rest: []const []const u8, json: bool, online: bool) !u8 {
     if (rest.len == 0) {
-        term.err("usage: abv0 search <query>\n", .{});
+        term.err("usage: abv0 search [--online] <query>\n", .{});
         return 2;
     }
-    const q = rest[0];
+    const q = try std.mem.join(a, " ", rest);
+    defer a.free(q);
+    if (q.len > cmds_extra.max_query_len) {
+        term.err("{s}error{s}: the query is longer than {d} bytes\n", .{ term.red, term.reset, cmds_extra.max_query_len });
+        return 2;
+    }
     const w = term.writer();
+    if (json and online) try w.writeAll("{\"catalog\":");
     if (json) try w.writeAll("[");
     var found: usize = 0;
     for (reg.packages) |pkg| {
@@ -1854,30 +1964,173 @@ fn cmdSearch(reg: *const registry.Registry, rest: []const []const u8, json: bool
         found += 1;
     }
     if (json) {
-        try w.writeAll("]\n");
+        try w.writeAll("]");
+        if (!online) try w.writeAll("\n");
     } else if (found == 0) {
         // No match is an answer, not a failure.
         term.print("no packages match '{}'\n", .{safe(q)});
     }
+    if (!online) return 0;
+    return searchOnline(a, w, q, json);
+}
+
+/// Why a GitHub search failed, in a sentence with a next step.
+fn searchFailure(e: anyerror, message: ?[]const u8) []const u8 {
+    if (message) |m| return m;
+    return switch (e) {
+        net.Error.DownloadFailed => "GitHub did not answer (no network, or the search rate limit is used up: 10 a minute without a token; set GITHUB_TOKEN to raise it)",
+        else => explain(e),
+    };
+}
+
+/// `search --online`: the GitHub half. The catalog results are already out.
+fn searchOnline(a: std.mem.Allocator, w: anytype, q: []const u8, json: bool) !u8 {
+    var message: ?[]const u8 = null;
+    var failure: ?[]const u8 = null;
+    const repos: []const cmds_extra.Repo = cmds_extra.searchGithub(a, q, &message) catch |e| blk: {
+        failure = searchFailure(e, message);
+        break :blk &.{};
+    };
+
+    if (json) {
+        try w.writeAll(",\"online\":");
+        try writeRepoJson(w, repos);
+        if (failure) |f| {
+            try w.writeAll(",\"online_error\":");
+            try writeJsonString(w, f);
+        }
+        try w.writeAll("}\n");
+        return if (failure == null) 0 else 1;
+    }
+    if (failure) |f| {
+        term.err("{s}error{s}: GitHub search failed: {}\n", .{ term.red, term.reset, safe(f) });
+        return 1;
+    }
+    if (repos.len == 0) {
+        term.print("\nno GitHub repositories match '{}'\n", .{safe(q)});
+        return 0;
+    }
+    term.print("\n{s}GitHub repositories{s} matching '{}' (most stars first; abv0 has not vetted them):\n", .{ term.bold, term.reset, safe(q) });
+    for (repos) |r| {
+        term.print("{s}{}{s} {s}{d} stars{s}\n", .{ term.bold, safe(r.full_name), term.reset, term.dim, r.stars, term.reset });
+        if (r.description.len > 0) term.print("    {}\n", .{safe(r.description)});
+        term.print("    abv0 install gh:{}\n", .{safe(r.full_name)});
+    }
     return 0;
 }
 
-fn cmdInfo(a: std.mem.Allocator, reg: *const registry.Registry, rest: []const []const u8, json: bool) !u8 {
+fn writeRepoJson(w: anytype, repos: []const cmds_extra.Repo) !void {
+    try w.writeAll("[");
+    for (repos, 0..) |r, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"repo\":");
+        try writeJsonString(w, r.full_name);
+        try w.print(",\"stars\":{d},\"description\":", .{r.stars});
+        try writeJsonString(w, r.description);
+        try w.writeAll(",\"install\":");
+        var spec_buf: [320]u8 = undefined;
+        try writeJsonString(w, try std.fmt.bufPrint(&spec_buf, "gh:{s}", .{r.full_name}));
+        try w.writeAll("}");
+    }
+    try w.writeAll("]");
+}
+
+/// What `info` prints about the store side of a package: where it came from,
+/// which versions are there, how big, and which executables are linked.
+fn printInstalledInfo(data: cmds_extra.InfoData, source: []const u8) void {
+    term.print("  source: {}\n", .{safe(source)});
+    if (data.rows.len == 0) {
+        term.print("  installed: no\n", .{});
+        return;
+    }
+    term.print("  installed:\n", .{});
+    var i = data.rows.len;
+    while (i > 0) {
+        i -= 1;
+        const r = data.rows[i];
+        var buf: [32]u8 = undefined;
+        term.print("    {:<14} {s:<7} {s}\n", .{ safe(r.version), if (r.active) "active" else "", term.formatBytes(&buf, r.bytes) });
+    }
+    var total_buf: [32]u8 = undefined;
+    term.print("  size on disk: {s}\n", .{term.formatBytes(&total_buf, data.total_bytes)});
+    if (data.bins.len > 0) {
+        term.print("  linked:", .{});
+        for (data.bins) |b| term.print(" {}", .{safe(b)});
+        term.print("\n", .{});
+    }
+}
+
+fn writeInstalledInfoJson(w: anytype, data: cmds_extra.InfoData, source: []const u8) !void {
+    try w.writeAll(",\"source\":");
+    try writeJsonString(w, source);
+    try w.writeAll(",\"installed\":[");
+    for (data.rows, 0..) |r, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"version\":");
+        try writeJsonString(w, r.version);
+        try w.print(",\"active\":{s},\"bytes\":{d}}}", .{ if (r.active) "true" else "false", r.bytes });
+    }
+    try w.print("],\"size_bytes\":{d},\"linked_bins\":[", .{data.total_bytes});
+    for (data.bins, 0..) |b, i| {
+        if (i > 0) try w.writeAll(",");
+        try writeJsonString(w, b);
+    }
+    // The catalog does not publish download sizes.
+    try w.writeAll("],\"download_size\":null");
+}
+
+fn cmdInfo(
+    a: std.mem.Allocator,
+    st: *const store.Store,
+    reg: *const registry.Registry,
+    rest: []const []const u8,
+    json: bool,
+    platform_name: []const u8,
+) !u8 {
     if (rest.len == 0) {
         term.err("usage: abv0 info <pkg>\n", .{});
         return 2;
     }
-    const pkg = store.Store.resolveRequest(reg, rest[0]) orelse {
+    const catalog = store.Store.resolveRequest(reg, rest[0]);
+    // A package installed from GitHub is not in the catalog; the store knows it.
+    const gh = findGithubInstall(a, st, if (catalog) |p| p.name else rest[0], platform_name);
+    if (catalog == null and gh == null) {
         term.err("{s}error{s}: '{}' not found\n", .{ term.red, term.reset, safe(rest[0]) });
         hintPackage(a, reg, rest[0]);
         return 1;
-    };
+    }
+    const name = if (gh) |g| g.name else catalog.?.name;
+    const data = try cmds_extra.gatherInfo(a, st, name, platform_name);
+    var source_buf: [320]u8 = undefined;
+    const source: []const u8 = if (gh) |g|
+        (std.fmt.bufPrint(&source_buf, "gh:{s}/{s}@{s}", .{ g.owner, g.repo, g.tag }) catch "github")
+    else
+        "catalog";
+
     if (json) {
         const w = term.writer();
-        try writePackageJson(w, pkg);
-        try w.writeAll("\n");
+        try w.writeAll("{");
+        if (catalog) |pkg| {
+            try writePackageJsonFields(w, pkg);
+        } else {
+            try w.writeAll("\"name\":");
+            try writeJsonString(w, gh.?.name);
+            try w.writeAll(",\"version\":");
+            try writeJsonString(w, gh.?.version);
+        }
+        try writeInstalledInfoJson(w, data, source);
+        try w.writeAll("}\n");
         return 0;
     }
+
+    const pkg = catalog orelse {
+        const g = gh.?;
+        term.print("{s}{}{s} {}\n", .{ term.bold, safe(g.name), term.reset, safe(g.version) });
+        term.print("  GitHub release of {}/{}\n", .{ safe(g.owner), safe(g.repo) });
+        term.print("  https://github.com/{}/{}\n", .{ safe(g.owner), safe(g.repo) });
+        printInstalledInfo(data, source);
+        return 0;
+    };
 
     term.print("{s}{}{s} {}\n", .{ term.bold, safe(pkg.name), term.reset, safe(pkg.version) });
     if (pkg.description.len > 0) term.print("  {}\n", .{safe(pkg.description)});
@@ -1893,6 +2146,7 @@ fn cmdInfo(a: std.mem.Allocator, reg: *const registry.Registry, rest: []const []
         for (pkg.deps) |d| term.print(" {}", .{safe(d)});
         term.print("\n", .{});
     }
+    printInstalledInfo(data, source);
     term.print("\n  platforms:\n", .{});
     for (pkg.platforms) |p| {
         const pinned = p.checksumIsPinned();
@@ -1903,6 +2157,394 @@ fn cmdInfo(a: std.mem.Allocator, reg: *const registry.Registry, rest: []const []
         term.print("      sha256 {}\n", .{safe(if (p.sha256.len > 0) p.sha256 else "(none)")});
     }
     return 0;
+}
+
+/// `deps <pkg>`: what a catalog package depends on. Flat (install order) or a tree.
+fn cmdDeps(a: std.mem.Allocator, reg: *const registry.Registry, args: *Args) !u8 {
+    const rest = args.rest.items;
+    if (rest.len != 1) {
+        term.err("usage: abv0 deps [--tree] <pkg>\n", .{});
+        return 2;
+    }
+    const pkg = store.Store.resolveRequest(reg, rest[0]) orelse {
+        term.err("{s}error{s}: '{}' not found\n", .{ term.red, term.reset, safe(rest[0]) });
+        hintPackage(a, reg, rest[0]);
+        return 1;
+    };
+    const w = term.writer();
+    if (args.tree) {
+        if (args.json) {
+            try cmds_extra.writeDepsTreeJson(w, a, reg, pkg);
+        } else {
+            try cmds_extra.writeDepsTree(w, a, reg, pkg);
+        }
+        return 0;
+    }
+    const deps = cmds_extra.collectDeps(a, reg, pkg.name) catch |e| {
+        term.err("{s}error{s}: cannot follow the dependencies of {}: {s}\n", .{ term.red, term.reset, safe(pkg.name), @errorName(e) });
+        return 1;
+    };
+    if (args.json) {
+        try cmds_extra.writeDepsFlatJson(w, pkg.name, deps);
+        return 0;
+    }
+    for (deps) |d| term.print("{}\n", .{safe(d)});
+    return 0;
+}
+
+fn writeInstalledListJson(w: anytype, list: []const cmds_extra.InstalledPkg) !void {
+    try w.writeAll("[");
+    for (list, 0..) |p, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"name\":");
+        try writeJsonString(w, p.name);
+        try w.writeAll(",\"version\":");
+        try writeJsonString(w, p.version);
+        try w.writeAll("}");
+    }
+    try w.writeAll("]\n");
+}
+
+/// `uses <pkg>`: installed packages that depend on it.
+fn cmdUses(
+    a: std.mem.Allocator,
+    st: *const store.Store,
+    reg: *const registry.Registry,
+    args: *Args,
+    platform_name: []const u8,
+) !u8 {
+    const rest = args.rest.items;
+    if (rest.len != 1) {
+        term.err("usage: abv0 uses <pkg>\n", .{});
+        return 2;
+    }
+    const target: []const u8 = if (store.Store.resolveRequest(reg, rest[0])) |p| p.name else if (findGithubInstall(a, st, rest[0], platform_name)) |g| g.name else {
+        term.err("{s}error{s}: '{}' not found\n", .{ term.red, term.reset, safe(rest[0]) });
+        hintPackage(a, reg, rest[0]);
+        return 1;
+    };
+    const installed = try cmds_extra.installedPackages(a, st, platform_name);
+    const users = try cmds_extra.dependentsOf(a, reg, installed, target);
+    if (args.json) {
+        try writeInstalledListJson(term.writer(), users);
+        return 0;
+    }
+    for (users) |p| term.print("{}\n", .{safe(p.name)});
+    return 0;
+}
+
+/// `leaves`: installed packages nothing else installed depends on.
+fn cmdLeaves(
+    a: std.mem.Allocator,
+    st: *const store.Store,
+    reg: *const registry.Registry,
+    args: *Args,
+    platform_name: []const u8,
+) !u8 {
+    if (args.rest.items.len != 0) {
+        term.err("usage: abv0 leaves\n", .{});
+        return 2;
+    }
+    const installed = try cmds_extra.installedPackages(a, st, platform_name);
+    const leaves = try cmds_extra.leavesOf(a, reg, installed);
+    if (args.json) {
+        try writeInstalledListJson(term.writer(), leaves);
+        return 0;
+    }
+    for (leaves) |p| term.print("{}\n", .{safe(p.name)});
+    return 0;
+}
+
+/// `switch <pkg> <version>` and `rollback <pkg>`: relink an installed version.
+/// Nothing is downloaded; the version has to be in the store already.
+fn cmdSwitch(
+    a: std.mem.Allocator,
+    st: *store.Store,
+    reg: *const registry.Registry,
+    args: *Args,
+    platform_name: []const u8,
+    opts: store.InstallOptions,
+) !u8 {
+    const rollback = std.mem.eql(u8, args.command orelse "", "rollback");
+    const rest = args.rest.items;
+    if (rollback and rest.len != 1) {
+        term.err("usage: abv0 rollback <pkg>\n", .{});
+        return 2;
+    }
+    if (!rollback and rest.len != 2) {
+        term.err("usage: abv0 switch <pkg> <version>\n", .{});
+        return 2;
+    }
+
+    const catalog = store.Store.resolveRequest(reg, rest[0]);
+    const gh = findGithubInstall(a, st, if (catalog) |p| p.name else rest[0], platform_name);
+    if (catalog == null and gh == null) {
+        term.err("{s}error{s}: '{}' not found\n", .{ term.red, term.reset, safe(rest[0]) });
+        hintPackage(a, reg, rest[0]);
+        return 1;
+    }
+    const name = if (gh) |g| g.name else catalog.?.name;
+
+    const rows = try cmds_extra.listVersions(a, st, name, platform_name);
+    if (rows.len == 0) {
+        term.err("{s}error{s}: '{}' is not installed\n", .{ term.red, term.reset, safe(name) });
+        return 1;
+    }
+    const from = cmds_extra.activeIndex(rows);
+
+    const to: usize = blk: {
+        if (rollback) {
+            break :blk cmds_extra.previousIndex(rows) orelse {
+                term.err("{s}error{s}: no earlier version of {} is installed to roll back to\n", .{ term.red, term.reset, safe(name) });
+                term.err("  `abv0 upgrade` keeps the version it replaces; `abv0 cleanup` removes it\n", .{});
+                return 1;
+            };
+        }
+        break :blk cmds_extra.findVersion(rows, rest[1]) orelse {
+            term.err("{s}error{s}: {} {} is not installed\n", .{ term.red, term.reset, safe(name), safe(rest[1]) });
+            term.err("  installed versions:", .{});
+            for (rows) |r| term.err(" {}", .{safe(r.version)});
+            term.err("\n", .{});
+            return 1;
+        };
+    };
+    const target_version = rows[to].version;
+
+    if (from != null and from.? == to) {
+        if (args.json) {
+            try writeSwitchJson(term.writer(), name, target_version, target_version);
+        } else {
+            say("{} is already at {}\n", .{ safe(name), safe(target_version) });
+        }
+        return 0;
+    }
+
+    if (gh) |g| {
+        _ = st.relinkGithub(a, g.name, target_version, platform_name, opts) catch |e| {
+            reportInstallError(name, e);
+            return 1;
+        };
+    } else {
+        // The store directory exists, so install only relinks it.
+        var pkg = catalog.?;
+        pkg.version = target_version;
+        st.install(pkg, platform_name, opts) catch |e| {
+            reportInstallError(name, e);
+            return 1;
+        };
+    }
+
+    const from_version: ?[]const u8 = if (from) |i| rows[i].version else null;
+    if (args.json) {
+        try writeSwitchJson(term.writer(), name, from_version, target_version);
+        return 0;
+    }
+    say("{s}switched{s} {} {s}{}{s} -> {}\n", .{ term.green, term.reset, safe(name), term.dim, safe(from_version orelse "(unknown)"), term.reset, safe(target_version) });
+    // `pin` only knows catalog names, so the hint is for those.
+    if (gh == null and to + 1 < rows.len and !cmds_extra.isPinned(st, a, name)) {
+        say("  `abv0 upgrade` would replace it; `abv0 pin {}` holds it here\n", .{safe(name)});
+    }
+    return 0;
+}
+
+fn writeSwitchJson(w: anytype, name: []const u8, from: ?[]const u8, to: []const u8) !void {
+    try w.writeAll("{\"package\":");
+    try writeJsonString(w, name);
+    try w.writeAll(",\"from\":");
+    if (from) |f| try writeJsonString(w, f) else try w.writeAll("null");
+    try w.writeAll(",\"to\":");
+    try writeJsonString(w, to);
+    try w.writeAll("}\n");
+}
+
+/// `home <pkg>`: print (and with --open, open) a package's homepage.
+fn cmdHome(
+    a: std.mem.Allocator,
+    st: *const store.Store,
+    reg: *const registry.Registry,
+    args: *Args,
+    platform_name: []const u8,
+) !u8 {
+    const rest = args.rest.items;
+    if (rest.len != 1) {
+        term.err("usage: abv0 home [--open] <pkg>\n", .{});
+        return 2;
+    }
+    var name = rest[0];
+    var url: []const u8 = "";
+    if (store.Store.resolveRequest(reg, rest[0])) |pkg| {
+        name = pkg.name;
+        url = pkg.homepage;
+        if (url.len == 0) {
+            term.err("{s}error{s}: {} lists no homepage\n", .{ term.red, term.reset, safe(pkg.name) });
+            return 1;
+        }
+    } else if (ghrelease.parseSpec(rest[0])) |spec| {
+        // gh:owner/repo, or owner/repo.
+        url = try std.fmt.allocPrint(a, "https://github.com/{s}/{s}", .{ spec.owner, spec.repo });
+    } else if (findGithubInstall(a, st, rest[0], platform_name)) |g| {
+        url = try std.fmt.allocPrint(a, "https://github.com/{s}/{s}", .{ g.owner, g.repo });
+    } else {
+        term.err("{s}error{s}: '{}' not found\n", .{ term.red, term.reset, safe(rest[0]) });
+        hintPackage(a, reg, rest[0]);
+        return 1;
+    }
+
+    if (args.json) {
+        const w = term.writer();
+        try w.writeAll("{\"name\":");
+        try writeJsonString(w, name);
+        try w.writeAll(",\"homepage\":");
+        try writeJsonString(w, url);
+        try w.writeAll("}\n");
+    } else {
+        term.print("{}\n", .{safe(url)});
+    }
+    if (args.open) {
+        if (!std.mem.startsWith(u8, url, "https://")) {
+            term.err("{s}error{s}: not opening {}: only https pages are opened\n", .{ term.red, term.reset, safe(url) });
+            return 1;
+        }
+        term.flush();
+        platform.openBrowser(a, url);
+    }
+    return 0;
+}
+
+const max_names_bytes = 1024 * 1024;
+
+fn readNamesInput(a: std.mem.Allocator, path: []const u8) ![]u8 {
+    if (std.mem.eql(u8, path, "-")) return std.io.getStdIn().reader().readAllAlloc(a, max_names_bytes);
+    return std.fs.cwd().readFileAlloc(a, path, max_names_bytes);
+}
+
+/// `migrate`: map the names from a Homebrew install onto the catalog. Names
+/// only; brew is never run.
+fn cmdMigrate(
+    a: std.mem.Allocator,
+    st: *store.Store,
+    reg: *const registry.Registry,
+    args: *Args,
+    platform_name: []const u8,
+    opts: store.InstallOptions,
+    timer: *std.time.Timer,
+) !u8 {
+    if (args.rest.items.len != 0 or (args.from_brew_list == null and args.brewfile == null)) {
+        term.err("usage: abv0 migrate [--from-brew-list <file> | --brewfile <file>] [--install]\n", .{});
+        term.err("  save your list first: brew list --formula > brew.txt   (use - to read stdin)\n", .{});
+        return 2;
+    }
+
+    var wanted = std.ArrayList([]const u8).init(a);
+    var seen = std.StringHashMap(void).init(a);
+    const inputs = [_]struct { path: ?[]const u8, source: cmds_extra.NameSource }{
+        .{ .path = args.from_brew_list, .source = .list },
+        .{ .path = args.brewfile, .source = .brewfile },
+    };
+    for (inputs) |in| {
+        const path = in.path orelse continue;
+        const text = readNamesInput(a, path) catch |e| {
+            term.err("{s}error{s}: cannot read {}: {s}\n", .{ term.red, term.reset, safe(path), explain(e) });
+            return 1;
+        };
+        for (try cmds_extra.parseNames(a, text, in.source)) |n| {
+            if (try seen.fetchPut(n, {}) == null) try wanted.append(n);
+        }
+    }
+
+    var matched = std.ArrayList(cmds_extra.Match).init(a);
+    var unmatched = std.ArrayList([]const u8).init(a);
+    // Two Homebrew names can land on one catalog package; install it once.
+    var installs = std.ArrayList([]const u8).init(a);
+    var picked = std.StringHashMap(void).init(a);
+    for (wanted.items) |n| {
+        if (cmds_extra.matchName(reg, n)) |m| {
+            try matched.append(m);
+            if (try picked.fetchPut(m.pkg.name, {}) == null) try installs.append(m.pkg.name);
+        } else {
+            try unmatched.append(n);
+        }
+    }
+
+    const w = term.writer();
+    if (!args.json) {
+        term.print("{d} names read: {s}{d} in the catalog{s}, {d} not\n", .{ wanted.items.len, term.green, matched.items.len, term.reset, unmatched.items.len });
+        if (matched.items.len > 0) {
+            term.print("\n{s}in the catalog{s}\n", .{ term.bold, term.reset });
+            for (matched.items) |m| {
+                term.print("  {:<24} -> {}", .{ safe(m.wanted), safe(m.pkg.name) });
+                if (m.via != .exact) term.print(" {s}({s}){s}", .{ term.dim, m.via.label(), term.reset });
+                term.print("\n", .{});
+            }
+        }
+        if (unmatched.items.len > 0) {
+            term.print("\n{s}not in the catalog{s}\n", .{ term.bold, term.reset });
+            for (unmatched.items) |n| term.print("  {:<24} {s}abv0 search --online {}{s}\n", .{ safe(n), term.dim, safe(n), term.reset });
+            term.print("  a project's own GitHub release installs with: abv0 install gh:<owner>/<repo>\n", .{});
+        }
+    }
+
+    var failures: usize = 0;
+    var plan: ?Plan = null;
+    var ok: []bool = try a.alloc(bool, 0);
+    if (args.install and installs.items.len > 0) {
+        plan = try planInstall(a, reg, installs.items);
+        if (output.dry_run) {
+            if (args.json) {
+                try writeMigrateJson(w, matched.items, unmatched.items);
+                try w.writeAll(",\"install\":");
+            }
+            try writeDryRunPlan(w, a, st, reg, plan.?.names, platform_name, "install");
+            if (args.json) try w.writeAll("}\n");
+            return 0;
+        }
+        if (!args.json) term.print("\n", .{});
+        ok = try a.alloc(bool, plan.?.names.len);
+        failures = try installWaves(a, st, reg, plan.?.names, plan.?.levels, ok, platform_name, opts, args.jobs);
+    }
+
+    if (args.json) {
+        try writeMigrateJson(w, matched.items, unmatched.items);
+        if (plan) |p| {
+            try w.writeAll(",\"install\":");
+            try writeInstallJsonArray(w, reg, p.names, p.levels, ok);
+        }
+        try w.writeAll("}\n");
+        return if (failures == 0) 0 else 1;
+    }
+    if (plan) |p| {
+        const elapsed = ms(timer.read());
+        if (failures == 0) {
+            say("\n{s}done{s} {d} packages in {d:.2}ms\n", .{ term.green, term.reset, p.names.len, elapsed });
+        } else {
+            term.print("\n{s}{d} of {d} packages failed{s} ({d:.2}ms)\n", .{ term.red, failures, p.names.len, term.reset, elapsed });
+        }
+    } else if (!args.install and installs.items.len > 0) {
+        term.print("\nrun again with --install to install the {d} catalog packages\n", .{installs.items.len});
+    }
+    return if (failures == 0) 0 else 1;
+}
+
+/// The `matched` and `unmatched` members of the `migrate --json` document,
+/// opened with `{` and left open so the caller can add `install`.
+fn writeMigrateJson(w: anytype, matched: []const cmds_extra.Match, unmatched: []const []const u8) !void {
+    try w.writeAll("{\"matched\":[");
+    for (matched, 0..) |m, i| {
+        if (i > 0) try w.writeAll(",");
+        try w.writeAll("{\"name\":");
+        try writeJsonString(w, m.wanted);
+        try w.writeAll(",\"package\":");
+        try writeJsonString(w, m.pkg.name);
+        try w.writeAll(",\"via\":");
+        try writeJsonString(w, @tagName(m.via));
+        try w.writeAll("}");
+    }
+    try w.writeAll("],\"unmatched\":[");
+    for (unmatched, 0..) |n, i| {
+        if (i > 0) try w.writeAll(",");
+        try writeJsonString(w, n);
+    }
+    try w.writeAll("]");
 }
 
 fn cmdInstall(
@@ -2025,11 +2667,11 @@ fn cmdOutdated(
         try w.writeAll("[");
         for (list, 0..) |e, i| {
             if (i > 0) try w.writeAll(",");
-            try writeOutdatedJson(w, e.pkg.name, e.installed, e.pkg.version);
+            try writeOutdatedJson(w, e.pkg.name, e.installed, e.pkg.version, cmds_extra.isPinned(st, a, e.pkg.name));
         }
         for (gh_list, 0..) |g, i| {
             if (i > 0 or list.len > 0) try w.writeAll(",");
-            try writeOutdatedJson(w, g.entry.name, g.entry.tag, g.latest_tag);
+            try writeOutdatedJson(w, g.entry.name, g.entry.tag, g.latest_tag, cmds_extra.isPinned(st, a, g.entry.name));
         }
         try w.writeAll("]\n");
         return 0;
@@ -2039,23 +2681,36 @@ fn cmdOutdated(
         term.print("everything is up to date\n", .{});
         return 0;
     }
+    var pinned: usize = 0;
     for (list) |e| {
-        term.print("{s}{}{s}  {} {s}->{s} {s}{}{s}\n", .{
+        term.print("{s}{}{s}  {} {s}->{s} {s}{}{s}", .{
             term.bold,         safe(e.pkg.name),    term.reset,
             safe(e.installed), term.dim,            term.reset,
             term.green,        safe(e.pkg.version), term.reset,
         });
+        if (cmds_extra.isPinned(st, a, e.pkg.name)) {
+            pinned += 1;
+            term.print(" {s}(pinned){s}", .{ term.yellow, term.reset });
+        }
+        term.print("\n", .{});
     }
     for (gh_list) |g| {
-        term.print("{s}{}{s}  {} {s}->{s} {s}{}{s} {s}(gh:{}/{}){s}\n", .{
+        term.print("{s}{}{s}  {} {s}->{s} {s}{}{s} {s}(gh:{}/{}){s}", .{
             term.bold,         safe(g.entry.name),  term.reset,
             safe(g.entry.tag), term.dim,            term.reset,
             term.green,        safe(g.latest_tag),  term.reset,
             term.dim,          safe(g.entry.owner), safe(g.entry.repo),
             term.reset,
         });
+        if (cmds_extra.isPinned(st, a, g.entry.name)) {
+            pinned += 1;
+            term.print(" {s}(pinned){s}", .{ term.yellow, term.reset });
+        }
+        term.print("\n", .{});
     }
-    term.print("\n{d} outdated; run `abv0 upgrade`\n", .{list.len + gh_list.len});
+    term.print("\n{d} outdated", .{list.len + gh_list.len});
+    if (pinned > 0) term.print(" ({d} pinned: `abv0 upgrade` skips them)", .{pinned});
+    term.print("; run `abv0 upgrade`\n", .{});
     return 0;
 }
 
@@ -2064,10 +2719,15 @@ fn cmdUpgrade(
     st: *store.Store,
     reg: *const registry.Registry,
     rest: []const []const u8,
+    all: bool,
     platform_name: []const u8,
     opts: store.InstallOptions,
     jobs: ?usize,
 ) !u8 {
+    if (all and rest.len > 0) {
+        term.err("usage: abv0 upgrade [--all | <pkg>...]  (--all takes no package names)\n", .{});
+        return 2;
+    }
     var targets = std.ArrayList(registry.Package).init(a);
     defer targets.deinit();
     // Packages installed from GitHub: re-resolved against the project's releases.
@@ -2167,7 +2827,8 @@ fn cmdUpgrade(
     // Install the new version first; each version has its own store
     // directory, so the old one stays usable until the new one is in place.
     // Only a successful install lets the older versions go, so a failed
-    // download leaves the package exactly as it was.
+    // download leaves the package exactly as it was. The version right
+    // before the new one stays, so `abv0 rollback` has somewhere to go.
     const ok = try a.alloc(bool, names.items.len);
     defer a.free(ok);
     const failures = try installWaves(a, st, reg, names.items, levels.items, ok, platform_name, opts, jobs);
@@ -2175,7 +2836,7 @@ fn cmdUpgrade(
     for (names.items, ok) |name, done| {
         if (!done) continue;
         const pkg = store.Store.resolveRequest(reg, name) orelse continue;
-        _ = try st.pruneOtherVersions(a, pkg.name, pkg.version, platform_name);
+        _ = try cmds_extra.pruneKeepingPrevious(a, st, pkg.name, pkg.version, platform_name);
     }
 
     var gh_failures: usize = 0;
@@ -2185,7 +2846,7 @@ fn cmdUpgrade(
             gh_failures += 1;
             continue;
         };
-        _ = try st.pruneOtherVersions(a, pkg.name, pkg.version, platform_name);
+        _ = try cmds_extra.pruneKeepingPrevious(a, st, pkg.name, pkg.version, platform_name);
     }
     return if (failures + gh_failures == 0) 0 else 1;
 }
@@ -2588,13 +3249,14 @@ test "JSON output escapes quotes, newlines and ESC in every string field" {
 test "outdated JSON escapes its fields" {
     var buf = std.ArrayList(u8).init(testing.allocator);
     defer buf.deinit();
-    try writeOutdatedJson(buf.writer(), "a\"b", "1\n", "2\x1b");
+    try writeOutdatedJson(buf.writer(), "a\"b", "1\n", "2\x1b", true);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.items, .{});
     defer parsed.deinit();
     try testing.expectEqualStrings("a\"b", parsed.value.object.get("name").?.string);
     try testing.expectEqualStrings("1\n", parsed.value.object.get("installed").?.string);
     try testing.expectEqualStrings("2\x1b", parsed.value.object.get("available").?.string);
+    try testing.expect(parsed.value.object.get("pinned").?.bool);
 }
 
 test "terminal output replaces every control byte with '?'" {
@@ -2871,6 +3533,124 @@ test "list --installed reads the store directory names for one platform, in vers
         "[{\"name\":\"jq\",\"version\":\"1.9\"},{\"name\":\"jq\",\"version\":\"1.10\"}]\n",
         buf.items,
     );
+}
+
+test "new flags parse: --tree, --online, --open, --install, --all and the migrate sources" {
+    var a = try parseArgs(testing.allocator, &.{ "migrate", "--from-brew-list", "-", "--brewfile", "Brewfile", "--install", "--tree", "--online", "--open", "--all" });
+    defer a.deinit();
+    try testing.expectEqualStrings("migrate", a.command.?);
+    try testing.expectEqualStrings("-", a.from_brew_list.?);
+    try testing.expectEqualStrings("Brewfile", a.brewfile.?);
+    try testing.expect(a.install and a.tree and a.online and a.open and a.all);
+    try testing.expectEqual(@as(usize, 0), a.rest.items.len);
+
+    try testing.expectError(error.MissingOptionValue, parseArgs(testing.allocator, &.{ "migrate", "--brewfile" }));
+    try testing.expectError(error.MissingOptionValue, parseArgs(testing.allocator, &.{ "migrate", "--from-brew-list" }));
+}
+
+test "every new command has a table entry that says what it does" {
+    for ([_][]const u8{ "deps", "uses", "leaves", "switch", "rollback", "home", "migrate" }) |name| {
+        const cmd = findCommand(name) orelse return error.TestUnexpectedResult;
+        try testing.expect(cmd.summary.len > 20);
+    }
+    // The flags that gate behaviour are documented where they apply.
+    const search = findCommand("search").?;
+    try testing.expectEqualStrings("--online", search.flags[0].name);
+    const upgrade = findCommand("upgrade").?;
+    try testing.expectEqualStrings("--all", upgrade.flags[0].name);
+    try testing.expect(findCommand("migrate").?.flags.len >= 4);
+}
+
+test "search --online JSON lists repo, stars, description and the install spec" {
+    var buf = std.ArrayList(u8).init(testing.allocator);
+    defer buf.deinit();
+    const repos = [_]cmds_extra.Repo{
+        .{ .full_name = "BurntSushi/ripgrep", .stars = 48000, .description = "fast \"grep\"\n" },
+        .{ .full_name = "a/b", .stars = 0, .description = "" },
+    };
+    try writeRepoJson(buf.writer(), &repos);
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.items, .{});
+    defer parsed.deinit();
+    const items = parsed.value.array.items;
+    try testing.expectEqual(@as(usize, 2), items.len);
+    try testing.expectEqualStrings("BurntSushi/ripgrep", items[0].object.get("repo").?.string);
+    try testing.expectEqual(@as(i64, 48000), items[0].object.get("stars").?.integer);
+    try testing.expectEqualStrings("fast \"grep\"\n", items[0].object.get("description").?.string);
+    try testing.expectEqualStrings("gh:BurntSushi/ripgrep", items[0].object.get("install").?.string);
+}
+
+test "online search text uses the same safe printer as the catalog" {
+    // The description reaches the terminal only through `safe`.
+    const out = try std.fmt.allocPrint(testing.allocator, "{}", .{safe("evil \x1b]0;pwned\x07 repo")});
+    defer testing.allocator.free(out);
+    try testing.expect(std.mem.indexOfScalar(u8, out, 0x1b) == null);
+    try testing.expect(std.mem.indexOfScalar(u8, out, 0x07) == null);
+}
+
+test "migrate JSON lists what matched, how, and what did not" {
+    var buf = std.ArrayList(u8).init(testing.allocator);
+    defer buf.deinit();
+    const pkg = registry.Package{ .name = "ripgrep", .version = "14" };
+    const matched = [_]cmds_extra.Match{.{ .wanted = "rg", .pkg = pkg, .via = .bin }};
+    const unmatched = [_][]const u8{ "wget", "we\"ird" };
+    try writeMigrateJson(buf.writer(), &matched, &unmatched);
+    try buf.appendSlice("}");
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.items, .{});
+    defer parsed.deinit();
+    const m = parsed.value.object.get("matched").?.array.items[0].object;
+    try testing.expectEqualStrings("rg", m.get("name").?.string);
+    try testing.expectEqualStrings("ripgrep", m.get("package").?.string);
+    try testing.expectEqualStrings("bin", m.get("via").?.string);
+    const u = parsed.value.object.get("unmatched").?.array.items;
+    try testing.expectEqual(@as(usize, 2), u.len);
+    try testing.expectEqualStrings("we\"ird", u[1].string);
+}
+
+test "switch JSON names the package and both versions, null when the old one is unknown" {
+    var buf = std.ArrayList(u8).init(testing.allocator);
+    defer buf.deinit();
+    try writeSwitchJson(buf.writer(), "jq", "1.7.1", "1.6");
+    try writeSwitchJson(buf.writer(), "jq", null, "1.6");
+    var lines = std.mem.splitScalar(u8, std.mem.trimRight(u8, buf.items, "\n"), '\n');
+    const first = try std.json.parseFromSlice(std.json.Value, testing.allocator, lines.next().?, .{});
+    defer first.deinit();
+    try testing.expectEqualStrings("1.7.1", first.value.object.get("from").?.string);
+    try testing.expectEqualStrings("1.6", first.value.object.get("to").?.string);
+    const second = try std.json.parseFromSlice(std.json.Value, testing.allocator, lines.next().?, .{});
+    defer second.deinit();
+    try testing.expect(second.value.object.get("from").? == .null);
+}
+
+test "info JSON appends installed versions, size, bins and source after the package fields" {
+    var buf = std.ArrayList(u8).init(testing.allocator);
+    defer buf.deinit();
+    const w = buf.writer();
+    const pkg = registry.Package{ .name = "jq", .version = "1.7.1", .bin = &.{"jq"} };
+    var rows = [_]cmds_extra.VersionRow{
+        .{ .version = "1.6", .dir_name = "jq@1.6@x", .bytes = 100 },
+        .{ .version = "1.7.1", .dir_name = "jq@1.7.1@x", .active = true, .bytes = 250 },
+    };
+    const data = cmds_extra.InfoData{ .rows = &rows, .bins = &.{"jq"}, .total_bytes = 350 };
+    try w.writeAll("{");
+    try writePackageJsonFields(w, pkg);
+    try writeInstalledInfoJson(w, data, "catalog");
+    try w.writeAll("}");
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.items, .{});
+    defer parsed.deinit();
+    const o = parsed.value.object;
+    try testing.expectEqualStrings("jq", o.get("name").?.string);
+    try testing.expectEqualStrings("catalog", o.get("source").?.string);
+    try testing.expectEqual(@as(i64, 350), o.get("size_bytes").?.integer);
+    try testing.expect(o.get("installed").?.array.items[1].object.get("active").?.bool);
+    try testing.expectEqualStrings("jq", o.get("linked_bins").?.array.items[0].string);
+    try testing.expect(o.get("download_size").? == .null);
+}
+
+test "migrate and the other new commands accept --dry-run only where it means something" {
+    try testing.expect(supportsDryRun("migrate"));
+    try testing.expect(!supportsDryRun("switch"));
+    try testing.expect(!supportsDryRun("deps"));
 }
 
 comptime {

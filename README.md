@@ -104,11 +104,17 @@ PACKAGES
   install <pkg>...         Install packages and their dependencies (verified, in parallel)
   install gh:owner/repo    Install any GitHub project's release, verified (no recipe needed)
   uninstall <pkg>...       Remove packages and the links they created
-  upgrade [pkg]...         Upgrade outdated packages
-  outdated                 List packages with a newer version available
+  upgrade [--all|pkg]...   Upgrade outdated packages (keeps the previous version for rollback)
+  outdated                 List packages with a newer version available (pinned ones marked)
   list [--installed]       List registry packages, or what is installed
-  search <query>           Search the registry
-  info <pkg>               Show package metadata
+  search [--online] <q>    Search the registry (and GitHub repositories with --online)
+  info <pkg>               Show metadata, installed versions, size and linked bins
+  deps [--tree] <pkg>      List what a package depends on
+  uses <pkg>               List installed packages that depend on it
+  leaves                   List installed packages nothing else depends on
+  switch <pkg> <version>   Make an installed version the active one
+  rollback <pkg>           Go back to the previously installed version
+  home [--open] <pkg>      Print (or open) a package's homepage
   pin <pkg>                Hold a package at its installed version
   unpin <pkg>              Let upgrade update it again
   pinned                   List pinned packages
@@ -120,6 +126,8 @@ EXECUTION
 
 MANIFESTS
   bundle [install|dump]    Install from, or export to, a Brewfile
+  migrate --from-brew-list F | --brewfile F
+                           Map Homebrew package names to the catalog (--install installs them)
   update                   Refresh the registry index
   sync                     Recompile the local index and SQL export
 
@@ -129,7 +137,7 @@ MAINTENANCE
   detect <pkg>             Scan an installed package for malware patterns
   benchmark                Measure local store and index performance
   gc                       Remove temporary files and stale sandboxes
-  cleanup                  Remove old versions, keeping the newest
+  cleanup                  Remove old versions (including rollback's), keeping the newest
   completions <shell>      Print a bash, zsh, fish or pwsh completion script
   self-update [--check]    Update abv0 from a signed release
   reset                    Uninstall everything

@@ -85,6 +85,26 @@
 
 ### New
 
+- **`deps`, `uses`, `leaves`.** `deps <pkg>` lists a package's dependencies in install
+  order (`--tree` nests them); `uses <pkg>` lists installed packages that depend on it;
+  `leaves` lists installed packages nothing else depends on. All take `--json`.
+- **`switch <pkg> <version>` and `rollback <pkg>`.** Make another installed version the
+  active one without downloading anything. `upgrade` now keeps the version it replaces
+  (older ones are still removed) so `rollback` has somewhere to go; `cleanup` removes it.
+  `cleanup` also stops deleting an older version that a bin link, hard link or copy
+  still uses.
+- **`home <pkg> [--open]`** prints a package's homepage (`gh:owner/repo` gives its
+  GitHub page).
+- **`search --online <query>`** adds GitHub repository search results (owner/repo, stars,
+  description and the `abv0 install gh:owner/repo` line) after the catalog matches.
+- **`info`** also shows installed versions (the active one marked), size on disk,
+  linked executables and where the package came from (catalog or `gh:`).
+- **`migrate [--from-brew-list FILE | --brewfile FILE] [--install]`** maps package names
+  from a saved `brew list --formula` or a Brewfile onto the catalog and lists what matched
+  and what did not. It reads names only and never runs brew. `--install` installs the
+  matches.
+- **`upgrade --all`** is the explicit form of `upgrade` with no names. `outdated` marks
+  pinned packages (`"pinned"` in `--json`).
 - **Commands:** `pin`, `unpin`, `pinned`, `cleanup`, `completions <bash|zsh|fish|pwsh>`,
   `which <bin>` and `self-update [--check]`.
 - **`abv0 list --installed`** lists the versions in the store for the current platform.
