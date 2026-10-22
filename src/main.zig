@@ -2569,6 +2569,11 @@ fn cmdInstall(
 
     if (output.dry_run) {
         try writeDryRunPlan(term.writer(), a, st, reg, plan.names, platform_name, "install");
+        // A real install of an unknown name fails, so its dry run does too.
+        for (args.rest.items) |name| {
+            const is_spec = std.mem.startsWith(u8, name, "gh:") or std.mem.indexOfScalar(u8, name, '/') != null;
+            if (!is_spec and store.Store.resolveRequest(reg, name) == null) return 1;
+        }
         return 0;
     }
 
