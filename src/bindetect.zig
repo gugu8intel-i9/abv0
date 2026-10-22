@@ -359,9 +359,11 @@ fn machoBytes(filetype: u32) [64]u8 {
     return b;
 }
 
-fn put(dir: std.fs.Dir, path: []const u8, data: []const u8, mode: std.fs.File.Mode) !void {
+fn put(dir: std.fs.Dir, path: []const u8, data: []const u8, mode: u32) !void {
     if (std.fs.path.dirname(path)) |d| try dir.makePath(d);
-    const f = try dir.createFile(path, .{ .mode = mode });
+    // Windows has no mode bits (File.Mode is u0 there).
+    const m: std.fs.File.Mode = if (builtin.os.tag == .windows) 0 else @intCast(mode);
+    const f = try dir.createFile(path, .{ .mode = m });
     defer f.close();
     try f.writeAll(data);
 }

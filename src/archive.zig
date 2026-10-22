@@ -353,10 +353,35 @@ pub fn pipeTar(
 }
 
 /// True when `rel` names a symbolic link on disk under `dest`.
-fn isLinkOnDisk(dest: std.fs.Dir, rel: []const u8) bool {
+pub fn isLinkOnDisk(dest: std.fs.Dir, rel: []const u8) bool {
+    if (builtin.os.tag == .windows) return isReparsePointWindows(dest, rel);
     var buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
     _ = dest.readLink(rel, &buf) catch return false;
     return true;
+}
+
+/// Windows has no cheap "is this a link" call through std: readLink on an
+/// ordinary file fails with STATUS_NOT_A_REPARSE_POINT, which std reports as
+/// an unexpected error and, in debug builds, a stack trace per check. Open
+/// the entry itself (not its target) and read its attributes instead. Any
+/// reparse point counts: symlinks and junctions both redirect writes.
+fn isReparsePointWindows(dest: std.fs.Dir, rel: []const u8) bool {
+    const w = std.os.windows;
+    const path = w.sliceToPrefixedFileW(dest.fd, rel) catch return false;
+    const handle = w.OpenFile(path.span(), .{
+        .access_mask = w.FILE_READ_ATTRIBUTES | w.SYNCHRONIZE,
+        .dir = dest.fd,
+        .creation = w.FILE_OPEN,
+        .filter = .any,
+        .follow_symlinks = false,
+    }) catch return false;
+    defer w.CloseHandle(handle);
+
+    var io: w.IO_STATUS_BLOCK = undefined;
+    var info: w.FILE_BASIC_INFORMATION = undefined;
+    const rc = w.ntdll.NtQueryInformationFile(handle, &io, &info, @sizeOf(w.FILE_BASIC_INFORMATION), .FileBasicInformation);
+    if (rc != .SUCCESS) return false;
+    return info.FileAttributes & w.FILE_ATTRIBUTE_REPARSE_POINT != 0;
 }
 
 /// True when some existing parent of `rel` is a symlink, or, with

@@ -43,7 +43,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        # Zig 0.13 cannot link its build runner on macOS 26, so macOS 15 is pinned.
+        os: [macos-15, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -65,16 +66,21 @@ jobs:
         os:
           - ubuntu-latest          # x86_64 Linux
           - ubuntu-24.04-arm       # aarch64 Linux
-          - macos-latest           # arm64 macOS
+          - macos-15               # arm64 macOS (Zig 0.13 cannot link on macOS 26)
           - macos-15-intel         # x86_64 macOS
           - windows-latest         # x86_64 Windows (Git Bash for bash steps)
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
-    env:
-      ABV0_HOME: ${{ runner.temp }}/abv0-home
-      ABV0_BIN_DIR: ${{ runner.temp }}/abv0-bin
     steps:
+      # The runner context is not available in job-level env, so the isolated
+      # home is set from a step instead.
+      - name: Isolated abv0 home
+        shell: bash
+        run: |
+          echo "ABV0_HOME=${RUNNER_TEMP}/abv0-home" >> "$GITHUB_ENV"
+          echo "ABV0_BIN_DIR=${RUNNER_TEMP}/abv0-bin" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v4
 
       - uses: mlugg/setup-zig@v1

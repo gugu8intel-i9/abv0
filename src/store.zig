@@ -1004,8 +1004,7 @@ pub const Store = struct {
     /// True for a regular file that is not a link. The walk never reports
     /// links either, so the direct check accepts the same things it does.
     fn isPlainFile(path: []const u8) bool {
-        var buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-        if (std.fs.cwd().readLink(path, &buf)) |_| return false else |_| {}
+        if (archive.isLinkOnDisk(std.fs.cwd(), path)) return false;
         const st = std.fs.cwd().statFile(path) catch return false;
         return st.kind == .file;
     }
