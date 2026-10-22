@@ -54,3 +54,190 @@ jobs:
 
       - name: Unit tests
         run: zig build test
+
+  install-smoke:
+    name: Install smoke (${{ matrix.os }})
+    # Real installs on every platform we ship, not just a compile check. Each
+    # runner gets its own isolated abv0 home so nothing leaks between jobs.
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest          # x86_64 Linux
+          - ubuntu-24.04-arm       # aarch64 Linux
+          - macos-latest           # arm64 macOS
+          - macos-13               # x86_64 macOS
+          - windows-latest         # x86_64 Windows (Git Bash for bash steps)
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    env:
+      ABV0_HOME: ${{ runner.temp }}/abv0-home
+      ABV0_BIN_DIR: ${{ runner.temp }}/abv0-bin
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+
+      - name: Build release binary
+        run: zig build -Doptimize=ReleaseFast
+
+      - name: Put abv0 links on PATH
+        shell: bash
+        run: echo "$ABV0_BIN_DIR" >> "$GITHUB_PATH"
+
+      - name: Install jq and ripgrep from the signed catalog
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./zig-out/bin/abv0 --version
+          ./zig-out/bin/abv0 --registry packages/index.json install jq ripgrep 2>&1 | tee install-catalog.log
+          grep -E '^done [0-9]+ packages in' install-catalog.log
+
+      - name: Run jq and rg (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          jq.exe --version
+          if ($LASTEXITCODE -ne 0) { throw "jq.exe --version failed" }
+          rg.exe --version
+          if ($LASTEXITCODE -ne 0) { throw "rg.exe --version failed" }
+
+      - name: Run jq and rg (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq --version
+          rg --version
+          # Must resolve to abv0's link, not a preinstalled runner copy.
+          case "$(command -v jq)" in
+            "$ABV0_BIN_DIR"/*) ;;
+            *) echo "jq is not abv0's link: $(command -v jq)"; exit 1 ;;
+          esac
+
+      - name: List installed, uninstall jq, assert it is gone
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./zig-out/bin/abv0 --registry packages/index.json list --installed | tee installed.txt
+          grep -E '^jq[[:space:]]' installed.txt
+          grep -E '^ripgrep[[:space:]]' installed.txt
+          ./zig-out/bin/abv0 --registry packages/index.json uninstall jq
+          ./zig-out/bin/abv0 --registry packages/index.json list --installed > after-uninstall.txt
+          if grep -E '^jq[[:space:]]' after-uninstall.txt; then
+            echo "jq is still installed after uninstall"
+            exit 1
+          fi
+          for f in jq jq.exe; do
+            if [ -e "$ABV0_BIN_DIR/$f" ]; then
+              echo "$ABV0_BIN_DIR/$f still exists after uninstall"
+              exit 1
+            fi
+          done
+
+      - name: Install any GitHub release (gh:)
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ./zig-out/bin/abv0 --registry packages/index.json install gh:sharkdp/fd 2>&1 | tee install-fd.log
+          grep -E '^done [0-9]+ packages in' install-fd.log
+          fd --version
+          ./zig-out/bin/abv0 --registry packages/index.json install gh:junegunn/fzf 2>&1 | tee install-fzf.log
+          grep -E '^done [0-9]+ packages in' install-fzf.log
+          fzf --version
+
+      - name: Tamper check (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          # A separate home so "installed nothing" is checked on an empty tree.
+          ABV0_HOME: ${{ runner.temp }}/abv0-tamper-home
+          ABV0_BIN_DIR: ${{ runner.temp }}/abv0-tamper-bin
+        run: |
+          set -euo pipefail
+          tampered="$RUNNER_TEMP/index-tampered.json"
+          cp packages/index.json "$tampered"
+          python3 - "$tampered" <<'PY'
+          import json, sys
+          path = sys.argv[1]
+          d = json.load(open(path))
+          d["packages"]["jq"]["platforms"]["x86_64-linux"]["sha256"] = "0" * 64
+          json.dump(d, open(path, "w"))
+          PY
+          set +e
+          ./zig-out/bin/abv0 --registry "$tampered" --allow-unsigned-manifest install jq > tamper.log 2>&1
+          status=$?
+          set -e
+          cat tamper.log
+          if [ "$status" -eq 0 ]; then
+            echo "a tampered checksum was installed"
+            exit 1
+          fi
+          # The failure must be the checksum check, not something unrelated.
+          grep -q "checksum mismatch" tamper.log || { echo "failed for another reason"; exit 1; }
+          ./zig-out/bin/abv0 --registry "$tampered" --allow-unsigned-manifest list --installed > tamper-installed.txt
+          if grep -E '^jq[[:space:]]' tamper-installed.txt; then
+            echo "jq was installed from the tampered manifest"
+            exit 1
+          fi
+          if [ -d "$ABV0_BIN_DIR" ] && [ -n "$(ls -A "$ABV0_BIN_DIR")" ]; then
+            echo "links were created despite the failed install"
+            ls -la "$ABV0_BIN_DIR"
+            exit 1
+          fi
+
+      - name: Timing
+        if: always()
+        shell: bash
+        run: |
+          ./zig-out/bin/abv0 --version
+          grep -h '^done ' install-*.log || echo "no install timing lines were recorded"
+
+  catalog-dry:
+    name: Live catalog dry run
+    # Builds three packages from real GitHub releases with GITHUB_TOKEN, so it
+    # needs no signing secret. The output is unsigned and only read back here.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+
+      - name: Build the catalog tool
+        run: zig build catalog-tool
+
+      - name: Build three packages from live GitHub releases
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./zig-out/bin/build-catalog \
+            --sources catalog/sources.txt \
+            --out "$RUNNER_TEMP/idx.json" \
+            --previous packages/index.json \
+            --only ripgrep,fd,fzf
+          # build-catalog exits 0 even when a lookup fails, so check the result.
+          # fd and fzf are absent from packages/index.json, so they can only
+          # appear here if the live GitHub lookup succeeded.
+          python3 - "$RUNNER_TEMP/idx.json" <<'PY'
+          import json, sys
+          packages = json.load(open(sys.argv[1]))["packages"]
+          for name in ["ripgrep", "fd", "fzf"]:
+              pkg = packages.get(name)
+              if not pkg or not pkg.get("platforms"):
+                  sys.exit(f"{name}: missing or has no platforms in the built catalog")
+              print(f"{name} {pkg['version']}: {', '.join(sorted(pkg['platforms']))}")
+          PY
+
+      - name: List the built catalog
+        shell: bash
+        run: ./zig-out/bin/abv0 --registry "$RUNNER_TEMP/idx.json" --allow-unsigned-manifest list
