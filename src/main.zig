@@ -830,6 +830,89 @@ fn fetchManifestPair(a: std.mem.Allocator, manifest_tmp: []const u8, sig_tmp: []
     };
 }
 
+/// Records the SHA-256 (lowercase hex) of the manifest abv0 last accepted.
+/// A manifest that is merely present is not trusted; only one whose bytes match
+/// this record is, so a file placed by an installer or by hand is checked first.
+const stored_manifest_hash_name = "index.json.sha256";
+
+/// What a manifest already on disk is worth.
+const ManifestTrust = enum {
+    /// These are the bytes abv0 accepted.
+    trusted,
+    /// Not accepted yet, but a detached signature sits beside it to check.
+    verify_sig,
+    /// Not accepted and nothing to check it with: fetch it again.
+    refetch,
+};
+
+/// Pure decision. `recorded_hash` is what abv0 stored when it last accepted a
+/// manifest (null when nothing is stored); `actual_hash` is the SHA-256 hex of
+/// the file now. Only an exact match is trusted.
+fn trustState(recorded_hash: ?[]const u8, actual_hash: []const u8, has_sig: bool) ManifestTrust {
+    if (recorded_hash) |r| {
+        if (std.mem.eql(u8, r, actual_hash)) return .trusted;
+    }
+    return if (has_sig) .verify_sig else .refetch;
+}
+
+/// The recorded hash, or null when there is none or it cannot be read. Anything
+/// unreadable counts as untrusted.
+fn readStoredManifestHash(a: std.mem.Allocator, st: *const store.Store) ?[]const u8 {
+    const p = std.fs.path.join(a, &.{ st.registry_root, stored_manifest_hash_name }) catch return null;
+    defer a.free(p);
+    const raw = std.fs.cwd().readFileAlloc(a, p, 256) catch return null;
+    const t = std.mem.trim(u8, raw, " \t\r\n");
+    if (t.len != 64) return null;
+    for (t) |c| if (!std.ascii.isHex(c)) return null;
+    return t;
+}
+
+/// Record the hash of the manifest just accepted. Atomic, like storeUpdatedAt.
+fn storeManifestHash(a: std.mem.Allocator, st: *const store.Store, hex: []const u8) !void {
+    const p = try std.fs.path.join(a, &.{ st.registry_root, stored_manifest_hash_name });
+    defer a.free(p);
+    const tmp = try std.fmt.allocPrint(a, "{s}.{x}.tmp", .{ p, std.crypto.random.int(u32) });
+    defer a.free(tmp);
+    errdefer std.fs.cwd().deleteFile(tmp) catch {};
+
+    const f = try std.fs.cwd().createFile(tmp, .{ .mode = platform.mode_private });
+    {
+        defer f.close();
+        try f.writeAll(hex);
+        try f.writeAll("\n");
+    }
+    try std.fs.cwd().rename(tmp, p);
+}
+
+/// SHA-256 of the file at `path`, as lowercase hex. Uses the digest the index
+/// cache uses (abvindex.Stamp), so both agree on what the bytes are.
+fn manifestHex(path: []const u8) ![64]u8 {
+    const stamp = try abvindex.Stamp.ofFile(path);
+    return std.fmt.bytesToHex(stamp.sha256, .lower);
+}
+
+/// Check a manifest already on disk the way a fresh download is checked:
+/// signature, replay, then parse. On success its hash is recorded and the parsed
+/// registry is returned. On any failure the caller fetches the manifest again.
+fn acceptOnDisk(base: std.mem.Allocator, st: *const store.Store, json_path: []const u8, sig_path: []const u8) !registry.Registry {
+    var scratch = std.heap.ArenaAllocator.init(base);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+
+    const updated_at = try vetManifest(a, json_path, sig_path, false);
+    if (updated_at) |u| try checkReplay(a, st, u);
+
+    var fresh = try registry.loadFromJsonFile(base, json_path, null);
+    errdefer fresh.deinit();
+
+    // Hash the bytes that were just verified. updated_at is stored before the
+    // hash: a crash in between leaves no hash, which costs one more check.
+    const hex = try manifestHex(json_path);
+    if (updated_at) |u| try storeUpdatedAt(a, st, u);
+    try storeManifestHash(a, st, &hex);
+    return fresh;
+}
+
 /// Materialise the registry manifest, atomically, if it is not present yet.
 ///
 /// The manifest is always downloaded: a file in the current directory is never
@@ -837,15 +920,33 @@ fn fetchManifestPair(a: std.mem.Allocator, manifest_tmp: []const u8, sig_tmp: []
 /// place, so a reader sees either no file or a complete, verified one.
 ///
 /// Returns the registry it parsed while validating, so the caller does not parse
-/// the same bytes again. Returns null when a manifest was already in place.
+/// the same bytes again. Returns null when the manifest already on disk is
+/// trusted as it is.
 fn ensureRegistryFile(base: std.mem.Allocator, st: *const store.Store, json_path: []const u8, allow_unsigned: bool) !?registry.Registry {
-    if (std.fs.cwd().access(json_path, .{})) |_| return null else |_| {}
-
     // Scratch for paths and the verified manifest. The caller's allocator is
     // long-lived (it is the GPA in `main`), so nothing is left in it.
     var scratch = std.heap.ArenaAllocator.init(base);
     defer scratch.deinit();
     const a = scratch.allocator();
+
+    // A manifest already on disk is trusted only if abv0 accepted these exact
+    // bytes. Otherwise its signature (if an installer left one) is checked, or
+    // the manifest is fetched again.
+    const json_sig = try std.fmt.allocPrint(a, "{s}.sig", .{json_path});
+    if (std.fs.cwd().access(json_path, .{})) |_| {
+        const hex = try manifestHex(json_path);
+        const has_sig = if (std.fs.cwd().access(json_sig, .{})) |_| true else |_| false;
+        switch (trustState(readStoredManifestHash(a, st), &hex, has_sig)) {
+            .trusted => return null,
+            .verify_sig => if (acceptOnDisk(base, st, json_path, json_sig)) |fresh| return fresh else |_| {},
+            .refetch => {},
+        }
+        if (allow_unsigned) {
+            warnUnsignedManifest();
+            return null;
+        }
+        say("registry index on disk is not verified; fetching it again\n", .{});
+    } else |_| {}
 
     const tag = std.crypto.random.int(u64);
     const tmp_path = try std.fmt.allocPrint(a, "{s}.{x}.tmp", .{ json_path, tag });
@@ -869,7 +970,13 @@ fn ensureRegistryFile(base: std.mem.Allocator, st: *const store.Store, json_path
     errdefer fresh.deinit();
 
     try std.fs.cwd().rename(tmp_path, json_path);
-    if (updated_at) |u| try storeUpdatedAt(a, st, u);
+    // Unsigned fetches (--allow-unsigned-manifest) record nothing: they were
+    // never accepted, so a later run must not trust them without the flag.
+    if (updated_at) |u| {
+        try storeUpdatedAt(a, st, u);
+        const hex = try manifestHex(json_path);
+        try storeManifestHash(a, st, &hex);
+    }
     return fresh;
 }
 
@@ -2140,7 +2247,11 @@ fn cmdUpdate(a: std.mem.Allocator, st: *store.Store, allow_unsigned: bool) !u8 {
     const n = reg.count();
 
     try std.fs.cwd().rename(tmp, paths[0]);
-    if (updated_at) |u| try storeUpdatedAt(a, st, u);
+    if (updated_at) |u| {
+        try storeUpdatedAt(a, st, u);
+        const hex = try manifestHex(paths[0]);
+        try storeManifestHash(a, st, &hex);
+    }
 
     const stamp = try abvindex.Stamp.ofFile(paths[0]);
     abvindex.build(a, &reg, paths[1], stamp) catch {};
@@ -2425,6 +2536,33 @@ test "updated_at must look like an ISO-8601 timestamp" {
     try testing.expect(!validUpdatedAt("2026-06-18\n"));
     try testing.expect(!validUpdatedAt("yesterday"));
     try testing.expect(!validUpdatedAt("2026-06-18T00:00:00Z\x1b[2J"));
+}
+
+test "a manifest on disk is trusted only when its hash is the recorded one" {
+    const h = "a" ** 64;
+    try testing.expectEqual(ManifestTrust.trusted, trustState(h, h, false));
+    try testing.expectEqual(ManifestTrust.trusted, trustState(h, h, true));
+    // Nothing recorded, signature beside it: verify once, then it gets recorded.
+    try testing.expectEqual(ManifestTrust.verify_sig, trustState(null, h, true));
+    // Nothing recorded and no signature: fetch it again.
+    try testing.expectEqual(ManifestTrust.refetch, trustState(null, h, false));
+}
+
+test "a tampered manifest is not trusted even with the old hash recorded" {
+    const old = "a" ** 64;
+    const tampered = "b" ** 64;
+    try testing.expectEqual(ManifestTrust.verify_sig, trustState(old, tampered, true));
+    try testing.expectEqual(ManifestTrust.refetch, trustState(old, tampered, false));
+}
+
+test "manifestHex is the SHA-256 of the file's bytes" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "m.json", .data = "abc" });
+    const p = try tmp.dir.realpathAlloc(testing.allocator, "m.json");
+    defer testing.allocator.free(p);
+    const hex = try manifestHex(p);
+    try testing.expectEqualStrings("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", &hex);
 }
 
 test "manifestUpdatedAt reads the top-level field only" {

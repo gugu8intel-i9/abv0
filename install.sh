@@ -151,12 +151,21 @@ chmod 0755 "${TMP_DIR}/abv0"
 # concurrent shell never sees a half-written abv0.
 mv -f "${TMP_DIR}/abv0" "${BIN_DIR}/abv0"
 
+# The index is installed only together with its detached signature. The
+# signature is not checked here: abv0 verifies it the first time it reads the
+# index, and records what it accepted. Without the signature the index is not
+# installed at all, and abv0 fetches and verifies it on first run instead.
 info "fetching registry index"
-if fetch "${BASE}/packages/index.json" "${TMP_DIR}/index.json" && [ -s "${TMP_DIR}/index.json" ]; then
-    chmod 0644 "${TMP_DIR}/index.json"
+if fetch "${BASE}/packages/index.json" "${TMP_DIR}/index.json" \
+    && [ -s "${TMP_DIR}/index.json" ] \
+    && fetch "${BASE}/packages/index.json.sig" "${TMP_DIR}/index.json.sig" \
+    && [ -s "${TMP_DIR}/index.json.sig" ]; then
+    chmod 0644 "${TMP_DIR}/index.json" "${TMP_DIR}/index.json.sig"
+    # Signature first: a new index is never on disk without its signature.
+    mv -f "${TMP_DIR}/index.json.sig" "${REG_DIR}/index.json.sig"
     mv -f "${TMP_DIR}/index.json" "${REG_DIR}/index.json"
 else
-    info "warning: could not fetch the registry index; run 'abv0 update' later"
+    info "warning: could not fetch the registry index and its signature; abv0 will fetch them on first run (or run 'abv0 update')"
 fi
 
 info ""

@@ -79,13 +79,24 @@ try {
 
     Move-Item -Force -Path $exePath -Destination (Join-Path $BinDir 'abv0.exe')
 
+    # The index is installed only together with its detached signature. The
+    # signature is not checked here: abv0 verifies it the first time it reads
+    # the index. Without it, nothing is installed and abv0 fetches the index on
+    # first run.
     Write-Host 'fetching registry index'
     try {
-        $idx = Join-Path $Tmp 'index.json'
+        $idx    = Join-Path $Tmp 'index.json'
+        $idxSig = Join-Path $Tmp 'index.json.sig'
         Invoke-WebRequest -Uri "$Base/packages/index.json" -OutFile $idx -UseBasicParsing
+        Invoke-WebRequest -Uri "$Base/packages/index.json.sig" -OutFile $idxSig -UseBasicParsing
+        if ((Get-Item $idx).Length -eq 0 -or (Get-Item $idxSig).Length -eq 0) {
+            throw 'registry download is empty'
+        }
+        # Signature first: a new index is never on disk without its signature.
+        Move-Item -Force -Path $idxSig -Destination (Join-Path $RegDir 'index.json.sig')
         Move-Item -Force -Path $idx -Destination (Join-Path $RegDir 'index.json')
     } catch {
-        Write-Host "warning: could not fetch the registry index; run 'abv0 update' later"
+        Write-Host "warning: could not fetch the registry index and its signature; abv0 will fetch them on first run (or run 'abv0 update')"
     }
 }
 finally {
