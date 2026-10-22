@@ -1,6 +1,6 @@
 {
   "registry_version": 1,
-  "updated_at": "2026-06-18T00:00:00Z",
+  "updated_at": "2026-10-22T00:00:00Z",
   "packages": {
     "jq": {
       "name": "jq",
@@ -8,7 +8,9 @@
       "description": "Command-line JSON processor",
       "homepage": "https://jqlang.github.io/jq/",
       "license": "MIT",
-      "bin": ["jq"],
+      "bin": [
+        "jq"
+      ],
       "app_bundles": [],
       "platforms": {
         "x86_64-macos": {
@@ -37,7 +39,9 @@
       "description": "Line-oriented search tool that recursively searches current directory for a regex pattern",
       "homepage": "https://github.com/BurntSushi/ripgrep",
       "license": "Unlicense/MIT",
-      "bin": ["rg"],
+      "bin": [
+        "rg"
+      ],
       "app_bundles": [],
       "platforms": {
         "x86_64-macos": {
@@ -66,16 +70,12 @@
       "description": "A cat(1) clone with wings (syntax highlighting and Git integration)",
       "homepage": "https://github.com/sharkdp/bat",
       "license": "MIT/Apache-2.0",
-      "bin": ["bat"],
+      "bin": [
+        "bat"
+      ],
       "app_bundles": [],
       "platforms": {
         "x86_64-macos": {
-          "url": "https://github.com/sharkdp/bat/releases/download/v0.24.0/bat-v0.24.0-x86_64-apple-darwin.tar.gz",
-          "sha256": "099cd3fdc181cc0ecffba4043b8118029c78fe2fa4173ea5db043b2d1cbb007a",
-          "archive_type": "tar.gz",
-          "bin_path": "bat-v0.24.0-x86_64-apple-darwin/bat"
-        },
-        "aarch64-macos": {
           "url": "https://github.com/sharkdp/bat/releases/download/v0.24.0/bat-v0.24.0-x86_64-apple-darwin.tar.gz",
           "sha256": "7032e4a4ea3c3b54e5a4d11db13859ddf75c3edd895e37fb02ddb7777afcc819",
           "archive_type": "tar.gz",
@@ -95,7 +95,9 @@
       "description": "A graphical cross-platform resource monitor that looks incredibly beautiful",
       "homepage": "https://github.com/ClementTsang/bottom",
       "license": "MIT",
-      "bin": ["btm"],
+      "bin": [
+        "btm"
+      ],
       "app_bundles": [],
       "platforms": {
         "x86_64-macos": {
@@ -124,7 +126,9 @@
       "description": "Like neofetch, but much faster because written solely in C",
       "homepage": "https://github.com/fastfetch-cli/fastfetch",
       "license": "MIT",
-      "bin": ["fastfetch"],
+      "bin": [
+        "fastfetch"
+      ],
       "app_bundles": [],
       "platforms": {
         "x86_64-macos": {
@@ -153,7 +157,9 @@
       "description": "A highly customizable command-line system information tool written in bash 3.2+",
       "homepage": "https://github.com/dylanaraps/neofetch",
       "license": "MIT",
-      "bin": ["neofetch"],
+      "bin": [
+        "neofetch"
+      ],
       "app_bundles": [],
       "platforms": {
         "x86_64-macos": {
@@ -182,7 +188,9 @@
       "description": "General-purpose programming language and toolchain for maintaining robust, optimal, and reusable software",
       "homepage": "https://ziglang.org/",
       "license": "MIT",
-      "bin": ["zig"],
+      "bin": [
+        "zig"
+      ],
       "app_bundles": [],
       "platforms": {
         "x86_64-macos": {

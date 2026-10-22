@@ -35,7 +35,7 @@
 # as .bz2 or .7z) simply leaves that platform out.
 
 # ---- searching, files and text ---------------------------------------------
-ripgrep        BurntSushi/ripgrep       bin=rg asset.x86_64-windows=x86_64-pc-windows-msvc.zip
+ripgrep        BurntSushi/ripgrep       bin=rg
 fd             sharkdp/fd
 bat            sharkdp/bat
 hyperfine      sharkdp/hyperfine

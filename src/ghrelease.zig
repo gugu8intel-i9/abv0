@@ -435,7 +435,11 @@ fn scoreAsset(name: []const u8, want: Target) ?u32 {
 
     // libc, on Linux only. A static musl build runs on any distribution, so it
     // is preferred over glibc. A name with no libc marker is treated as neutral.
-    const libc_score: u32 = if (os != .linux)
+    // On Windows the MSVC build is the upstream default; MinGW (`gnu`) builds
+    // are usually larger and pull in extra runtime DLLs.
+    const libc_score: u32 = if (os == .windows)
+        (if (has(name, "msvc", .token)) @as(u32, 2) else 0)
+    else if (os != .linux)
         0
     else if (has(name, "musl", .token))
         8
@@ -535,6 +539,7 @@ const ripgrep_names = [_][]const u8{
     "ripgrep-14.1.1-x86_64-apple-darwin.tar.gz.sha256",
     "ripgrep-14.1.1-aarch64-apple-darwin.tar.gz",
     "ripgrep-14.1.1-aarch64-apple-darwin.tar.gz.sha256",
+    "ripgrep-14.1.1-x86_64-pc-windows-gnu.zip",
     "ripgrep-14.1.1-x86_64-pc-windows-msvc.zip",
     "ripgrep-14.1.1-x86_64-pc-windows-msvc.zip.sha256",
     "ripgrep-14.1.1-i686-pc-windows-msvc.zip",

@@ -256,6 +256,17 @@ fn hasColon(name: []const u8) bool {
     return std.mem.indexOfScalar(u8, name, ':') != null;
 }
 
+/// Drop leading `./` components (and the bare `.` root entry).
+pub fn stripDotPrefix(path: []const u8) []const u8 {
+    var p = path;
+    while (std.mem.startsWith(u8, p, "./")) {
+        p = p[2..];
+        while (p.len > 0 and p[0] == '/') p = p[1..];
+    }
+    if (std.mem.eql(u8, p, ".")) return p[1..];
+    return p;
+}
+
 pub fn stripComponents(path: []const u8, count: u32) []const u8 {
     var i: usize = 0;
     var c = count;
@@ -295,7 +306,9 @@ pub fn pipeTar(
         total_bytes +|= entry.size;
         if (total_bytes > options.max_bytes) return error.ArchiveTooLarge;
 
-        const name = stripComponents(entry.name, options.strip_components);
+        // `tar -C dir .` writes every member as `./x`. The prefix names the
+        // root itself, so it is dropped before the safety checks see the name.
+        const name = stripComponents(stripDotPrefix(entry.name), options.strip_components);
         if (name.len == 0) continue;
 
         // Refuse anything that could land outside the extraction root.
@@ -894,4 +907,26 @@ test "zip extraction rejects the whole archive when one member is unsafe" {
     defer out.close();
     var it = out.iterate();
     try testing.expect((try it.next()) == null);
+}
+
+test "members written by `tar -C dir .` keep their names" {
+    try testing.expectEqualStrings("tool", stripDotPrefix("./tool"));
+    try testing.expectEqualStrings("bin/tool", stripDotPrefix("././bin/tool"));
+    try testing.expectEqualStrings("", stripDotPrefix("./"));
+    try testing.expectEqualStrings("", stripDotPrefix("."));
+    try testing.expectEqualStrings("../x", stripDotPrefix("./../x"));
+
+    var buf = std.ArrayList(u8).init(testing.allocator);
+    defer buf.deinit();
+    try buildTar(&buf, .{
+        .{ "./", "", '5', "" },
+        .{ "./tool", "#!/bin/sh\n", '0', "" },
+        .{ "./../escape", "x", '0', "" },
+    });
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var stream = std.io.fixedBufferStream(buf.items);
+    try pipeTar(testing.allocator, stream.reader(), tmp.dir, .{});
+    try tmp.dir.access("tool", .{});
+    try testing.expectError(error.FileNotFound, tmp.parent_dir.access("escape", .{}));
 }
