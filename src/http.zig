@@ -47,7 +47,29 @@ pub const Limits = struct {
     max_time_s: u32 = 600,
     /// Largest body accepted (curl: --max-filesize).
     max_bytes: u64 = net.max_download_bytes,
+    /// Extra request headers, each a complete `Name: value` line. They are
+    /// sent only to the host of the original URL: a redirect to another host
+    /// (a CDN) must never receive an Authorization header meant for an API.
+    headers: []const []const u8 = &.{},
 };
+
+const max_extra_headers = 8;
+
+/// Split `Name: value` lines into std.http headers. Malformed lines are
+/// dropped rather than sent.
+fn splitHeaders(lines: []const []const u8, out: *[max_extra_headers]std.http.Header) []const std.http.Header {
+    var n: usize = 0;
+    for (lines) |line| {
+        if (n == out.len) break;
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const name = std.mem.trim(u8, line[0..colon], " ");
+        const value = std.mem.trim(u8, line[colon + 1 ..], " ");
+        if (name.len == 0 or std.mem.indexOfAny(u8, line, "\r\n") != null) continue;
+        out[n] = .{ .name = name, .value = value };
+        n += 1;
+    }
+    return out[0..n];
+}
 
 /// Failures that are the client's own judgement, not the network's. They are
 /// what curl would report too, so `net.zig` does not retry them with curl.
@@ -400,11 +422,22 @@ pub const Client = struct {
     /// Send the request and follow redirects by hand. On return `s.req` holds
     /// a 2xx response whose body is unread.
     fn follow(self: *Client, s: *Stream) !void {
+        var extra_buf: [max_extra_headers]std.http.Header = undefined;
+        const extra = splitHeaders(s.lim.headers, &extra_buf);
+        var first_host_buf: [256]u8 = undefined;
+        var first_host: []const u8 = "";
+
         var hops: u32 = 0;
         while (true) : (hops += 1) {
             if (hops > s.lim.max_redirects) return error.TooManyRedirects;
             const uri = std.Uri.parse(s.target) catch return error.UnsafeUrl;
             const host = hostOf(s.target) orelse return error.UnsafeUrl;
+            if (hops == 0) {
+                const n = @min(host.len, first_host_buf.len);
+                @memcpy(first_host_buf[0..n], host[0..n]);
+                first_host = first_host_buf[0..n];
+            }
+            const same_host = std.ascii.eqlIgnoreCase(host, first_host);
 
             s.req = try self.clientFor(host).open(.GET, uri, .{
                 .server_header_buffer = &s.header_buf,
@@ -416,6 +449,7 @@ pub const Client = struct {
                     .accept_encoding = .omit,
                     .user_agent = .{ .override = user_agent },
                 },
+                .extra_headers = if (same_host) extra else &.{},
             });
             s.have_req = true;
 
@@ -706,4 +740,13 @@ test "isTransportError separates network failures from answers" {
 test "isTransientStatus matches curl's retry set" {
     for ([_]u16{ 408, 429, 500, 502, 503, 504 }) |c| try testing.expect(isTransientStatus(c));
     for ([_]u16{ 200, 301, 400, 401, 403, 404, 501 }) |c| try testing.expect(!isTransientStatus(c));
+}
+
+test "extra header lines split into name and value; malformed lines are dropped" {
+    var buf: [max_extra_headers]std.http.Header = undefined;
+    const got = splitHeaders(&.{ "Accept: application/vnd.github+json", "Authorization: Bearer abc", "no colon", ": empty name", "X: a\r\nInjected: 1" }, &buf);
+    try std.testing.expectEqual(@as(usize, 2), got.len);
+    try std.testing.expectEqualStrings("Accept", got[0].name);
+    try std.testing.expectEqualStrings("application/vnd.github+json", got[0].value);
+    try std.testing.expectEqualStrings("Bearer abc", got[1].value);
 }

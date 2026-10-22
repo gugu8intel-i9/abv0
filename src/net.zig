@@ -35,6 +35,8 @@ pub const Options = struct {
     max_time_s: u32 = 600,
     retries: u32 = 2,
     user_agent: []const u8 = http.user_agent,
+    /// Extra request headers, each a complete `Name: value` line.
+    headers: []const []const u8 = &.{},
 };
 
 pub const Error = error{
@@ -133,6 +135,7 @@ pub fn buildCurlArgv(
         opts.user_agent,
     });
     try args.appendSlice(extra);
+    for (opts.headers) |h| try args.appendSlice(&.{ "--header", h });
     if (dest) |d| try args.appendSlice(&.{ "--output", d });
     try args.append(url);
     return args.toOwnedSlice();
@@ -505,7 +508,7 @@ fn retryable(err: anyerror, attempt: u32, opts: Options) bool {
 }
 
 fn limitsFor(opts: Options) http.Limits {
-    return .{ .max_time_s = opts.max_time_s };
+    return .{ .max_time_s = opts.max_time_s, .headers = opts.headers };
 }
 
 /// Outcome of a built-in attempt that failed: return the error, or hand over

@@ -13,6 +13,9 @@ const wal = @import("wal.zig");
 const bloom = @import("bloom.zig");
 const abvindex = @import("abvindex.zig");
 const stream = @import("stream.zig");
+const ghrelease = @import("ghrelease.zig");
+const ghverify = @import("ghverify.zig");
+const bindetect = @import("bindetect.zig");
 
 pub const Package = registry.Package;
 
@@ -29,6 +32,10 @@ pub const InstallOptions = struct {
     /// package. Without it such a conflict is refused.
     force: bool = false,
     quiet: bool = false,
+    /// Written to `<store dir>/.abv0-source` before the install is published.
+    /// `gh:` installs record `gh:owner/repo@tag` here so upgrade can find the
+    /// project again.
+    source_note: ?[]const u8 = null,
 };
 
 pub const StoreError = error{
@@ -46,6 +53,11 @@ pub const StoreError = error{
     BinaryConflict,
     ReservedBinaryName,
     UnsafeDefaultBranch,
+    /// `gh:` installs.
+    InvalidGithubSpec,
+    ReleaseUnavailable,
+    NoMatchingAsset,
+    NotInCatalog,
 };
 
 /// `install` prints a specific, actionable diagnostic for every failure it
@@ -63,6 +75,11 @@ pub fn alreadyDiagnosed(e: anyerror) bool {
         StoreError.BinaryConflict,
         StoreError.ReservedBinaryName,
         StoreError.UnsafeDefaultBranch,
+        StoreError.InvalidGithubSpec,
+        StoreError.ReleaseUnavailable,
+        StoreError.NoMatchingAsset,
+        StoreError.NotInCatalog,
+        StoreError.ExecutableNotFound,
         => true,
         else => false,
     };
@@ -491,8 +508,18 @@ pub const Store = struct {
             std.fs.cwd().deleteFile(archive_path) catch {};
         }
 
+        if (opts.source_note) |note| {
+            const note_path = try std.fs.path.join(a, &.{ tmp_dir, source_file });
+            const f = try std.fs.cwd().createFile(note_path, .{ .mode = platform.mode_public });
+            defer f.close();
+            try f.writeAll(note);
+        }
+
         try publishTree(a, tmp_dir, pkg_dir);
     }
+
+    /// File in a store directory that says where a `gh:` install came from.
+    pub const source_file = ".abv0-source";
 
     /// Stream `url` into the staging directory. Opening the directory is part
     /// of the attempt, so a failure there also falls back to curl.
@@ -750,8 +777,7 @@ pub const Store = struct {
 
         // Plan every link before touching the bin directory, so a refusal
         // leaves it exactly as it was.
-        const Plan = struct { bin: []const u8, src: []const u8, dst: []const u8 };
-        var plans = std.ArrayList(Plan).init(a);
+        var plans = std.ArrayList(LinkPlan).init(a);
         var it = wanted.iterator();
         while (it.next()) |entry| {
             const bin_name = entry.key_ptr.*;
@@ -767,7 +793,16 @@ pub const Store = struct {
             const dst = try std.fs.path.join(a, &.{ self.bin_root, dst_name });
             try plans.append(.{ .bin = bin_name, .src = src, .dst = dst });
         }
-        if (plans.items.len == 0) return 0;
+        return self.linkPlans(a, pkg, plans.items, opts);
+    }
+
+    const LinkPlan = struct { bin: []const u8, src: []const u8, dst: []const u8 };
+
+    /// Link every planned executable into the bin directory, recording each in
+    /// the ownership file. Refuses the whole set if any destination belongs to
+    /// someone else, so a refusal leaves the bin directory untouched.
+    fn linkPlans(self: *Store, a: std.mem.Allocator, pkg: Package, plans: []const LinkPlan, opts: InstallOptions) !usize {
+        if (plans.len == 0) return 0;
 
         var guard = try Guard.acquire(a, self.locks_root, owners_lock);
         defer guard.release();
@@ -777,7 +812,7 @@ pub const Store = struct {
 
         // Anything already sitting at a destination must be a link this same
         // package made earlier. Otherwise it belongs to someone else.
-        for (plans.items) |p| {
+        for (plans) |p| {
             if (!platform.pathExists(p.dst)) continue;
             if (ownerOf(owners.recs.items, "bin", p.bin)) |owner| {
                 if (std.mem.eql(u8, owner, pkg.name)) continue;
@@ -794,7 +829,7 @@ pub const Store = struct {
         }
 
         var linked: usize = 0;
-        for (plans.items) |p| {
+        for (plans) |p| {
             platform.setExecutable(p.src); // was a `chmod +x` subprocess per binary
             dropOwner(&owners.recs, "bin", p.bin);
             const kind = platform.fastLink(p.src, p.dst) catch |e| {
@@ -1914,15 +1949,13 @@ pub const Store = struct {
     }
 
     // -----------------------------------------------------------------------
-    // Dynamic discovery
+    // GitHub releases
     // -----------------------------------------------------------------------
 
-    /// Resolve an unlisted package by searching GitHub.
-    ///
-    /// This is inherently dangerous: it downloads and executes whatever the
-    /// top search hit happens to be, with no checksum to verify against, which
-    /// makes it a typosquatting vector. The original did it silently for any
-    /// unknown name. It now requires explicit opt-in.
+    /// Install something the registry does not list. Only a GitHub spec
+    /// (`gh:owner/repo[@tag]`, or `owner/repo`) is accepted: abv0 no longer
+    /// guesses a repository from a bare name, because a guess cannot be checked
+    /// against anything and name-similar repositories are a known attack.
     pub fn installDynamic(
         self: *Store,
         a: std.mem.Allocator,
@@ -1930,240 +1963,420 @@ pub const Store = struct {
         platform_name: []const u8,
         opts: InstallOptions,
     ) !Package {
-        if (!safepath.isValidId(name)) return StoreError.InvalidPackageIdentifier;
+        if (ghverify.looksLikeSpec(name)) return self.installGithub(a, name, platform_name, opts);
 
-        if (!opts.allow_unverified) {
+        if (safepath.isValidId(name)) {
             term.err(
-                \\{s}error{s}: '{s}' is not in the registry.
-                \\  abv0 can search GitHub for it, but the result cannot be checksum-verified
-                \\  and name-similar repositories are a known supply-chain attack.
-                \\  Re-run with --allow-unverified to opt in.
+                \\{s}error{s}: '{s}' is not in the catalog
+                \\  to install a project's own GitHub release: abv0 install gh:<owner>/{s}
                 \\
-            , .{ term.red, term.reset, name });
+            , .{ term.red, term.reset, name, name });
+        } else {
+            term.err("{s}error{s}: '{s}' is not in the catalog\n", .{ term.red, term.reset, name });
+        }
+        return StoreError.NotInCatalog;
+    }
+
+    /// Install a project's prebuilt release from GitHub, with no recipe.
+    ///
+    /// The release's asset for `platform_name` is chosen by file name, and its
+    /// SHA-256 comes from GitHub's own `digest` for the asset, or else from a
+    /// checksums file in the same release. A mismatch installs nothing. With
+    /// neither, the install is refused unless `opts.allow_unverified`.
+    ///
+    /// The programs are found by looking inside the unpacked archive
+    /// (`bindetect`), so nobody has to say what the package provides. The
+    /// store directory is `<repo>@<tag>@<platform>` and holds a `.abv0-source`
+    /// file naming `gh:owner/repo@tag`, which is how list, uninstall, outdated
+    /// and upgrade know where it came from.
+    pub fn installGithub(
+        self: *Store,
+        a: std.mem.Allocator,
+        spec_text: []const u8,
+        platform_name: []const u8,
+        opts: InstallOptions,
+    ) !Package {
+        if (!safepath.isValidId(platform_name)) return StoreError.InvalidPackageIdentifier;
+
+        const spec = ghrelease.parseSpec(spec_text) orelse {
+            term.err(
+                "{s}error{s}: '{s}' is not a GitHub project; write gh:owner/repo or gh:owner/repo@tag\n",
+                .{ term.red, term.reset, spec_text },
+            );
+            return StoreError.InvalidGithubSpec;
+        };
+
+        // ---- which release, which asset ----
+        var api_message: ?[]const u8 = null;
+        const rel = fetchGithubRelease(a, spec, &api_message) catch |e| {
+            const at: []const u8 = if (spec.tag != null) "@" else "";
+            term.err("{s}error{s}: cannot read the release of gh:{s}/{s}{s}{s}\n", .{
+                term.red, term.reset, spec.owner, spec.repo, at, spec.tag orelse "",
+            });
+            if (api_message) |m| {
+                term.err("  GitHub says: {s}\n", .{m});
+            } else if (e == net.Error.DownloadFailed) {
+                term.err("  the repository or release does not exist, is private, or GitHub's rate limit is used up\n" ++
+                    "  (60 requests an hour without a token; set GITHUB_TOKEN to raise it)\n", .{});
+            } else {
+                term.err("  {s}\n", .{@errorName(e)});
+            }
+            return StoreError.ReleaseUnavailable;
+        };
+        return self.installRelease(a, spec, rel, platform_name, opts);
+    }
+
+    /// `installGithub` once the release is in hand: choose the asset, decide
+    /// how it is verified, unpack it, find and link its programs.
+    fn installRelease(
+        self: *Store,
+        a: std.mem.Allocator,
+        spec: ghrelease.Spec,
+        rel: ghrelease.Release,
+        platform_name: []const u8,
+        opts: InstallOptions,
+    ) !Package {
+        const idx = ghrelease.pickAsset(rel.assets, platform_name) orelse {
+            term.err("{s}error{s}: release {s} of {s}/{s} has no asset for {s}\n", .{
+                term.red, term.reset, rel.tag, spec.owner, spec.repo, platform_name,
+            });
+            if (rel.assets.len > 0) {
+                term.err("  its assets:", .{});
+                for (rel.assets[0..@min(rel.assets.len, 8)]) |asset| term.err(" {s}", .{asset.name});
+                term.err("{s}\n", .{if (rel.assets.len > 8) " ..." else ""});
+            }
+            return StoreError.NoMatchingAsset;
+        };
+        const asset = rel.assets[idx];
+        const kind = ghrelease.archiveKindOf(asset.name) orelse return StoreError.NoMatchingAsset;
+
+        // ---- how it will be verified ----
+        var from_file: ?ghverify.Hex = null;
+        if (asset.sha256 == null) from_file = checksumFromRelease(a, rel.assets, idx);
+        const decision = ghverify.decide(asset.sha256, from_file, opts.allow_unverified);
+        if (decision == .refused) {
+            term.err(
+                \\{s}error{s}: GitHub publishes no sha256 for {s}: it has no digest, and the release has no checksums file.
+                \\  Installing it would execute unverified code.
+                \\  Re-run with --allow-unverified to accept that risk.
+                \\
+            , .{ term.red, term.reset, asset.name });
             return StoreError.RefusedUnverifiedInstall;
         }
 
-        term.print("searching GitHub for '{s}'...\n", .{name});
-
-        const encoded = try net.urlEncode(a, name);
-        defer a.free(encoded);
-
-        // The name is percent-encoded, so it cannot inject extra query
-        // parameters into the API request.
-        const search_url = try std.fmt.allocPrint(
-            a,
-            "https://api.github.com/search/repositories?q={s}+in:name&sort=stars&order=desc&per_page=5",
-            .{encoded},
-        );
-        defer a.free(search_url);
-
-        const body = try net.fetchToString(a, search_url, 4 * 1024 * 1024, .{});
-        defer a.free(body);
-
-        const parsed = std.json.parseFromSlice(std.json.Value, a, body, .{}) catch return error.DynamicDiscoveryFailed;
-        defer parsed.deinit();
-
-        const root = switch (parsed.value) {
-            .object => |o| o,
-            else => return error.DynamicDiscoveryFailed,
-        };
-
-        // A rate-limit response has no "items" and used to hit a `.?` unwrap.
-        if (root.get("message")) |m| {
-            if (m == .string) {
-                term.err("{s}error{s}: GitHub API: {s}\n", .{ term.red, term.reset, m.string });
-                return error.DynamicDiscoveryFailed;
-            }
-        }
-
-        const items = switch (root.get("items") orelse return error.DynamicDiscoveryFailed) {
-            .array => |arr| arr,
-            else => return error.DynamicDiscoveryFailed,
-        };
-        if (items.items.len == 0) return error.DynamicDiscoveryFailed;
-
-        const repo = switch (items.items[0]) {
-            .object => |o| o,
-            else => return error.DynamicDiscoveryFailed,
-        };
-
-        const full_name = switch (repo.get("full_name") orelse return error.DynamicDiscoveryFailed) {
-            .string => |s| s,
-            else => return error.DynamicDiscoveryFailed,
-        };
-        // full_name goes into a URL path; keep it to owner/repo shape.
-        if (!isRepoFullName(full_name)) return error.DynamicDiscoveryFailed;
-
-        const default_branch = blk: {
-            const v = repo.get("default_branch") orelse break :blk "main";
-            break :blk switch (v) {
-                .string => |s| s,
-                else => "main",
-            };
-        };
-        const description = blk: {
-            const v = repo.get("description") orelse break :blk "";
-            break :blk switch (v) {
-                .string => |s| s,
-                else => "",
-            };
-        };
-
-        term.print("  resolved to {s}{s}{s}\n", .{ term.bold, full_name, term.reset });
-
-        const rel_url = try std.fmt.allocPrint(a, "https://api.github.com/repos/{s}/releases/latest", .{full_name});
-        defer a.free(rel_url);
-
-        var version: []const u8 = "0.0.0";
-        var download_url: ?[]const u8 = null;
-        var archive_type: []const u8 = "raw";
-
-        if (net.fetchToString(a, rel_url, 8 * 1024 * 1024, .{})) |rel_body| {
-            defer a.free(rel_body);
-            if (std.json.parseFromSlice(std.json.Value, a, rel_body, .{})) |rel_parsed| {
-                defer rel_parsed.deinit();
-                if (rel_parsed.value == .object) {
-                    const rel = rel_parsed.value.object;
-                    if (rel.get("tag_name")) |t| {
-                        if (t == .string) {
-                            const cleaned = std.mem.trimLeft(u8, t.string, "v");
-                            if (safepath.isValidId(cleaned)) version = try a.dupe(u8, cleaned);
-                        }
-                    }
-                    if (rel.get("assets")) |assets_v| {
-                        if (assets_v == .array) {
-                            for (assets_v.array.items) |asset_v| {
-                                if (asset_v != .object) continue;
-                                const asset = asset_v.object;
-                                const aname = switch (asset.get("name") orelse continue) {
-                                    .string => |s| s,
-                                    else => continue,
-                                };
-                                const aurl = switch (asset.get("browser_download_url") orelse continue) {
-                                    .string => |s| s,
-                                    else => continue,
-                                };
-                                if (!assetMatchesPlatform(aname, platform_name)) continue;
-                                if (!net.isSafeUrl(aurl)) continue;
-
-                                download_url = try a.dupe(u8, aurl);
-                                archive_type = if (archive.Kind.fromFilename(aname)) |k| switch (k) {
-                                    .tar_gz => "tar.gz",
-                                    .tar_xz => "tar.xz",
-                                    .tar_zst => "tar.zst",
-                                    .zip => "zip",
-                                    .dmg => "dmg",
-                                    .sevenz => "7z",
-                                    .tar => "tar",
-                                    .raw => "raw",
-                                } else "raw";
-                                break;
-                            }
-                        }
-                    }
-                }
-            } else |_| {}
-        } else |_| {}
-
-        if (download_url == null) {
-            // The original hardcoded refs/heads/master, which 404s on every
-            // repository that has since renamed its default branch. The name
-            // comes from the API response and goes into a URL, so check it.
-            if (!isSafeBranch(default_branch)) {
-                term.err("{s}error{s}: GitHub reported an unsafe default branch for '{s}'\n", .{ term.red, term.reset, full_name });
-                return StoreError.UnsafeDefaultBranch;
-            }
-            download_url = try std.fmt.allocPrint(
-                a,
-                "https://github.com/{s}/archive/refs/heads/{s}.tar.gz",
-                .{ full_name, default_branch },
-            );
-            archive_type = "tar.gz";
-            term.print("  no matching release asset; using {s} source snapshot\n", .{default_branch});
-        }
+        // ---- what it will be called ----
+        const version = try ghverify.versionFromTag(a, rel.tag);
+        const is_raw = std.mem.eql(u8, kind, "raw");
+        const raw_name = if (is_raw and std.mem.endsWith(u8, platform_name, "-windows"))
+            try std.fmt.allocPrint(a, "{s}.exe", .{spec.repo})
+        else
+            spec.repo;
 
         const plats = try a.alloc(registry.PlatformInfo, 1);
         plats[0] = .{
             .name = platform_name,
-            .url = download_url.?,
-            .sha256 = registry.sha256_skip,
-            .archive_type = archive_type,
-            .bin_path = "",
+            .url = asset.url,
+            .sha256 = switch (decision) {
+                .verified => |v| try a.dupe(u8, &v.hex),
+                else => registry.sha256_skip,
+            },
+            .archive_type = kind,
+            .bin_path = if (is_raw) raw_name else "",
         };
-        const bins = try a.alloc([]const u8, 1);
-        bins[0] = name;
-
-        const pkg = Package{
-            .name = name,
+        var pkg = Package{
+            .name = spec.repo,
             .version = version,
-            .description = description,
-            .homepage = "",
+            .description = try std.fmt.allocPrint(a, "GitHub release of {s}/{s}", .{ spec.owner, spec.repo }),
+            .homepage = try std.fmt.allocPrint(a, "https://github.com/{s}/{s}", .{ spec.owner, spec.repo }),
             .license = "unknown",
-            .bin = bins,
             .platforms = plats,
         };
+        const pkg_dir = try self.pkgStorePath(a, pkg, platform_name);
+        const note = try ghverify.sourceNote(a, spec.owner, spec.repo, rel.tag);
 
-        try self.install(pkg, platform_name, opts);
+        if (!opts.quiet) {
+            term.print("  {s}source{s}   gh:{s}/{s}@{s} {s}({s}){s}\n", .{
+                term.cyan, term.reset, spec.owner, spec.repo, rel.tag, term.dim, asset.name, term.reset,
+            });
+        }
+        switch (decision) {
+            .verified => |v| if (!opts.quiet) {
+                term.print("  {s}verify{s}   sha256 ({s})\n", .{ term.green, term.reset, v.source.label() });
+            },
+            // Never silent, even under --quiet: this is the one line that says
+            // the download was not checked.
+            else => term.err("  {s}verify{s}   {s}UNVERIFIED (--allow-unverified){s}\n", .{ term.yellow, term.reset, term.yellow, term.reset }),
+        }
+
+        var guard = try Guard.acquire(a, self.locks_root, pkg.name);
+        defer guard.release();
+
+        // Another project that happens to share the repository name must not
+        // silently take over the same package.
+        if (!opts.force) {
+            if (self.conflictingSource(a, pkg.name, spec, platform_name)) |other| {
+                term.err(
+                    "{s}error{s}: '{s}' is already installed from gh:{s}/{s}, not gh:{s}/{s}\n  Uninstall it first, or re-run with --force.\n",
+                    .{ term.red, term.reset, pkg.name, other.owner, other.repo, spec.owner, spec.repo },
+                );
+                return StoreError.BinaryConflict;
+            }
+        }
+
+        var w = try wal.Wal.init(a, self.store_root, pkg.name);
+        defer w.deinit();
+
+        // A hash we hold must never be waved through by --allow-unverified.
+        var run_opts = opts;
+        run_opts.allow_unverified = decision == .unverified;
+        run_opts.source_note = note;
+
+        const cached = self.isInstalled(pkg, platform_name) and self.installedFrom(a, pkg_dir, spec);
+        if (!cached) {
+            try self.fetchAndUnpack(a, pkg, plats[0], pkg_dir, run_opts, &w);
+        } else if (!opts.quiet) {
+            term.print("  {s}cached{s}  {s} {s}\n", .{ term.dim, term.reset, pkg.name, pkg.version });
+        }
+
+        // ---- which files are the programs ----
+        try w.append(.link);
+        const bins = try detectBins(a, pkg_dir, spec.repo, raw_name, is_raw, platform_name);
+        if (bins.len == 0) {
+            term.err("{s}error{s}: no executables found in {s}; nothing was linked\n", .{ term.red, term.reset, asset.name });
+            if (!cached) std.fs.cwd().deleteTree(pkg_dir) catch {};
+            return StoreError.ExecutableNotFound;
+        }
+
+        var plans = std.ArrayList(LinkPlan).init(a);
+        var names = std.ArrayList([]const u8).init(a);
+        for (bins) |b| {
+            if (isReservedBin(b.name)) {
+                term.err("{s}warning{s}: '{s}' is reserved for abv0 itself; not linking it\n", .{ term.yellow, term.reset, b.name });
+                continue;
+            }
+            const src = try safepath.joinSafe(a, pkg_dir, b.path);
+            const dst_name = try std.fmt.allocPrint(a, "{s}{s}", .{ b.name, platform.exe_suffix });
+            const dst = try std.fs.path.join(a, &.{ self.bin_root, dst_name });
+            try plans.append(.{ .bin = b.name, .src = src, .dst = dst });
+            try names.append(b.name);
+        }
+        pkg.bin = try names.toOwnedSlice();
+
+        const linked = try self.linkPlans(a, pkg, plans.items, opts);
+        try w.append(.complete);
+        if (linked == 0) {
+            term.err("{s}warning{s}: no executables from '{s}' could be linked\n", .{ term.yellow, term.reset, pkg.name });
+        }
         return pkg;
     }
 
-    fn isRepoFullName(s: []const u8) bool {
-        if (s.len == 0 or s.len > 256) return false;
-        var slashes: usize = 0;
-        for (s) |c| {
-            switch (c) {
-                'a'...'z', 'A'...'Z', '0'...'9', '-', '_', '.' => {},
-                '/' => slashes += 1,
-                else => return false,
-            }
+    /// The programs in an installed tree, best first and at most
+    /// `bindetect.max_bins`. A single raw download is the program itself, named
+    /// after the repository, whatever its bytes look like.
+    fn detectBins(
+        a: std.mem.Allocator,
+        pkg_dir: []const u8,
+        repo: []const u8,
+        raw_name: []const u8,
+        is_raw: bool,
+        platform_name: []const u8,
+    ) ![]bindetect.Bin {
+        if (is_raw) {
+            const path = try std.fs.path.join(a, &.{ pkg_dir, raw_name });
+            if (!isPlainFile(path)) return a.alloc(bindetect.Bin, 0);
+            const only = try a.alloc(bindetect.Bin, 1);
+            only[0] = .{ .path = raw_name, .name = repo };
+            return only;
         }
-        return slashes == 1 and s[0] != '/' and s[s.len - 1] != '/';
+        var dir = std.fs.cwd().openDir(pkg_dir, .{ .iterate = true }) catch return a.alloc(bindetect.Bin, 0);
+        defer dir.close();
+        const found = try bindetect.findExecutables(a, dir, osTagOf(platform_name));
+        bindetect.rank(found, repo);
+        return bindetect.top(found);
     }
 
-    /// A branch name that may be spliced into a download URL: 1..255 bytes of
-    /// [A-Za-z0-9._/-], no "..", and not starting with '-' or '/'.
-    fn isSafeBranch(b: []const u8) bool {
-        if (b.len == 0 or b.len > 255) return false;
-        if (b[0] == '-' or b[0] == '/') return false;
-        if (std.mem.indexOf(u8, b, "..") != null) return false;
-        for (b) |c| switch (c) {
-            'a'...'z', 'A'...'Z', '0'...'9', '-', '_', '.', '/' => {},
-            else => return false,
+    fn osTagOf(platform_name: []const u8) std.Target.Os.Tag {
+        if (std.mem.endsWith(u8, platform_name, "-macos")) return .macos;
+        if (std.mem.endsWith(u8, platform_name, "-windows")) return .windows;
+        return .linux;
+    }
+
+    /// The SHA-256 of `assets[idx]` from a checksums file published in the same
+    /// release, or null when there is none or it does not list the asset.
+    fn checksumFromRelease(a: std.mem.Allocator, assets: []const ghrelease.Asset, idx: usize) ?ghverify.Hex {
+        const cands = ghverify.checksumCandidates(a, assets, idx) catch return null;
+        const wanted = assets[idx].name;
+        for (cands) |ci| {
+            const cand = assets[ci];
+            const text = net.fetchToString(a, cand.url, 2 * 1024 * 1024, .{}) catch continue;
+            if (ghverify.findChecksum(text, wanted, ghverify.isDedicated(wanted, cand.name))) |h| return h;
+        }
+        return null;
+    }
+
+    /// `GITHUB_TOKEN`, else `GH_TOKEN`, when it is a plausible token. Only
+    /// plain token characters are accepted, so the value can never add a header
+    /// line.
+    fn githubToken(a: std.mem.Allocator) ?[]const u8 {
+        for ([_][]const u8{ "GITHUB_TOKEN", "GH_TOKEN" }) |key| {
+            const v = platform.envOwned(a, key) orelse continue;
+            const t = std.mem.trim(u8, v, " \t\r\n");
+            if (t.len == 0 or t.len > 512) continue;
+            for (t) |c| {
+                if (!std.ascii.isAlphanumeric(c) and c != '_' and c != '-' and c != '.') break;
+            } else return t;
+        }
+        return null;
+    }
+
+    /// The release JSON for a spec. Debug builds (which includes `zig build
+    /// test`) read `$ABV0_GH_FIXTURE_DIR/<owner>__<repo>__<tag|latest>.json`
+    /// instead of calling the API, so the whole flow can run offline against
+    /// real asset URLs; release builds ignore that variable.
+    fn githubApiBody(a: std.mem.Allocator, spec: ghrelease.Spec) ![]u8 {
+        if (comptime builtin.mode == .Debug) {
+            if (platform.envOwned(a, "ABV0_GH_FIXTURE_DIR")) |dir| {
+                const which = if (spec.tag) |t| try ghverify.versionFromTag(a, t) else "latest";
+                const file = try std.fmt.allocPrint(a, "{s}__{s}__{s}.json", .{ spec.owner, spec.repo, which });
+                const path = try std.fs.path.join(a, &.{ dir, file });
+                return std.fs.cwd().readFileAlloc(a, path, 8 * 1024 * 1024);
+            }
+        }
+
+        const url = try ghrelease.apiUrl(a, spec.owner, spec.repo, spec.tag);
+        var headers = std.ArrayList([]const u8).init(a);
+        try headers.append("Accept: application/vnd.github+json");
+        if (githubToken(a)) |tok| {
+            try headers.append(try std.fmt.allocPrint(a, "Authorization: Bearer {s}", .{tok}));
+        }
+        return net.fetchToString(a, url, 8 * 1024 * 1024, .{ .headers = headers.items });
+    }
+
+    /// Fetch and parse a release. `message` receives GitHub's own explanation
+    /// when the API answers with an error object instead of a release.
+    fn fetchGithubRelease(a: std.mem.Allocator, spec: ghrelease.Spec, message: *?[]const u8) !ghrelease.Release {
+        const body = try githubApiBody(a, spec);
+        return ghrelease.parseRelease(a, body) catch |e| {
+            if (e == error.GitHubApiMessage) {
+                if (std.json.parseFromSliceLeaky(std.json.Value, a, body, .{})) |root| {
+                    if (root == .object) {
+                        if (root.object.get("message")) |m| {
+                            if (m == .string) message.* = m.string;
+                        }
+                    }
+                } else |_| {}
+            }
+            return e;
         };
-        return true;
     }
 
-    fn assetMatchesPlatform(asset_name: []const u8, platform_name: []const u8) bool {
-        const want_macos = std.mem.indexOf(u8, platform_name, "macos") != null;
-        const want_linux = std.mem.indexOf(u8, platform_name, "linux") != null;
-        const want_windows = std.mem.indexOf(u8, platform_name, "windows") != null;
-        const want_arm = std.mem.indexOf(u8, platform_name, "aarch64") != null;
+    /// The spec recorded in a store directory's `.abv0-source`, if it has one.
+    fn readSource(a: std.mem.Allocator, dir_path: []const u8) ?ghrelease.Spec {
+        const p = std.fs.path.join(a, &.{ dir_path, source_file }) catch return null;
+        const text = std.fs.cwd().readFileAlloc(a, p, 1024) catch return null;
+        return ghverify.parseSourceNote(text);
+    }
 
-        const has = struct {
-            fn f(hay: []const u8, needle: []const u8) bool {
-                return std.ascii.indexOfIgnoreCase(hay, needle) != null;
-            }
-        }.f;
+    fn sameProject(x: ghrelease.Spec, y: ghrelease.Spec) bool {
+        return std.ascii.eqlIgnoreCase(x.owner, y.owner) and std.ascii.eqlIgnoreCase(x.repo, y.repo);
+    }
 
-        if (has(asset_name, ".sha256") or has(asset_name, ".asc") or has(asset_name, ".sig")) return false;
+    /// Whether `pkg_dir` was installed from the project `spec` names.
+    fn installedFrom(self: *const Store, a: std.mem.Allocator, pkg_dir: []const u8, spec: ghrelease.Spec) bool {
+        _ = self;
+        const have = readSource(a, pkg_dir) orelse return false;
+        return sameProject(have, spec);
+    }
 
-        if (want_macos) {
-            if (!(has(asset_name, "darwin") or has(asset_name, "macos") or
-                has(asset_name, "osx") or has(asset_name, "apple"))) return false;
-        } else if (want_linux) {
-            if (!has(asset_name, "linux")) return false;
-            if (has(asset_name, "android")) return false;
-        } else if (want_windows) {
-            if (!(has(asset_name, "windows") or has(asset_name, "win64") or has(asset_name, "-pc-"))) return false;
+    /// Another GitHub project already installed under the package name `name`.
+    fn conflictingSource(self: *const Store, a: std.mem.Allocator, name: []const u8, spec: ghrelease.Spec, platform_name: []const u8) ?ghrelease.Spec {
+        const dirs = self.installedVersions(a, name, platform_name) catch return null;
+        for (dirs) |d| {
+            const p = std.fs.path.join(a, &.{ self.store_root, d.dir_name }) catch continue;
+            const have = readSource(a, p) orelse continue;
+            if (!sameProject(have, spec)) return have;
         }
+        return null;
+    }
 
-        const is_arm = has(asset_name, "aarch64") or has(asset_name, "arm64");
-        const is_x64 = has(asset_name, "x86_64") or has(asset_name, "amd64") or has(asset_name, "x64");
-        const universal = has(asset_name, "universal");
+    /// One package in the store that came from GitHub.
+    pub const GhEntry = struct {
+        name: []const u8,
+        /// The store version (the tag, made safe for a directory name).
+        version: []const u8,
+        owner: []const u8,
+        repo: []const u8,
+        /// The release tag it was installed from, exactly as GitHub names it.
+        tag: []const u8,
+    };
 
-        if (universal) return true;
-        if (want_arm) return is_arm or !is_x64;
-        return is_x64 or !is_arm;
+    /// The GitHub installs for `platform_name`, newest version of each package.
+    /// Everything is allocated from `a`.
+    pub fn githubInstalled(self: *const Store, a: std.mem.Allocator, platform_name: []const u8) ![]GhEntry {
+        var scan_arena = std.heap.ArenaAllocator.init(a);
+        defer scan_arena.deinit();
+        const index = try self.scanStore(scan_arena.allocator());
+
+        var out = std.ArrayList(GhEntry).init(a);
+        errdefer out.deinit();
+        var it = index.iterator();
+        while (it.next()) |kv| {
+            var best: ?GhEntry = null;
+            for (kv.value_ptr.items) |e| {
+                if (!std.mem.eql(u8, e.platform, platform_name)) continue;
+                const dir_path = try std.fs.path.join(a, &.{ self.store_root, e.dir_name });
+                const spec = readSource(a, dir_path) orelse continue;
+                if (!std.ascii.eqlIgnoreCase(spec.repo, kv.key_ptr.*)) continue;
+                if (best) |b| {
+                    if (registry.compareVersions(e.version, b.version) != .gt) continue;
+                }
+                best = .{
+                    .name = try a.dupe(u8, kv.key_ptr.*),
+                    .version = try a.dupe(u8, e.version),
+                    .owner = spec.owner,
+                    .repo = spec.repo,
+                    .tag = spec.tag.?,
+                };
+            }
+            if (best) |b| try out.append(b);
+        }
+        std.mem.sort(GhEntry, out.items, {}, struct {
+            fn less(_: void, x: GhEntry, y: GhEntry) bool {
+                return std.mem.order(u8, x.name, y.name) == .lt;
+            }
+        }.less);
+        return out.toOwnedSlice();
+    }
+
+    pub const GhOutdated = struct {
+        entry: GhEntry,
+        /// The newest release's tag.
+        latest_tag: []const u8,
+    };
+
+    /// GitHub installs whose project has published a newer release. One API
+    /// call per package. A project that cannot be reached is reported and
+    /// skipped, not treated as up to date or as outdated.
+    pub fn getOutdatedGithub(self: *const Store, a: std.mem.Allocator, platform_name: []const u8) ![]GhOutdated {
+        const entries = try self.githubInstalled(a, platform_name);
+        defer a.free(entries);
+
+        var out = std.ArrayList(GhOutdated).init(a);
+        errdefer out.deinit();
+        for (entries) |e| {
+            var message: ?[]const u8 = null;
+            const rel = fetchGithubRelease(a, .{ .owner = e.owner, .repo = e.repo, .tag = null }, &message) catch |err| {
+                term.err("{s}warning{s}: cannot check gh:{s}/{s}: {s}\n", .{
+                    term.yellow, term.reset, e.owner, e.repo, message orelse @errorName(err),
+                });
+                continue;
+            };
+            const latest = ghverify.versionFromTag(a, rel.tag) catch continue;
+            if (std.mem.eql(u8, latest, e.version)) continue;
+            if (registry.compareVersions(e.version, latest) == .gt) continue;
+            try out.append(.{ .entry = e, .latest_tag = rel.tag });
+        }
+        return out.toOwnedSlice();
     }
 
     /// Remove every installed version of `name` for `platform_name` except
@@ -2633,24 +2846,172 @@ test "app bundles must end in .app and are never replaced unless abv0 installed 
     try testing.expectEqualStrings("precious", kept2);
 }
 
-test "default_branch must be a plain git ref name" {
-    try testing.expect(Store.isSafeBranch("main"));
-    try testing.expect(Store.isSafeBranch("release/v1.2"));
-    try testing.expect(Store.isSafeBranch("feature.x_y-z"));
-    try testing.expect(Store.isSafeBranch("a" ** 255));
-    try testing.expect(!Store.isSafeBranch(""));
-    try testing.expect(!Store.isSafeBranch("a" ** 256));
-    try testing.expect(!Store.isSafeBranch("-x"));
-    try testing.expect(!Store.isSafeBranch("/main"));
-    try testing.expect(!Store.isSafeBranch("a..b"));
-    try testing.expect(!Store.isSafeBranch("a b"));
-    try testing.expect(!Store.isSafeBranch("main?x=1"));
-    try testing.expect(!Store.isSafeBranch("a\n"));
-}
-
 test "shell sandbox names carry a pid only in the new form" {
     try testing.expectEqual(@as(?i32, 4242), Store.shellPid("shell-1700000000-4242-beef"));
     try testing.expectEqual(@as(?i32, null), Store.shellPid("shell-1700000000-beef"));
     try testing.expectEqual(@as(?i32, null), Store.shellPid("jq@1.0@x86_64-linux"));
     try testing.expect(platform.processAlive(platform.processId()));
+}
+
+test "a GitHub release asset with no hash is refused unless the user opts in" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var s = try testStore(&tmp);
+    defer s.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    var assets = [_]ghrelease.Asset{
+        .{ .name = "tool-1.2.3-x86_64-unknown-linux-musl.tar.gz", .url = "https://example.invalid/tool.tar.gz", .size = 10, .sha256 = null },
+        .{ .name = "tool-1.2.3-aarch64-apple-darwin.tar.gz", .url = "https://example.invalid/mac.tar.gz", .size = 10, .sha256 = null },
+    };
+    const rel = ghrelease.Release{ .tag = "v1.2.3", .assets = &assets };
+    const spec = ghrelease.Spec{ .owner = "o", .repo = "tool", .tag = null };
+
+    // No digest and no checksums file in the release: nothing is fetched, nothing installed.
+    try testing.expectError(StoreError.RefusedUnverifiedInstall, s.installRelease(a, spec, rel, "x86_64-linux", .{ .quiet = true }));
+    try testing.expectError(error.FileNotFound, tmp.dir.access("store/tool@1.2.3@x86_64-linux", .{}));
+
+    // No asset for this platform at all.
+    try testing.expectError(StoreError.NoMatchingAsset, s.installRelease(a, spec, rel, "x86_64-windows", .{ .quiet = true }));
+
+    // A bare name is not a GitHub project.
+    try testing.expectError(StoreError.NotInCatalog, s.installDynamic(a, "nosuchthing", "x86_64-linux", .{ .quiet = true }));
+    try testing.expectError(StoreError.InvalidGithubSpec, s.installDynamic(a, "gh:../x", "x86_64-linux", .{ .quiet = true }));
+}
+
+test "GitHub installs are listed from their source files" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var s = try testStore(&tmp);
+    defer s.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    // Two versions from GitHub, a registry install with no source file, a
+    // directory whose source file names some other repository, and another platform.
+    try tmp.dir.makePath("store/tool@1.2.3@x86_64-linux");
+    try tmp.dir.writeFile(.{ .sub_path = "store/tool@1.2.3@x86_64-linux/.abv0-source", .data = "gh:acme/tool@v1.2.3\n" });
+    try tmp.dir.makePath("store/tool@1.10.0@x86_64-linux");
+    try tmp.dir.writeFile(.{ .sub_path = "store/tool@1.10.0@x86_64-linux/.abv0-source", .data = "gh:acme/tool@v1.10.0\n" });
+    try tmp.dir.makePath("store/jq@1.7.1@x86_64-linux");
+    try tmp.dir.makePath("store/liar@1.0@x86_64-linux");
+    try tmp.dir.writeFile(.{ .sub_path = "store/liar@1.0@x86_64-linux/.abv0-source", .data = "gh:acme/other@1.0\n" });
+    try tmp.dir.makePath("store/mac@1.0@aarch64-macos");
+    try tmp.dir.writeFile(.{ .sub_path = "store/mac@1.0@aarch64-macos/.abv0-source", .data = "gh:acme/mac@1.0\n" });
+
+    const got = try s.githubInstalled(a, "x86_64-linux");
+    try testing.expectEqual(@as(usize, 1), got.len);
+    try testing.expectEqualStrings("tool", got[0].name);
+    try testing.expectEqualStrings("1.10.0", got[0].version);
+    try testing.expectEqualStrings("acme", got[0].owner);
+    try testing.expectEqualStrings("v1.10.0", got[0].tag);
+
+    // The same repository name from a different project is a conflict.
+    const same = ghrelease.Spec{ .owner = "ACME", .repo = "tool", .tag = null };
+    try testing.expect(s.conflictingSource(a, "tool", same, "x86_64-linux") == null);
+    const other = ghrelease.Spec{ .owner = "evil", .repo = "tool", .tag = null };
+    try testing.expectEqualStrings("acme", s.conflictingSource(a, "tool", other, "x86_64-linux").?.owner);
+}
+
+test "programs found in a GitHub archive are linked, owned and removed again" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var s = try testStore(&tmp);
+    defer s.deinit();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    // The unpacked archive: one top-level directory, the program, a helper,
+    // a shared library and a manual.
+    var elf = [_]u8{0} ** 64;
+    @memcpy(elf[0..7], "\x7fELF\x02\x01\x01");
+    elf[16] = 2;
+    const dir_name = "store/tool@1.2.3@x86_64-linux";
+    try tmp.dir.makePath(dir_name ++ "/tool-1.2.3/bin");
+    try tmp.dir.makePath(dir_name ++ "/tool-1.2.3/lib");
+    try tmp.dir.makePath(dir_name ++ "/tool-1.2.3/man");
+    for ([_][]const u8{ "bin/tool", "bin/tool-helper", "lib/libtool.so", "man/tool-gen" }) |rel| {
+        const p = try std.fmt.allocPrint(a, "{s}/tool-1.2.3/{s}", .{ dir_name, rel });
+        try tmp.dir.writeFile(.{ .sub_path = p, .data = &elf, .flags = .{ .mode = 0o755 } });
+    }
+    const pkg_dir = try std.fs.path.join(a, &.{ s.store_root, "tool@1.2.3@x86_64-linux" });
+
+    const bins = try Store.detectBins(a, pkg_dir, "tool", "tool", false, "x86_64-linux");
+    try testing.expectEqual(@as(usize, 2), bins.len);
+    try testing.expectEqualStrings("tool", bins[0].name);
+    try testing.expectEqualStrings("tool-1.2.3/bin/tool", bins[0].path);
+    try testing.expectEqualStrings("tool-helper", bins[1].name);
+
+    var plans = std.ArrayList(Store.LinkPlan).init(a);
+    var names = std.ArrayList([]const u8).init(a);
+    for (bins) |b| {
+        try plans.append(.{
+            .bin = b.name,
+            .src = try safepath.joinSafe(a, pkg_dir, b.path),
+            .dst = try std.fs.path.join(a, &.{ s.bin_root, b.name }),
+        });
+        try names.append(b.name);
+    }
+    const pkg = Package{ .name = "tool", .version = "1.2.3", .bin = names.items };
+    try testing.expectEqual(@as(usize, 2), try s.linkPlans(a, pkg, plans.items, .{ .quiet = true }));
+    try tmp.dir.access("bin/tool", .{});
+    try tmp.dir.access("bin/tool-helper", .{});
+    try testing.expectEqualStrings("tool", (try s.binOwnerOf(a, "tool-helper")).?);
+
+    // A second project may not take a link it does not own.
+    const squatter = Package{ .name = "other", .version = "1", .bin = names.items };
+    try testing.expectError(StoreError.BinaryConflict, s.linkPlans(a, squatter, plans.items, .{ .quiet = true }));
+
+    // Uninstalling by the name alone removes the links and the store directory.
+    const stub_plats = [_]registry.PlatformInfo{.{ .name = "x86_64-linux" }};
+    try testing.expect(try s.uninstall(a, .{ .name = "tool", .version = "1.2.3", .platforms = &stub_plats }));
+    try testing.expectError(error.FileNotFound, tmp.dir.access("bin/tool", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.access(dir_name, .{}));
+}
+
+test "a raw GitHub download is the program, named after the repository" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    try tmp.dir.makePath("pkg");
+    // Not an executable format, but a lone raw download is the program anyway.
+    try tmp.dir.writeFile(.{ .sub_path = "pkg/tool", .data = "not magic at all", .flags = .{ .mode = 0o755 } });
+    const pkg_dir = try tmp.dir.realpathAlloc(a, "pkg");
+    const bins = try Store.detectBins(a, pkg_dir, "tool", "tool", true, "x86_64-linux");
+    try testing.expectEqual(@as(usize, 1), bins.len);
+    try testing.expectEqualStrings("tool", bins[0].name);
+    try testing.expectEqualStrings("tool", bins[0].path);
+
+    // A raw download that never arrived yields nothing to link.
+    const none = try Store.detectBins(a, pkg_dir, "ghost", "ghost", true, "x86_64-linux");
+    try testing.expectEqual(@as(usize, 0), none.len);
+}
+
+test "tags become store directory names" {
+    const a = testing.allocator;
+    const cases = [_][2][]const u8{
+        .{ "v1.2.3", "tool@1.2.3@x86_64-linux" },
+        .{ "1.2.3", "tool@1.2.3@x86_64-linux" },
+        .{ "nightly-2024/10", "tool@nightly-2024_10@x86_64-linux" },
+    };
+    for (cases) |c| {
+        const version = try ghverify.versionFromTag(a, c[0]);
+        defer a.free(version);
+        const dir = try Store.storeDirName(a, .{ .name = "tool", .version = version }, "x86_64-linux");
+        defer a.free(dir);
+        try testing.expectEqualStrings(c[1], dir);
+        // And the name splits back apart.
+        const parsed = Store.parseStoreDirName(dir).?;
+        try testing.expectEqualStrings("tool", parsed.name);
+        try testing.expectEqualStrings(version, parsed.version);
+    }
 }

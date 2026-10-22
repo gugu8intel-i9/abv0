@@ -16,6 +16,8 @@ const bloom = @import("bloom.zig");
 const wal = @import("wal.zig");
 const sign = @import("sign.zig");
 const cmds_extra = @import("cmds_extra.zig");
+const ghrelease = @import("ghrelease.zig");
+const ghverify = @import("ghverify.zig");
 
 pub const version = "2.0.0";
 
@@ -336,14 +338,14 @@ const malware_flag = Flag{ .name = "--malware", .help = "Report a suspicious pac
 const commands = [_]Command{
     .{
         .name = "install",
-        .args = "<pkg>...",
-        .summary = "Install packages and their dependencies, verified, in parallel.",
+        .args = "<pkg|gh:owner/repo[@tag]>...",
+        .summary = "Install packages and their dependencies, verified, in parallel. A gh:owner/repo spec installs that project's own GitHub release (no recipe needed), checked against GitHub's sha256 digest or the release's checksums file.",
         .flags = &.{
             dry_run_flag,                                                                      json_flag,  jobs_flag,  platform_flag,
             unverified_flag,                                                                   force_flag, quiet_flag, verbose_flag,
             .{ .name = "--micro-split", .help = "Parallel ranged download for large assets" },
         },
-        .example = "abv0 install jq ripgrep",
+        .example = "abv0 install jq gh:BurntSushi/ripgrep",
     },
     .{
         .name = "uninstall",
@@ -549,6 +551,7 @@ fn renderUsage(w: anytype) !void {
     try heading(w, "PACKAGES");
     try w.writeAll(
         \\  install <pkg>...        Install packages and their dependencies (verified, in parallel)
+        \\  install gh:owner/repo   Install any GitHub project's release, verified (no recipe needed)
         \\  uninstall <pkg>...      Remove packages and the links they created
         \\  upgrade [pkg]...        Upgrade outdated packages
         \\  outdated                List packages with a newer version available
@@ -1368,6 +1371,8 @@ fn hintPackage(a: std.mem.Allocator, reg: *const registry.Registry, name: []cons
 /// name it may have been meant to be. Silent when nothing is close.
 fn noteUnknownName(a: std.mem.Allocator, reg: *const registry.Registry, name: []const u8) void {
     if (store.Store.resolveRequest(reg, name) != null) return;
+    // A GitHub spec is not a misspelt registry name.
+    if (ghverify.looksLikeSpec(name)) return;
     if (suggestPackage(a, reg, name)) |s| {
         term.err("{s}note{s}: '{}' is not in the registry; did you mean '{}'?\n", .{ term.yellow, term.reset, safe(name), safe(s) });
     }
@@ -1419,7 +1424,11 @@ fn writeDryRunPlan(
 
     for (names) |name| {
         const pkg = store.Store.resolveRequest(reg, name) orelse {
-            try w.print("  {s}unknown{s}   {} is not in the registry; it would be fetched from GitHub\n", .{ term.yellow, term.reset, safe(name) });
+            if (ghverify.looksLikeSpec(name)) {
+                try w.print("  {s}{s:<8}{s} {} from its GitHub release (needs a sha256 digest or checksums file)\n", .{ term.green, verb, term.reset, safe(name) });
+            } else {
+                try w.print("  {s}unknown{s}   {} is not in the catalog; try gh:<owner>/{}\n", .{ term.yellow, term.reset, safe(name), safe(name) });
+            }
             continue;
         };
         const info = pkg.platform(platform_name) orelse {
@@ -1908,7 +1917,7 @@ fn cmdInstall(
     timer: *std.time.Timer,
 ) !u8 {
     if (args.rest.items.len == 0) {
-        term.err("usage: abv0 install <pkg>...\n", .{});
+        term.err("usage: abv0 install <pkg|gh:owner/repo[@tag]>...\n", .{});
         return 2;
     }
     for (args.rest.items) |name| noteUnknownName(a, reg, name);
@@ -1941,6 +1950,22 @@ fn cmdInstall(
     return 1;
 }
 
+/// The installed GitHub package a command line names: `gh:owner/repo[@tag]` or
+/// `owner/repo` (the owner must match), or just the repository name.
+fn findGithubInstall(a: std.mem.Allocator, st: *const store.Store, name: []const u8, platform_name: []const u8) ?store.Store.GhEntry {
+    const spec: ?ghrelease.Spec = if (ghverify.looksLikeSpec(name)) (ghrelease.parseSpec(name) orelse return null) else null;
+    const repo = if (spec) |sp| sp.repo else name;
+    const entries = st.githubInstalled(a, platform_name) catch return null;
+    for (entries) |e| {
+        if (!std.mem.eql(u8, e.name, repo)) continue;
+        if (spec) |sp| {
+            if (!std.ascii.eqlIgnoreCase(sp.owner, e.owner)) continue;
+        }
+        return e;
+    }
+    return null;
+}
+
 fn cmdUninstall(
     a: std.mem.Allocator,
     st: *store.Store,
@@ -1954,7 +1979,13 @@ fn cmdUninstall(
     }
     var failed: u8 = 0;
     for (rest) |name| {
-        const pkg = store.Store.resolveRequest(reg, name) orelse {
+        // A package installed from GitHub is not in the registry; its store
+        // directory says where it came from.
+        const gh_plats = [_]registry.PlatformInfo{.{ .name = platform_name }};
+        const pkg = store.Store.resolveRequest(reg, name) orelse blk: {
+            if (findGithubInstall(a, st, name, platform_name)) |e| {
+                break :blk registry.Package{ .name = e.name, .version = e.version, .platforms = &gh_plats };
+            }
             term.err("{s}error{s}: '{}' not found in registry\n", .{ term.red, term.reset, safe(name) });
             hintPackage(a, reg, name);
             failed = 1;
@@ -1987,6 +2018,9 @@ fn cmdOutdated(
 ) !u8 {
     const list = try st.getOutdated(a, reg, platform_name);
     defer a.free(list);
+    // One API call per package installed from GitHub.
+    const gh_list = try st.getOutdatedGithub(a, platform_name);
+    defer a.free(gh_list);
 
     if (json) {
         const w = term.writer();
@@ -1995,11 +2029,15 @@ fn cmdOutdated(
             if (i > 0) try w.writeAll(",");
             try writeOutdatedJson(w, e.pkg.name, e.installed, e.pkg.version);
         }
+        for (gh_list, 0..) |g, i| {
+            if (i > 0 or list.len > 0) try w.writeAll(",");
+            try writeOutdatedJson(w, g.entry.name, g.entry.tag, g.latest_tag);
+        }
         try w.writeAll("]\n");
         return 0;
     }
 
-    if (list.len == 0) {
+    if (list.len == 0 and gh_list.len == 0) {
         term.print("everything is up to date\n", .{});
         return 0;
     }
@@ -2010,7 +2048,16 @@ fn cmdOutdated(
             term.green,        safe(e.pkg.version), term.reset,
         });
     }
-    term.print("\n{d} outdated; run `abv0 upgrade`\n", .{list.len});
+    for (gh_list) |g| {
+        term.print("{s}{}{s}  {} {s}->{s} {s}{}{s} {s}(gh:{}/{}){s}\n", .{
+            term.bold,         safe(g.entry.name),  term.reset,
+            safe(g.entry.tag), term.dim,            term.reset,
+            term.green,        safe(g.latest_tag),  term.reset,
+            term.dim,          safe(g.entry.owner), safe(g.entry.repo),
+            term.reset,
+        });
+    }
+    term.print("\n{d} outdated; run `abv0 upgrade`\n", .{list.len + gh_list.len});
     return 0;
 }
 
@@ -2025,6 +2072,10 @@ fn cmdUpgrade(
 ) !u8 {
     var targets = std.ArrayList(registry.Package).init(a);
     defer targets.deinit();
+    // Packages installed from GitHub: re-resolved against the project's releases.
+    const GhTarget = struct { spec: []const u8, name: []const u8, from: []const u8 };
+    var gh_targets = std.ArrayList(GhTarget).init(a);
+    defer gh_targets.deinit();
 
     if (rest.len == 0) {
         const list = try st.getOutdated(a, reg, platform_name);
@@ -2037,11 +2088,31 @@ fn cmdUpgrade(
             }
             try targets.append(e.pkg);
         }
+        const gh_list = try st.getOutdatedGithub(a, platform_name);
+        defer a.free(gh_list);
+        for (gh_list) |g| {
+            if (cmds_extra.isPinned(st, a, g.entry.name)) {
+                say("  {s}pinned{s}   {} stays at {}\n", .{ term.dim, term.reset, safe(g.entry.name), safe(g.entry.tag) });
+                continue;
+            }
+            try gh_targets.append(.{
+                .spec = try std.fmt.allocPrint(a, "gh:{s}/{s}@{s}", .{ g.entry.owner, g.entry.repo, g.latest_tag }),
+                .name = g.entry.name,
+                .from = g.entry.tag,
+            });
+        }
     } else {
         var unknown: usize = 0;
         for (rest) |name| {
             if (store.Store.resolveRequest(reg, name)) |p| {
                 try targets.append(p);
+            } else if (findGithubInstall(a, st, name, platform_name)) |e| {
+                // Latest release of the project it was installed from, unless
+                // the command line pins a tag.
+                const spec = if (ghverify.looksLikeSpec(name)) name else try std.fmt.allocPrint(a, "gh:{s}/{s}", .{ e.owner, e.repo });
+                try gh_targets.append(.{ .spec = spec, .name = e.name, .from = e.tag });
+            } else if (ghverify.looksLikeSpec(name)) {
+                try gh_targets.append(.{ .spec = name, .name = name, .from = "" });
             } else {
                 unknown += 1;
                 term.err("{s}warning{s}: '{}' not in registry\n", .{ term.yellow, term.reset, safe(name) });
@@ -2052,7 +2123,7 @@ fn cmdUpgrade(
         if (unknown == rest.len) return 1;
     }
 
-    if (targets.items.len == 0) {
+    if (targets.items.len == 0 and gh_targets.items.len == 0) {
         say("nothing to upgrade\n", .{});
         return 0;
     }
@@ -2082,7 +2153,16 @@ fn cmdUpgrade(
     }
 
     if (output.dry_run) {
-        try writeDryRunPlan(term.writer(), a, st, reg, names.items, platform_name, "upgrade");
+        for (gh_targets.items) |t| {
+            term.print("  {s}{s:<8}{s} {} {s}->{s} {} {s}(GitHub){s}\n", .{
+                term.green, "upgrade", term.reset, safe(t.name), term.dim, term.reset, safe(t.spec), term.dim, term.reset,
+            });
+        }
+        if (names.items.len > 0) {
+            try writeDryRunPlan(term.writer(), a, st, reg, names.items, platform_name, "upgrade");
+        } else {
+            term.print("\ndry run: nothing was changed\n", .{});
+        }
         return 0;
     }
 
@@ -2099,7 +2179,17 @@ fn cmdUpgrade(
         const pkg = store.Store.resolveRequest(reg, name) orelse continue;
         _ = try st.pruneOtherVersions(a, pkg.name, pkg.version, platform_name);
     }
-    return if (failures == 0) 0 else 1;
+
+    var gh_failures: usize = 0;
+    for (gh_targets.items) |t| {
+        const pkg = st.installDynamic(a, t.spec, platform_name, opts) catch |e| {
+            reportInstallError(t.spec, e);
+            gh_failures += 1;
+            continue;
+        };
+        _ = try st.pruneOtherVersions(a, pkg.name, pkg.version, platform_name);
+    }
+    return if (failures + gh_failures == 0) 0 else 1;
 }
 
 fn cmdRun(
@@ -2802,5 +2892,7 @@ comptime {
     _ = @import("stream.zig");
     _ = @import("http.zig");
     _ = @import("ghrelease.zig");
+    _ = @import("ghverify.zig");
+    _ = @import("bindetect.zig");
     _ = @import("shim.zig");
 }
