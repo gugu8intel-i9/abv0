@@ -1852,6 +1852,10 @@ fn run(base: std.mem.Allocator, a: std.mem.Allocator) !u8 {
         return 1;
     }
 
+    // Open TLS connections to GitHub while the registry loads, so the first
+    // download reuses a ready connection. Returns at once; failures are ignored.
+    if (installsPackages(cmd) and !output.dry_run) net.prewarmGithub();
+
     var reg = if (args.registry_path) |p|
         try loadExplicitRegistry(base, p, args.allow_unsigned_manifest)
     else

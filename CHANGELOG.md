@@ -68,6 +68,19 @@
 
 ### Performance
 
+- **Progressive parallel downloads.** A download of 8 MiB or more from a server that
+  supports byte ranges is fetched over up to 8 connections. The first GET is the probe, with
+  no HEAD round trip: once its response head says the body is big and ranges work, the other
+  chunks are requested at once on the same final URL while the first connection keeps
+  reading chunk 0. Chunks are written into a preallocated file, and the SHA-256 is computed
+  in order as they land, so the digest is final with the last byte and the file is not read
+  again. A streaming install decodes chunk 0 while later chunks are still arriving. A
+  failed chunk is retried twice, resuming where it stopped, on a new connection; a server
+  that advertises ranges and ignores them is detected and the download restarts as one
+  stream. The curl fallback does the same with one curl process per chunk.
+  `ABV0_SPLIT_MIN` and `ABV0_CONNECTIONS` tune it. Idle connections that the server closed
+  are retried transparently, and `net.prewarm` can open TLS connections ahead of the first
+  request.
 - **Streaming verified install.** For tar, tar.gz, tar.xz, tar.zst and single-binary packages, bytes from curl
   are hashed, decompressed and unpacked in one pass into a private staging directory.
   Nothing is published until the digest matches. Ten rounds installing ripgrep, bat and

@@ -16,6 +16,14 @@
 //! switch happens before the first body byte, so nothing has been hashed or
 //! unpacked yet. `net.chooseRoute` remembers hosts that failed, so later
 //! installs skip the failed attempt.
+//!
+//! Both transports go through `pget.zig`. A small body is one stream, as it
+//! always was. A big one that supports byte ranges is fetched over several
+//! connections into a private scratch file while this module decodes it: the
+//! reader hands out the file's bytes in order as soon as they have been hashed,
+//! so decoding starts with chunk 0 while the later chunks are still arriving.
+//! The in-order digest of the scratch file is checked against the digest of
+//! what was decoded, so the bytes on disk and the bytes unpacked agree.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -23,6 +31,7 @@ const archive = @import("archive.zig");
 const cas = @import("cas.zig");
 const http = @import("http.zig");
 const net = @import("net.zig");
+const pget = @import("pget.zig");
 const platform = @import("platform.zig");
 const safepath = @import("safepath.zig");
 const term = @import("term.zig");
@@ -159,73 +168,58 @@ pub fn streamInstall(
     }
     if (!net.isSafeUrl(url)) return error.UnsafeUrl;
 
-    var arena_state = std.heap.ArenaAllocator.init(a);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
     // Shown as a live line on a TTY; cleared again when this function returns.
     const progress = term.beginDownload(url);
     defer term.endDownload(progress);
 
-    if (try openBuiltin(a, url)) |body| {
-        defer body.close();
-        return unpackStream(a, body.reader(), declared, raw_name, dest, progress);
-    }
-
-    // No --output: curl writes the body to its stdout, which is our pipe.
-    const argv = try net.buildCurlArgv(arena, url, null, .{}, &.{});
-
-    var child = std.process.Child.init(argv, arena);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Pipe;
-    // Not piped: nothing drains it while we read stdout, so a chatty curl
-    // could block on a full stderr pipe.
-    child.stderr_behavior = .Ignore;
-    try child.spawn();
-
-    const result = unpackStream(a, child.stdout.?.reader(), declared, raw_name, dest, progress) catch |e| {
-        // Stop the transfer; its bytes are no longer wanted.
-        _ = child.kill() catch {};
-        return e;
+    return streamOnce(a, url, declared, raw_name, dest, progress, true) catch |e| {
+        if (e != error.RangeNotHonoured) return e;
+        // The server promised byte ranges and broke the promise after the
+        // download began. `pget` has noted the host; start over with one
+        // stream in an emptied directory.
+        try emptyDir(dest);
+        return streamOnce(a, url, declared, raw_name, dest, progress, false);
     };
-
-    // A transfer cut short ends the stream early. The digest would not match
-    // either, but this reports the real cause.
-    const child_term = try child.wait();
-    switch (child_term) {
-        .Exited => |code| if (code != 0) return error.DownloadFailed,
-        else => return error.DownloadFailed,
-    }
-    return result;
 }
 
-/// Open `url` with the built-in client. Null means use curl: the route says so,
-/// or the client failed at the transport level, which is remembered for the
-/// next run. A final answer (HTTP 404, a bad redirect) and a forced
-/// `ABV0_DOWNLOADER=builtin` return the error instead.
-fn openBuiltin(a: Allocator, url: []const u8) !?*http.Stream {
-    const host = http.hostOf(url) orelse return null;
-    if (net.chooseRoute(host) == .curl) return null;
-
-    var attempt: u32 = 0;
-    while (true) : (attempt += 1) {
-        const opened = if (http.shared()) |client| client.open(a, url, .{}) else |e| e;
-        if (opened) |body| {
-            net.reportBuiltinSuccess();
-            return body;
-        } else |e| {
-            // Same retry as net.download: a momentary 5xx should not cost the
-            // streaming path.
-            const opts: net.Options = .{};
-            if (e == error.HttpStatus and http.isTransientStatus(http.last_http_status) and attempt < opts.retries) {
-                std.time.sleep(@as(u64, std.time.ns_per_s) << @intCast(@min(attempt, 4)));
-                continue;
-            }
-            if (!http.isTransportError(e) or net.downloaderMode() == .builtin) return e;
-            net.reportBuiltinFailure(host, e);
-            return null;
+/// Delete everything inside `dir`, which holds the debris of a failed attempt.
+fn emptyDir(dir: std.fs.Dir) !void {
+    var it_dir = try dir.openDir(".", .{ .iterate = true });
+    defer it_dir.close();
+    // Deleting while iterating may skip entries, so look again until none are left.
+    while (true) {
+        var it = it_dir.iterate();
+        var any = false;
+        while (try it.next()) |entry| {
+            any = true;
+            try dir.deleteTree(entry.name);
         }
+        if (!any) break;
     }
+}
+
+fn streamOnce(
+    a: Allocator,
+    url: []const u8,
+    declared: archive.Kind,
+    raw_name: []const u8,
+    dest: std.fs.Dir,
+    progress: ?term.Download,
+    allow_split: bool,
+) !Result {
+    // The first request is made here and its head read. Whether the body is
+    // one stream or several connections is decided from that head.
+    const transfer = try pget.begin(url, .{ .dest = .scratch, .mode = .consume, .allow_split = allow_split });
+    defer transfer.deinit();
+
+    const result = try unpackStream(a, transfer.reader(), declared, raw_name, dest, progress);
+
+    // A curl transfer cut short ends the stream early. The digest would not
+    // match either, but this reports the real cause.
+    if (try transfer.finish()) |split| {
+        if (split.bytes != result.bytes or !std.mem.eql(u8, &split.digest, &result.digest)) return error.DownloadFailed;
+    }
+    return result;
 }
 
 /// Everything after the transfer starts: hash, sniff, decode and unpack `reader`.

@@ -51,6 +51,16 @@ pub const Limits = struct {
     /// sent only to the host of the original URL: a redirect to another host
     /// (a CDN) must never receive an Authorization header meant for an API.
     headers: []const []const u8 = &.{},
+    /// Ask for bytes `start..=end` only. The response must then be a 206 whose
+    /// Content-Range names exactly that span, or the request fails with
+    /// `RangeNotHonoured`: bytes of the wrong span must never reach a file.
+    range: ?Range = null,
+};
+
+/// An inclusive byte span, as in `Range: bytes=start-end`.
+pub const Range = struct {
+    start: u64,
+    end: u64,
 };
 
 const max_extra_headers = 8;
@@ -83,6 +93,8 @@ pub const PolicyError = error{
     BadRedirect,
     UnsafeUrl,
     DownloadTooLarge,
+    /// A ranged request was answered with something other than the span asked for.
+    RangeNotHonoured,
     /// The caller's sink refused the bytes (disk full, closed file).
     WriteFailed,
     OutOfMemory,
@@ -104,7 +116,9 @@ pub fn isTransportError(err: anyerror) bool {
         error.BadRedirect,
         error.UnsafeUrl,
         error.DownloadTooLarge,
+        error.RangeNotHonoured,
         error.WriteFailed,
+        error.ReadFailed,
         error.OutOfMemory,
         => false,
         else => true,
@@ -427,6 +441,9 @@ pub const Client = struct {
         var first_host_buf: [256]u8 = undefined;
         var first_host: []const u8 = "";
 
+        var range_buf: [64]u8 = undefined;
+        var sent_buf: [max_extra_headers + 1]std.http.Header = undefined;
+
         var hops: u32 = 0;
         while (true) : (hops += 1) {
             if (hops > s.lim.max_redirects) return error.TooManyRedirects;
@@ -439,26 +456,54 @@ pub const Client = struct {
             }
             const same_host = std.ascii.eqlIgnoreCase(host, first_host);
 
-            s.req = try self.clientFor(host).open(.GET, uri, .{
-                .server_header_buffer = &s.header_buf,
-                // Redirects are followed below so every hop is checked.
-                .redirect_behavior = .unhandled,
-                .headers = .{
-                    // The curl path does not ask for a compressed body.
-                    // Asking for one would make the hash cover other bytes.
-                    .accept_encoding = .omit,
-                    .user_agent = .{ .override = user_agent },
-                },
-                .extra_headers = if (same_host) extra else &.{},
-            });
-            s.have_req = true;
+            // Headers for the original host, plus the Range line when asked.
+            var sent_n: usize = 0;
+            if (same_host) {
+                for (extra) |h| {
+                    sent_buf[sent_n] = h;
+                    sent_n += 1;
+                }
+            }
+            if (s.lim.range) |r| {
+                const v = std.fmt.bufPrint(&range_buf, "bytes={d}-{d}", .{ r.start, r.end }) catch return error.BadRedirect;
+                sent_buf[sent_n] = .{ .name = "Range", .value = v };
+                sent_n += 1;
+            }
 
-            if (s.req.connection) |conn| setSocketTimeouts(conn.stream.handle, s.lim.recv_timeout_s);
-            if (nowNs() > s.deadline_ns) return error.Timeout;
+            // A connection that sat idle in the pool may have been closed by
+            // the server since. The request then fails on a connection that
+            // looks fine, and a new one succeeds, so that case is retried here
+            // instead of being mistaken for a broken network.
+            var stale_retries: u32 = 0;
+            while (true) {
+                const had_idle = self.hasIdleConnection(host);
+                s.req = try self.clientFor(host).open(.GET, uri, .{
+                    .server_header_buffer = &s.header_buf,
+                    // Redirects are followed below so every hop is checked.
+                    .redirect_behavior = .unhandled,
+                    .headers = .{
+                        // The curl path does not ask for a compressed body.
+                        // Asking for one would make the hash cover other bytes.
+                        .accept_encoding = .omit,
+                        .user_agent = .{ .override = user_agent },
+                    },
+                    .extra_headers = sent_buf[0..sent_n],
+                });
+                s.have_req = true;
 
-            try s.req.send();
-            try s.req.finish();
-            try s.req.wait();
+                if (s.req.connection) |conn| setSocketTimeouts(conn.stream.handle, s.lim.recv_timeout_s);
+                if (nowNs() > s.deadline_ns) return error.Timeout;
+
+                if (sendAndWait(&s.req)) |_| break else |e| {
+                    if (had_idle and stale_retries < 2 and isStaleConnectionError(e)) {
+                        s.req.deinit();
+                        s.have_req = false;
+                        stale_retries += 1;
+                        continue;
+                    }
+                    return e;
+                }
+            }
 
             const status = s.req.response.status;
             if (status.class() == .redirect) {
@@ -478,11 +523,31 @@ pub const Client = struct {
             if (s.req.response.transfer_compression != .identity) return error.UnexpectedEncoding;
             s.status = @intFromEnum(status);
             s.content_length = s.req.response.content_length;
-            if (s.content_length) |cl| {
-                if (cl > s.lim.max_bytes) return error.DownloadTooLarge;
-            }
+            try checkDeclaredLength(s.content_length, s.lim.max_bytes);
+            try checkRangeHeaders(s);
             return;
         }
+    }
+
+    fn hasIdleConnection(self: *Client, host: []const u8) bool {
+        const pool = &self.clientFor(host).connection_pool;
+        pool.mutex.lock();
+        defer pool.mutex.unlock();
+        return pool.free_len > 0;
+    }
+
+    /// Open a connection to `host:443` and leave it idle in the pool, so the
+    /// first real request skips the TCP and TLS handshakes. Best effort: a
+    /// failure here is ignored, because the real request will meet it again
+    /// and handle it properly.
+    pub fn warm(self: *Client, host: []const u8) void {
+        if (host.len == 0 or host.len > 253) return;
+        for (host) |c| {
+            if (c <= 0x20 or c == 0x7f or c == '/' or c == '@' or c == '\\' or c == '?' or c == '#') return;
+        }
+        const c = self.clientFor(host);
+        const conn = c.connect(host, 443, .tls) catch return;
+        c.connection_pool.release(c.allocator, conn);
     }
 
     /// Stream a GET response into `sink`, anything with `writeAll([]const u8)`.
@@ -518,12 +583,21 @@ pub const Stream = struct {
     status: u16 = 0,
     content_length: ?u64 = null,
     bytes: u64 = 0,
+    /// What the server said about ranges on a plain (unranged) response.
+    accept_ranges: AcceptRanges = .unknown,
+    /// Size of the whole resource, from Content-Range on a ranged response.
+    total_length: ?u64 = null,
 
     pub const ReadError = std.http.Client.Request.ReadError || error{ Timeout, DownloadTooLarge, TruncatedBody };
     pub const Reader = std.io.Reader(*Stream, ReadError, read);
 
     pub fn reader(self: *Stream) Reader {
         return .{ .context = self };
+    }
+
+    /// The URL the response came from, after every redirect hop.
+    pub fn finalUrl(self: *const Stream) []const u8 {
+        return self.target;
     }
 
     pub fn read(self: *Stream, buf: []u8) ReadError!usize {
@@ -551,6 +625,85 @@ pub const Stream = struct {
         a.destroy(self);
     }
 };
+
+fn sendAndWait(req: *std.http.Client.Request) !void {
+    try req.send();
+    try req.finish();
+    try req.wait();
+}
+
+/// Errors that say the server closed a kept-alive connection under us.
+fn isStaleConnectionError(err: anyerror) bool {
+    return switch (err) {
+        error.ConnectionResetByPeer,
+        error.BrokenPipe,
+        error.EndOfStream,
+        error.UnexpectedReadFailure,
+        error.TlsConnectionTruncated,
+        => true,
+        else => false,
+    };
+}
+
+/// Read Accept-Ranges (plain responses) or Content-Range (ranged ones) from
+/// the response head into the stream, and check a ranged answer is the span
+/// that was asked for.
+fn checkRangeHeaders(s: *Stream) !void {
+    var accept: AcceptRanges = .unknown;
+    var span: ?ContentRange = null;
+    var it = s.req.response.iterateHeaders();
+    while (it.next()) |h| {
+        if (std.ascii.eqlIgnoreCase(h.name, "accept-ranges")) {
+            const v = std.mem.trim(u8, h.value, " \t");
+            accept = if (std.ascii.eqlIgnoreCase(v, "bytes")) .yes else if (std.ascii.eqlIgnoreCase(v, "none")) .no else accept;
+        } else if (std.ascii.eqlIgnoreCase(h.name, "content-range")) {
+            span = parseContentRange(h.value);
+        }
+    }
+    s.accept_ranges = accept;
+
+    const want = s.lim.range orelse return;
+    if (s.status != 206) return error.RangeNotHonoured;
+    const got = span orelse return error.RangeNotHonoured;
+    if (got.start != want.start or got.end != want.end) return error.RangeNotHonoured;
+    if (s.content_length) |cl| {
+        if (cl != want.end - want.start + 1) return error.RangeNotHonoured;
+    }
+    s.total_length = got.total;
+    s.accept_ranges = .yes;
+}
+
+/// Refuse a body whose declared length is over `cap`, before a byte of it is
+/// read. A body that declares no length is held to the cap as it arrives.
+pub fn checkDeclaredLength(length: ?u64, cap: u64) error{DownloadTooLarge}!void {
+    if (length) |n| {
+        if (n > cap) return error.DownloadTooLarge;
+    }
+}
+
+pub const AcceptRanges = enum { unknown, yes, no };
+
+pub const ContentRange = struct {
+    start: u64,
+    end: u64,
+    /// Null for `bytes 0-9/*`.
+    total: ?u64,
+};
+
+/// Parse `bytes 0-99/1234` (or `/*`). Anything else is null.
+pub fn parseContentRange(value: []const u8) ?ContentRange {
+    var v = std.mem.trim(u8, value, " \t");
+    if (!std.ascii.startsWithIgnoreCase(v, "bytes")) return null;
+    v = std.mem.trimLeft(u8, v["bytes".len..], " \t");
+    const dash = std.mem.indexOfScalar(u8, v, '-') orelse return null;
+    const slash = std.mem.indexOfScalarPos(u8, v, dash, '/') orelse return null;
+    const start = std.fmt.parseInt(u64, v[0..dash], 10) catch return null;
+    const end = std.fmt.parseInt(u64, v[dash + 1 .. slash], 10) catch return null;
+    if (end < start) return null;
+    const total_text = std.mem.trim(u8, v[slash + 1 ..], " \t");
+    const total: ?u64 = if (std.mem.eql(u8, total_text, "*")) null else std.fmt.parseInt(u64, total_text, 10) catch return null;
+    return .{ .start = start, .end = end, .total = total };
+}
 
 fn nowNs() i128 {
     return std.time.nanoTimestamp();
@@ -749,4 +902,51 @@ test "extra header lines split into name and value; malformed lines are dropped"
     try std.testing.expectEqualStrings("Accept", got[0].name);
     try std.testing.expectEqualStrings("application/vnd.github+json", got[0].value);
     try std.testing.expectEqualStrings("Bearer abc", got[1].value);
+}
+
+test "Content-Range parses the span and the total" {
+    const r = parseContentRange("bytes 5242880-10485759/41943040").?;
+    try testing.expectEqual(@as(u64, 5242880), r.start);
+    try testing.expectEqual(@as(u64, 10485759), r.end);
+    try testing.expectEqual(@as(?u64, 41943040), r.total);
+
+    // Unknown total.
+    try testing.expectEqual(@as(?u64, null), parseContentRange("bytes 0-9/*").?.total);
+    // Whitespace and case are tolerated.
+    try testing.expectEqual(@as(u64, 7), parseContentRange("  Bytes  7-8/9 ").?.start);
+
+    // Not a span we can use.
+    try testing.expect(parseContentRange("") == null);
+    try testing.expect(parseContentRange("bytes */1234") == null); // unsatisfied range
+    try testing.expect(parseContentRange("items 0-9/10") == null);
+    try testing.expect(parseContentRange("bytes 9-0/10") == null); // end before start
+    try testing.expect(parseContentRange("bytes a-b/10") == null);
+    try testing.expect(parseContentRange("bytes 0-9/x") == null);
+    try testing.expect(parseContentRange("bytes 0-9") == null);
+}
+
+test "a ranged request that is not answered with the span is a policy error" {
+    try testing.expect(!isTransportError(error.RangeNotHonoured));
+    try testing.expect(!isTransportError(error.ReadFailed));
+    // Limits carry no range unless the caller asks for one.
+    try testing.expect((Limits{}).range == null);
+}
+
+test "only connection-closed errors count as a stale pooled connection" {
+    try testing.expect(isStaleConnectionError(error.ConnectionResetByPeer));
+    try testing.expect(isStaleConnectionError(error.EndOfStream));
+    try testing.expect(isStaleConnectionError(error.BrokenPipe));
+    try testing.expect(!isStaleConnectionError(error.TlsAlert));
+    try testing.expect(!isStaleConnectionError(error.CertificateIssuerNotFound));
+    try testing.expect(!isStaleConnectionError(error.HttpStatus));
+    try testing.expect(!isStaleConnectionError(error.Timeout));
+}
+
+test "a declared length over the cap is refused, at the cap it is not" {
+    try checkDeclaredLength(null, 100);
+    try checkDeclaredLength(100, 100);
+    try checkDeclaredLength(0, 100);
+    try testing.expectError(error.DownloadTooLarge, checkDeclaredLength(101, 100));
+    try testing.expectError(error.DownloadTooLarge, checkDeclaredLength(net.max_download_bytes + 1, net.max_download_bytes));
+    try checkDeclaredLength(net.max_download_bytes, net.max_download_bytes);
 }

@@ -222,6 +222,8 @@ fetches and stores the macOS build without linking it into your `PATH`.
 | `ABV0_CACHE_MAX` | Size cap of the download cache, such as `512M` or `4G` (default `2G`); least recently used entries go first |
 | `ABV0_NO_DEDUPE` | `1` stops abv0 hard-linking identical files between installs through `<root>/cas` |
 | `ABV0_DOWNLOADER` | `builtin`, `curl` or `auto` (the default). `builtin` never uses curl; `curl` never uses the built-in client. |
+| `ABV0_SPLIT_MIN` | Smallest download fetched over several connections at once, in bytes (`8M`, `512k` and `1G` work too). Default 8 MiB. |
+| `ABV0_CONNECTIONS` | Connections for a split download, 1 to 16. `1` turns splitting off. Unset, a download gets one connection per 4 MiB, up to 8. |
 | `GITHUB_TOKEN`, `GH_TOKEN` | Optional GitHub token for API requests. `GITHUB_TOKEN` is read first. |
 | `NO_COLOR` | Disables colour, as `--no-color` does |
 

@@ -457,7 +457,10 @@ pub const Store = struct {
         // leaves no trace in the store. Any error other than a checksum
         // mismatch falls through to the curl path, which reports it properly.
         var streamed: ?stream.Result = null;
-        var payload: ?Digest = null;
+        // Leading bytes of a payload that was downloaded to a file or found in
+        // the cache (null when the archive was already unpacked by the stream).
+        var payload_head_buf: [archive.head_len]u8 = undefined;
+        var payload_head: ?[]const u8 = null;
 
         // A streaming install never holds the payload as a file; the sink
         // collects the bytes as they arrive so they can be cached once the
@@ -500,13 +503,12 @@ pub const Store = struct {
             // Already verified against the pinned digest by the lookup; only
             // the leading bytes are needed, for the unpack's type sniff.
             sum = found.digest;
-            var d = Digest.init();
-            d.update(found.head[0..found.head_len]);
-            payload = d;
+            @memcpy(payload_head_buf[0..found.head_len], found.head[0..found.head_len]);
+            payload_head = payload_head_buf[0..found.head_len];
         } else {
-            // The payload is read once after it lands, for its digest and its
-            // leading bytes. A micro-split download already has both from the
-            // pass that reassembled its parts, so it does not read the file again.
+            // A big body is fetched over several connections and hashed in
+            // order as the chunks land, so the digest and the leading bytes
+            // come with the download and the file is not read again.
             var fetched: ?Digest = null;
             if (opts.micro_split) {
                 fetched = self.microSplitDownload(a, info.url, archive_path, tmp_dir) catch null;
@@ -517,25 +519,33 @@ pub const Store = struct {
                     fetched = try digestFile(archive_path);
                 }
             }
-            var p = fetched orelse blk: {
-                net.download(a, info.url, archive_path, .{}) catch |e| {
+            var sum_known: ?[32]u8 = null;
+            if (fetched) |*d| {
+                const n = d.head().len;
+                @memcpy(payload_head_buf[0..n], d.head());
+                payload_head = payload_head_buf[0..n];
+                sum_known = d.final();
+            } else {
+                const got = net.downloadHashed(a, info.url, archive_path, .{}) catch |e| {
                     term.err("{s}error{s}: download failed for {s}: {s}\n", .{ term.red, term.reset, pkg.name, @errorName(e) });
                     return StoreError.DownloadFailed;
                 };
-                break :blk try digestFile(archive_path);
-            };
+                const n = got.head_len;
+                @memcpy(payload_head_buf[0..n], got.head[0..n]);
+                payload_head = payload_head_buf[0..n];
+                sum_known = got.digest;
+            }
 
             // A CDN error page is not a package. curl without --fail used to let
             // these straight through into ~/.abv0/bin.
-            if (archive.looksLikeErrorPageBytes(p.head())) {
+            if (archive.looksLikeErrorPageBytes(payload_head.?)) {
                 term.err(
                     "{s}error{s}: the server returned an error page, not an archive, for {s}\n  {s}\n",
                     .{ term.red, term.reset, pkg.name, info.url },
                 );
                 return StoreError.DownloadLooksLikeErrorPage;
             }
-            sum = p.final();
-            payload = p;
+            sum = sum_known.?;
         }
 
         // ---- verify ----
@@ -553,7 +563,7 @@ pub const Store = struct {
             if (hit == null and std.mem.eql(u8, &digest_hex, h)) {
                 if (streamed != null) {
                     if (sink) |*s| s.promote(h) catch {};
-                } else if (payload != null) {
+                } else if (payload_head != null) {
                     cas.insertFile(a, self.root, cfg, h, archive_path, raw_payload) catch {};
                 }
             }
@@ -563,14 +573,14 @@ pub const Store = struct {
         try w.append(.unpack);
 
         // A streamed install was already unpacked during the fetch.
-        if (payload) |*p| {
+        if (payload_head) |head| {
             const declared = archive.Kind.fromString(info.archive_type) orelse
                 archive.Kind.fromFilename(info.url) orelse
                 return StoreError.UnknownArchiveType;
 
             // Trust the bytes over the manifest: if the payload sniffs as a
             // different container, use what it actually is.
-            const actual = archive.sniffBytes(p.head());
+            const actual = archive.sniffBytes(head);
             const kind = if (declared == .raw or declared == .dmg)
                 declared
             else if (actual) |k| k else declared;

@@ -27,11 +27,16 @@
 //!     `<abv0 home>/net-fallback`, so later runs go straight to curl instead
 //!     of paying the failed attempt again.
 //!   * `ABV0_DOWNLOADER=builtin|curl|auto` forces either one (default auto).
+//!   * `pget.zig` runs the transfer on either of them. A body of
+//!     `ABV0_SPLIT_MIN` (8 MiB) or more from a server that supports byte ranges
+//!     is fetched over several connections and hashed in order as it lands;
+//!     `downloadHashed` returns that digest.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const platform = @import("platform.zig");
 const http = @import("http.zig");
+const pget = @import("pget.zig");
 
 pub const Options = struct {
     connect_timeout_s: u32 = 20,
@@ -124,7 +129,7 @@ fn stateRoot(allocator: std.mem.Allocator) ?[]u8 {
 
 /// `<abv0 home>/tmp`, created 0700 when missing. Private scratch space for
 /// requests that have no download destination beside them.
-fn privateTmpDir(allocator: std.mem.Allocator) ![]u8 {
+pub fn privateTmpDir(allocator: std.mem.Allocator) ![]u8 {
     const root = stateRoot(allocator) orelse return Error.NoPrivateDir;
     defer allocator.free(root);
     const tmp = try std.fs.path.join(allocator, &.{ root, "tmp" });
@@ -227,6 +232,9 @@ pub fn buildCurlArgv(
     return args.toOwnedSlice();
 }
 
+/// What a finished download yields: the SHA-256 of the file and its first bytes.
+pub const Fetched = pget.Fetched;
+
 /// Download `url` to `dest_path`. Returns an error on any HTTP failure.
 pub fn download(
     allocator: std.mem.Allocator,
@@ -234,35 +242,99 @@ pub fn download(
     dest_path: []const u8,
     opts: Options,
 ) !void {
+    _ = try downloadHashed(allocator, url, dest_path, opts);
+}
+
+/// `download`, and the digest of what was written, computed while the bytes
+/// arrived. A big body that supports byte ranges is fetched over several
+/// connections at once and hashed in order as the chunks land (see
+/// `pget.zig`), so the digest costs no pass over the file. Nothing is left at
+/// `dest_path` unless the download succeeded.
+pub fn downloadHashed(
+    allocator: std.mem.Allocator,
+    url: []const u8,
+    dest_path: []const u8,
+    opts: Options,
+) !Fetched {
     if (!isSafeUrl(url)) return Error.UnsafeUrl;
     if (!validHeaders(opts.headers)) return Error.UnsafeHeader;
-    if (try downloadBuiltin(allocator, url, dest_path, opts)) return;
 
-    var arena_state = std.heap.ArenaAllocator.init(allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
+    var allow_split = true;
+    var use_curl = false;
+    while (true) {
+        const t = pget.begin(url, .{
+            .opts = opts,
+            .dest = .{ .file = dest_path },
+            .mode = .download,
+            .allow_split = allow_split,
+            .use_curl = use_curl,
+        }) catch |e| switch (e) {
+            // No curl: Windows has PowerShell as a last resort.
+            error.CurlMissing => {
+                var arena_state = std.heap.ArenaAllocator.init(allocator);
+                defer arena_state.deinit();
+                try downloadFallback(arena_state.allocator(), url, dest_path, opts);
+                return hashFile(dest_path);
+            },
+            else => return curlError(e),
+        };
+        defer t.deinit();
 
-    // Headers reach curl through a file beside the download, not through argv.
-    const header_file = try writeHeaderFile(arena, std.fs.path.dirname(dest_path) orelse ".", opts.headers);
-    defer removeHeaderFile(header_file);
-    var curl_opts = opts;
-    curl_opts.header_file = header_file;
-
-    const argv = try buildCurlArgv(arena, url, dest_path, curl_opts, &.{});
-
-    const res = std.process.Child.run(.{
-        .allocator = arena,
-        .argv = argv,
-        .max_output_bytes = 64 * 1024,
-    }) catch |e| switch (e) {
-        error.FileNotFound => return downloadFallback(arena, url, dest_path, opts),
-        else => return Error.DownloadFailed,
-    };
-
-    if (res.term != .Exited or res.term.Exited != 0) {
-        std.fs.cwd().deleteFile(dest_path) catch {};
-        return Error.DownloadFailed;
+        if (t.complete()) |fetched| return fetched else |e| {
+            // A server that promised byte ranges and broke the promise:
+            // start over with one stream (and do not ask that host again).
+            if (e == error.RangeNotHonoured and allow_split) {
+                allow_split = false;
+                continue;
+            }
+            if (t.isBuiltin()) {
+                // A policy answer, or the caller forced the built-in client.
+                if (!http.isTransportError(e) or downloaderMode() == .builtin) return e;
+                // The network broke the built-in client mid-transfer: remember
+                // that and redo the download with curl.
+                reportBuiltinFailure(http.hostOf(url) orelse "", e);
+                use_curl = true;
+                continue;
+            }
+            return curlError(e);
+        }
     }
+}
+
+/// What a failed curl transfer reports: the policy answers as they are, every
+/// other failure as `DownloadFailed`.
+fn curlError(e: anyerror) anyerror {
+    return switch (e) {
+        error.UnsafeUrl,
+        error.UnsafeHeader,
+        error.DownloadTooLarge,
+        error.WriteFailed,
+        error.OutOfMemory,
+        error.NoDownloaderAvailable,
+        error.HeaderFileMissing,
+        error.NoPrivateDir,
+        error.UnsafeRedirect,
+        error.TooManyRedirects,
+        error.BadRedirect,
+        error.HttpStatus,
+        => e,
+        else => Error.DownloadFailed,
+    };
+}
+
+/// SHA-256 and leading bytes of a file, for the rare path that downloads
+/// without the in-order digest.
+fn hashFile(path: []const u8) !Fetched {
+    const file = try std.fs.cwd().openFile(path, .{});
+    defer file.close();
+    var d: pget.Digester = .{};
+    var buf: [64 * 1024]u8 = undefined;
+    while (true) {
+        const n = try file.read(&buf);
+        if (n == 0) break;
+        d.update(buf[0..n]);
+    }
+    return d.fetched(1);
 }
 
 /// Windows ships curl.exe since Windows 10 1803, but fall back to PowerShell
@@ -592,64 +664,69 @@ pub fn reportBuiltinSuccess() void {
     _ = @atomicRmw(u32, &run_successes, .Add, 1, .acq_rel);
 }
 
-fn retryDelay(attempt: u32) void {
+/// Hosts a GitHub release download talks to: the site, then the CDNs it
+/// redirects to.
+pub const github_hosts = [_][]const u8{
+    "github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+};
+
+/// Open TLS connections to `hosts` in the background and leave them idle in the
+/// shared client's pool, so the first request to each reuses a connection that
+/// is already up instead of paying for the handshake. Returns at once. Hosts
+/// the route says should go through curl are skipped, as is everything when
+/// the downloader is forced to curl. A failure is ignored: the real request
+/// will meet it and handle it.
+pub fn prewarm(hosts: []const []const u8) void {
+    if (downloaderMode() == .curl) return;
+    for (hosts) |h| {
+        if (h.len == 0 or chooseRoute(h) == .curl) continue;
+        const owned = std.heap.page_allocator.dupe(u8, h) catch return;
+        const t = std.Thread.spawn(.{}, prewarmOne, .{owned}) catch {
+            std.heap.page_allocator.free(owned);
+            continue;
+        };
+        t.detach();
+    }
+}
+
+/// `prewarm` for the hosts a GitHub release download uses.
+pub fn prewarmGithub() void {
+    prewarm(&github_hosts);
+}
+
+fn prewarmOne(host: []u8) void {
+    defer std.heap.page_allocator.free(host);
+    const client = http.shared() catch return;
+    client.warm(host);
+}
+
+pub fn retryDelay(attempt: u32) void {
     // curl's --retry waits 1 s, then doubles.
     std.time.sleep(@as(u64, std.time.ns_per_s) << @intCast(@min(attempt, 4)));
 }
 
 /// True when an HTTP error should be tried again, as curl's --retry does.
-fn retryable(err: anyerror, attempt: u32, opts: Options) bool {
+pub fn retryable(err: anyerror, attempt: u32, opts: Options) bool {
     return err == error.HttpStatus and http.isTransientStatus(http.last_http_status) and attempt < opts.retries;
 }
 
-fn limitsFor(opts: Options) http.Limits {
+pub fn limitsFor(opts: Options) http.Limits {
     return .{ .max_time_s = opts.max_time_s, .headers = opts.headers };
 }
 
 /// Outcome of a built-in attempt that failed: return the error, or hand over
 /// to curl by returning normally.
-fn builtinFailed(host: []const u8, err: anyerror) anyerror!void {
+pub fn builtinFailed(host: []const u8, err: anyerror) anyerror!void {
     // A policy answer, or the caller forced the built-in client and wants the
     // raw error: curl would not help.
     if (!http.isTransportError(err) or downloaderMode() == .builtin) return err;
     reportBuiltinFailure(host, err);
 }
 
-/// Try the built-in client. Returns true when `dest_path` is complete, false
+/// Try the built-in client for a response held in memory. Returns the body, null
 /// when the caller should use curl, and an error for a final answer.
-fn downloadBuiltin(allocator: std.mem.Allocator, url: []const u8, dest_path: []const u8, opts: Options) !bool {
-    const host = http.hostOf(url) orelse return false;
-    if (chooseRoute(host) == .curl) return false;
-
-    const client = http.shared() catch |e| {
-        try builtinFailed(host, e);
-        return false;
-    };
-
-    var attempt: u32 = 0;
-    while (true) : (attempt += 1) {
-        if (downloadOnce(client, allocator, url, dest_path, opts)) |_| {
-            reportBuiltinSuccess();
-            return true;
-        } else |e| {
-            std.fs.cwd().deleteFile(dest_path) catch {};
-            if (retryable(e, attempt, opts)) {
-                retryDelay(attempt);
-                continue;
-            }
-            try builtinFailed(host, e);
-            return false;
-        }
-    }
-}
-
-fn downloadOnce(client: *http.Client, allocator: std.mem.Allocator, url: []const u8, dest_path: []const u8, opts: Options) !void {
-    const file = std.fs.cwd().createFile(dest_path, .{}) catch return error.WriteFailed;
-    defer file.close();
-    _ = try client.get(allocator, url, file, limitsFor(opts));
-}
-
-/// Same contract as `downloadBuiltin`, for a response held in memory.
 fn fetchBuiltin(allocator: std.mem.Allocator, url: []const u8, max_bytes: usize, opts: Options) !?[]u8 {
     const host = http.hostOf(url) orelse return null;
     if (chooseRoute(host) == .curl) return null;
@@ -765,6 +842,10 @@ pub const ChunkJob = struct {
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;
+
+test {
+    _ = pget;
+}
 
 test "isSafeUrl accepts https and rejects everything else" {
     try testing.expect(isSafeUrl("https://github.com/a/b/releases/download/v1/x.tar.gz"));
