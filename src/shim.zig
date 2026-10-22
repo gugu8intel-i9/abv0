@@ -1,11 +1,11 @@
-//! Scoop-style shims.
+//! Launcher shims.
 //!
 //! On Windows the loader looks for DLLs in the directory of the *executable*,
 //! and a hard link lives in the link's directory, not the target's. Linking
 //! `rg.exe` straight into abv0's bin dir therefore breaks every package whose
 //! exe needs a DLL or data file sitting next to it in the store.
 //!
-//! The fix is the one Scoop uses: abv0.exe doubles as the shim. Installing a
+//! The fix: abv0.exe doubles as the shim. Installing a
 //! bin `rg` creates
 //!
 //!     <bin>/rg.exe    hard link (or copy) of abv0's own executable
