@@ -2800,6 +2800,7 @@ comptime {
     _ = @import("store.zig");
     _ = @import("cmds_extra.zig");
     _ = @import("stream.zig");
+    _ = @import("http.zig");
     _ = @import("ghrelease.zig");
     _ = @import("shim.zig");
 }

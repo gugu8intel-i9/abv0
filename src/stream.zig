@@ -7,14 +7,20 @@
 //! caller has compared the digest with the manifest. A mismatch leaves the
 //! staging directory to be deleted, so unverified bytes never reach the store.
 //!
-//! The transport is curl writing to a pipe, with the same hardened arguments
-//! as every other download (https only, no curlrc, size cap, timeouts). That
-//! keeps proxies, system CA stores and TLS versions working exactly as they do
-//! for the plain download path, so streaming never costs a failed attempt.
+//! The transport is the built-in HTTPS client (`http.zig`) when the network
+//! allows it: its body reader feeds the same pipeline, and its TLS connections
+//! are shared with every other download in the run. When the built-in client
+//! cannot talk to the server (see `http.isTransportError`) the transfer is
+//! redone with curl writing to a pipe, with the same hardened arguments as
+//! every other download (https only, no curlrc, size cap, timeouts). The
+//! switch happens before the first body byte, so nothing has been hashed or
+//! unpacked yet. `net.chooseRoute` remembers hosts that failed, so later
+//! installs skip the failed attempt.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const archive = @import("archive.zig");
+const http = @import("http.zig");
 const net = @import("net.zig");
 const platform = @import("platform.zig");
 const safepath = @import("safepath.zig");
@@ -100,6 +106,9 @@ pub fn HashingReader(comptime R: type) type {
 }
 
 /// Shared state for one abv0 run. All install workers use the same session.
+///
+/// The HTTPS client itself is process-wide (`http.shared`), so connections are
+/// reused by streaming installs and by the plain downloads alike.
 pub const Session = struct {
     /// Set by the first failed stream. Such a failure is almost always the
     /// environment (no curl, no pipes), so every later package would fail the
@@ -155,6 +164,11 @@ pub fn streamInstall(
     const progress = term.beginDownload(url);
     defer term.endDownload(progress);
 
+    if (try openBuiltin(a, url)) |body| {
+        defer body.close();
+        return unpackStream(a, body.reader(), declared, raw_name, dest, progress);
+    }
+
     // No --output: curl writes the body to its stdout, which is our pipe.
     const argv = try net.buildCurlArgv(arena, url, null, .{}, &.{});
 
@@ -180,6 +194,35 @@ pub fn streamInstall(
         else => return error.DownloadFailed,
     }
     return result;
+}
+
+/// Open `url` with the built-in client. Null means use curl: the route says so,
+/// or the client failed at the transport level, which is remembered for the
+/// next run. A final answer (HTTP 404, a bad redirect) and a forced
+/// `ABV0_DOWNLOADER=builtin` return the error instead.
+fn openBuiltin(a: Allocator, url: []const u8) !?*http.Stream {
+    const host = http.hostOf(url) orelse return null;
+    if (net.chooseRoute(host) == .curl) return null;
+
+    var attempt: u32 = 0;
+    while (true) : (attempt += 1) {
+        const opened = if (http.shared()) |client| client.open(a, url, .{}) else |e| e;
+        if (opened) |body| {
+            net.reportBuiltinSuccess();
+            return body;
+        } else |e| {
+            // Same retry as net.download: a momentary 5xx should not cost the
+            // streaming path.
+            const opts: net.Options = .{};
+            if (e == error.HttpStatus and http.isTransientStatus(http.last_http_status) and attempt < opts.retries) {
+                std.time.sleep(@as(u64, std.time.ns_per_s) << @intCast(@min(attempt, 4)));
+                continue;
+            }
+            if (!http.isTransportError(e) or net.downloaderMode() == .builtin) return e;
+            net.reportBuiltinFailure(host, e);
+            return null;
+        }
+    }
 }
 
 /// Everything after the transfer starts: hash, sniff, decode and unpack `reader`.

@@ -10,16 +10,31 @@
 //!   * No timeouts, so a hung server hung the installer forever.
 //!   * URLs interpolated from user input were never validated; a package name
 //!     could inject extra query parameters into the GitHub API request.
+//!
+//! Who does the downloading:
+//!   * `http.zig` is the built-in HTTPS client (std.http + std.crypto.tls). It
+//!     is tried first: no process to spawn, and TLS connections are reused
+//!     across every download in a run.
+//!   * curl, with the hardened argv below, is the backup. A *transport*
+//!     failure of the built-in client (TLS handshake, connection reset, proxy
+//!     error, timeout) falls back to it automatically. An HTTP 404 or a
+//!     redirect-policy violation does not, since curl would get the same
+//!     answer.
+//!   * A host the built-in client failed on is remembered for 24 hours in
+//!     `<abv0 home>/net-fallback`, so later runs go straight to curl instead
+//!     of paying the failed attempt again.
+//!   * `ABV0_DOWNLOADER=builtin|curl|auto` forces either one (default auto).
 
 const std = @import("std");
 const builtin = @import("builtin");
 const platform = @import("platform.zig");
+const http = @import("http.zig");
 
 pub const Options = struct {
     connect_timeout_s: u32 = 20,
     max_time_s: u32 = 600,
     retries: u32 = 2,
-    user_agent: []const u8 = "abv0",
+    user_agent: []const u8 = http.user_agent,
 };
 
 pub const Error = error{
@@ -131,6 +146,7 @@ pub fn download(
     opts: Options,
 ) !void {
     if (!isSafeUrl(url)) return Error.UnsafeUrl;
+    if (try downloadBuiltin(allocator, url, dest_path, opts)) return;
 
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
@@ -211,6 +227,7 @@ pub fn fetchToString(
     opts: Options,
 ) ![]u8 {
     if (!isSafeUrl(url)) return Error.UnsafeUrl;
+    if (try fetchBuiltin(allocator, url, max_bytes, opts)) |body| return body;
 
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
@@ -226,6 +243,342 @@ pub fn fetchToString(
 
     if (res.term != .Exited or res.term.Exited != 0) return Error.DownloadFailed;
     return allocator.dupe(u8, res.stdout);
+}
+
+// ---------------------------------------------------------------------------
+// Built-in client first, curl as the backup
+// ---------------------------------------------------------------------------
+
+/// Which downloader `ABV0_DOWNLOADER` selects.
+pub const Downloader = enum { auto, builtin, curl };
+
+/// Parse an `ABV0_DOWNLOADER` value. Unset, empty or unrecognised means auto,
+/// so a typo never disables downloading.
+pub fn parseDownloader(value: ?[]const u8) Downloader {
+    const v = value orelse return .auto;
+    if (std.ascii.eqlIgnoreCase(v, "builtin")) return .builtin;
+    if (std.ascii.eqlIgnoreCase(v, "curl")) return .curl;
+    return .auto;
+}
+
+pub fn downloaderMode() Downloader {
+    var buf: [32]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    const v = std.process.getEnvVarOwned(fba.allocator(), "ABV0_DOWNLOADER") catch return .auto;
+    return parseDownloader(v);
+}
+
+pub const Route = enum { builtin, curl };
+
+/// The decision, separated from the state it reads so it can be tested.
+/// A forced mode wins; in auto mode curl is chosen once the built-in client
+/// has failed for this host before, or for the run as a whole.
+pub fn decideRoute(mode: Downloader, run_tripped: bool, host_remembered: bool) Route {
+    return switch (mode) {
+        .curl => .curl,
+        .builtin => .builtin,
+        .auto => if (run_tripped or host_remembered) .curl else .builtin,
+    };
+}
+
+/// How long a transport failure is remembered.
+pub const fallback_ttl_s: i64 = 24 * 60 * 60;
+/// Entry that stands for every host (see `reportBuiltinFailure`).
+const any_host = "*";
+
+/// Hosts the built-in client could not talk to, persisted so that the next run
+/// skips the attempt instead of paying its failure again. A failed TLS
+/// handshake through a broken proxy costs seconds; curl on the same network
+/// works at once.
+///
+/// File format, one host per line, tab separated:
+///     <host> <unix time> <reason>
+/// Lines starting with '#' are ignored, as are malformed and expired lines, so
+/// a damaged or hand-edited file can only cost a retry of the built-in client.
+pub const FallbackMemory = struct {
+    pub const file_name = "net-fallback";
+    pub const max_entries = 32;
+    const max_file_bytes = 16 * 1024;
+
+    pub const Entry = struct {
+        host: []u8,
+        reason: []u8,
+        time: i64,
+    };
+
+    allocator: std.mem.Allocator,
+    entries: std.ArrayListUnmanaged(Entry) = .{},
+
+    pub fn init(allocator: std.mem.Allocator) FallbackMemory {
+        return .{ .allocator = allocator };
+    }
+
+    pub fn deinit(self: *FallbackMemory) void {
+        for (self.entries.items) |e| self.freeEntry(e);
+        self.entries.deinit(self.allocator);
+    }
+
+    fn freeEntry(self: *FallbackMemory, e: Entry) void {
+        self.allocator.free(e.host);
+        self.allocator.free(e.reason);
+    }
+
+    /// An entry still in force at `now`. One dated in the far future is a
+    /// clock that was wrong when it was written, so it expires too.
+    fn live(time: i64, now: i64) bool {
+        return time <= now + fallback_ttl_s and now - time < fallback_ttl_s;
+    }
+
+    pub fn shouldSkip(self: *const FallbackMemory, host: []const u8, now: i64) bool {
+        for (self.entries.items) |e| {
+            if (!live(e.time, now)) continue;
+            if (std.mem.eql(u8, e.host, any_host) or std.ascii.eqlIgnoreCase(e.host, host)) return true;
+        }
+        return false;
+    }
+
+    /// Merge `text` (file contents) into the memory. The newer entry wins per host.
+    pub fn parse(self: *FallbackMemory, text: []const u8, now: i64) !void {
+        var lines = std.mem.splitScalar(u8, text, '\n');
+        while (lines.next()) |raw| {
+            const line = std.mem.trim(u8, raw, "\r ");
+            if (line.len == 0 or line[0] == '#') continue;
+            var f = std.mem.splitScalar(u8, line, '\t');
+            const host = f.next() orelse continue;
+            const time = std.fmt.parseInt(i64, f.next() orelse continue, 10) catch continue;
+            const reason = f.next() orelse "unknown";
+            if (!validField(host) or !validField(reason)) continue;
+            if (!live(time, now)) continue;
+            try self.put(host, reason, time);
+        }
+    }
+
+    /// No whitespace or control bytes, so a field can never break the format.
+    fn validField(s: []const u8) bool {
+        if (s.len == 0 or s.len > 253) return false;
+        for (s) |c| if (c <= 0x20 or c == 0x7f) return false;
+        return true;
+    }
+
+    fn put(self: *FallbackMemory, host: []const u8, reason: []const u8, time: i64) !void {
+        for (self.entries.items) |*e| {
+            if (!std.ascii.eqlIgnoreCase(e.host, host)) continue;
+            if (time < e.time) return; // keep the newer one
+            const new_reason = try self.allocator.dupe(u8, reason);
+            self.allocator.free(e.reason);
+            e.reason = new_reason;
+            e.time = time;
+            return;
+        }
+        // Full: drop the oldest to make room.
+        if (self.entries.items.len >= max_entries) {
+            var oldest: usize = 0;
+            for (self.entries.items, 0..) |e, i| {
+                if (e.time < self.entries.items[oldest].time) oldest = i;
+            }
+            self.freeEntry(self.entries.swapRemove(oldest));
+        }
+        const h = try self.allocator.dupe(u8, host);
+        errdefer self.allocator.free(h);
+        const r = try self.allocator.dupe(u8, reason);
+        errdefer self.allocator.free(r);
+        try self.entries.append(self.allocator, .{ .host = h, .reason = r, .time = time });
+    }
+
+    /// Serialise the live entries.
+    pub fn format(self: *const FallbackMemory, w: anytype, now: i64) !void {
+        try w.writeAll("# abv0: hosts where the built-in HTTPS client failed; curl is used for them until the entry expires.\n");
+        try w.writeAll("# host<TAB>unix time<TAB>reason. Delete this file to try the built-in client again.\n");
+        for (self.entries.items) |e| {
+            if (!live(e.time, now)) continue;
+            try w.print("{s}\t{d}\t{s}\n", .{ e.host, e.time, e.reason });
+        }
+    }
+
+    /// Read the file in `dir` into the memory. Best effort: a missing or
+    /// unreadable file just means nothing is remembered.
+    pub fn load(self: *FallbackMemory, dir: std.fs.Dir, now: i64) void {
+        const text = dir.readFileAlloc(self.allocator, file_name, max_file_bytes) catch return;
+        defer self.allocator.free(text);
+        self.parse(text, now) catch {};
+    }
+
+    /// Remember `host` and write the file. The file is replaced atomically
+    /// (written to a temporary name, then renamed), so a run that starts while
+    /// another is writing sees the old file or the new one, never half of it.
+    /// What other runs wrote since this one loaded is merged first. The entry
+    /// stays in memory even when the write fails.
+    pub fn record(self: *FallbackMemory, dir: ?std.fs.Dir, host: []const u8, reason: []const u8, now: i64) void {
+        if (!validField(host)) return;
+        if (dir) |d| self.load(d, now);
+        self.put(host, if (validField(reason)) reason else "error", now) catch return;
+        const d = dir orelse return;
+
+        var af = d.atomicFile(file_name, .{ .mode = platform.mode_private }) catch return;
+        defer af.deinit();
+        self.format(af.file.writer(), now) catch return;
+        af.finish() catch {};
+    }
+};
+
+var route_mutex: std.Thread.Mutex = .{};
+var route_memory: ?FallbackMemory = null;
+var route_dir: ?std.fs.Dir = null;
+/// Built-in attempts this run that failed at the transport level, and that
+/// worked. Atomics: read outside the mutex on the hot path.
+var run_failures: u32 = 0;
+var run_successes: u32 = 0;
+
+/// Failures with no success in between that make the whole run use curl. The
+/// cause in that case is the network path (a proxy, interception), not one
+/// host, and every further host would pay the same failed attempt.
+const breaker_threshold = 2;
+
+fn runTripped() bool {
+    return @atomicLoad(u32, &run_failures, .acquire) >= breaker_threshold and
+        @atomicLoad(u32, &run_successes, .acquire) == 0;
+}
+
+/// `<abv0 home>`, found the way `Store.init` finds it: `ABV0_HOME`, else
+/// `~/.abv0`. Duplicated here because the download functions take no store.
+fn openStateDir() ?std.fs.Dir {
+    const a = std.heap.page_allocator;
+    const root = platform.homeOverride(a) orelse blk: {
+        const home = platform.homeDir(a) catch return null;
+        defer a.free(home);
+        break :blk std.fs.path.join(a, &.{ home, ".abv0" }) catch return null;
+    };
+    defer a.free(root);
+    return std.fs.cwd().openDir(root, .{}) catch null;
+}
+
+/// Caller holds `route_mutex`.
+fn memoryLocked() *FallbackMemory {
+    if (route_memory == null) {
+        route_memory = FallbackMemory.init(std.heap.page_allocator);
+        route_dir = openStateDir();
+        if (route_dir) |d| route_memory.?.load(d, std.time.timestamp());
+    }
+    return &route_memory.?;
+}
+
+/// Which downloader to use for a request to `host`.
+pub fn chooseRoute(host: []const u8) Route {
+    const mode = downloaderMode();
+    if (mode != .auto) return decideRoute(mode, false, false);
+    if (runTripped()) return .curl;
+
+    route_mutex.lock();
+    defer route_mutex.unlock();
+    return decideRoute(mode, false, memoryLocked().shouldSkip(host, std.time.timestamp()));
+}
+
+/// The built-in client failed at the transport level for `host` and the
+/// request is about to be retried with curl. Remembers the host on disk.
+pub fn reportBuiltinFailure(host: []const u8, err: anyerror) void {
+    if (downloaderMode() != .auto) return;
+    _ = @atomicRmw(u32, &run_failures, .Add, 1, .acq_rel);
+
+    route_mutex.lock();
+    defer route_mutex.unlock();
+    const mem = memoryLocked();
+    const now = std.time.timestamp();
+    mem.record(route_dir, host, @errorName(err), now);
+    // Enough failures without a success: remember the whole network path.
+    if (runTripped()) mem.record(route_dir, any_host, @errorName(err), now);
+}
+
+/// The built-in client completed a request. Without this the breaker could
+/// trip on two failures that were host-specific.
+pub fn reportBuiltinSuccess() void {
+    _ = @atomicRmw(u32, &run_successes, .Add, 1, .acq_rel);
+}
+
+fn retryDelay(attempt: u32) void {
+    // curl's --retry waits 1 s, then doubles.
+    std.time.sleep(@as(u64, std.time.ns_per_s) << @intCast(@min(attempt, 4)));
+}
+
+/// True when an HTTP error should be tried again, as curl's --retry does.
+fn retryable(err: anyerror, attempt: u32, opts: Options) bool {
+    return err == error.HttpStatus and http.isTransientStatus(http.last_http_status) and attempt < opts.retries;
+}
+
+fn limitsFor(opts: Options) http.Limits {
+    return .{ .max_time_s = opts.max_time_s };
+}
+
+/// Outcome of a built-in attempt that failed: return the error, or hand over
+/// to curl by returning normally.
+fn builtinFailed(host: []const u8, err: anyerror) anyerror!void {
+    // A policy answer, or the caller forced the built-in client and wants the
+    // raw error: curl would not help.
+    if (!http.isTransportError(err) or downloaderMode() == .builtin) return err;
+    reportBuiltinFailure(host, err);
+}
+
+/// Try the built-in client. Returns true when `dest_path` is complete, false
+/// when the caller should use curl, and an error for a final answer.
+fn downloadBuiltin(allocator: std.mem.Allocator, url: []const u8, dest_path: []const u8, opts: Options) !bool {
+    const host = http.hostOf(url) orelse return false;
+    if (chooseRoute(host) == .curl) return false;
+
+    const client = http.shared() catch |e| {
+        try builtinFailed(host, e);
+        return false;
+    };
+
+    var attempt: u32 = 0;
+    while (true) : (attempt += 1) {
+        if (downloadOnce(client, allocator, url, dest_path, opts)) |_| {
+            reportBuiltinSuccess();
+            return true;
+        } else |e| {
+            std.fs.cwd().deleteFile(dest_path) catch {};
+            if (retryable(e, attempt, opts)) {
+                retryDelay(attempt);
+                continue;
+            }
+            try builtinFailed(host, e);
+            return false;
+        }
+    }
+}
+
+fn downloadOnce(client: *http.Client, allocator: std.mem.Allocator, url: []const u8, dest_path: []const u8, opts: Options) !void {
+    const file = std.fs.cwd().createFile(dest_path, .{}) catch return error.WriteFailed;
+    defer file.close();
+    _ = try client.get(allocator, url, file, limitsFor(opts));
+}
+
+/// Same contract as `downloadBuiltin`, for a response held in memory.
+fn fetchBuiltin(allocator: std.mem.Allocator, url: []const u8, max_bytes: usize, opts: Options) !?[]u8 {
+    const host = http.hostOf(url) orelse return null;
+    if (chooseRoute(host) == .curl) return null;
+
+    const client = http.shared() catch |e| {
+        try builtinFailed(host, e);
+        return null;
+    };
+
+    var attempt: u32 = 0;
+    while (true) : (attempt += 1) {
+        var body = std.ArrayList(u8).init(allocator);
+        var lim = limitsFor(opts);
+        lim.max_bytes = max_bytes;
+        if (client.get(allocator, url, body.writer(), lim)) |_| {
+            reportBuiltinSuccess();
+            return try body.toOwnedSlice();
+        } else |e| {
+            body.deinit();
+            if (retryable(e, attempt, opts)) {
+                retryDelay(attempt);
+                continue;
+            }
+            try builtinFailed(host, e);
+            return null;
+        }
+    }
 }
 
 /// Remote size via a HEAD request, plus whether ranges are supported.
@@ -405,4 +758,131 @@ test "buildCurlArgv starts with -q and enforces https, tls 1.2 and a size cap" {
 test "download refuses an unsafe url before spawning anything" {
     try testing.expectError(Error.UnsafeUrl, download(testing.allocator, "file:///etc/passwd", "/tmp/x", .{}));
     try testing.expectError(Error.UnsafeUrl, download(testing.allocator, "http://x.test/y", "/tmp/x", .{}));
+}
+
+test "ABV0_DOWNLOADER parses builtin, curl and auto; anything else is auto" {
+    try testing.expectEqual(Downloader.auto, parseDownloader(null));
+    try testing.expectEqual(Downloader.auto, parseDownloader(""));
+    try testing.expectEqual(Downloader.auto, parseDownloader("auto"));
+    try testing.expectEqual(Downloader.auto, parseDownloader("wget"));
+    try testing.expectEqual(Downloader.builtin, parseDownloader("builtin"));
+    try testing.expectEqual(Downloader.builtin, parseDownloader("BUILTIN"));
+    try testing.expectEqual(Downloader.curl, parseDownloader("curl"));
+}
+
+test "decideRoute: forced modes win, auto skips what failed before" {
+    try testing.expectEqual(Route.builtin, decideRoute(.auto, false, false));
+    try testing.expectEqual(Route.curl, decideRoute(.auto, false, true));
+    try testing.expectEqual(Route.curl, decideRoute(.auto, true, false));
+    // A forced mode ignores the memory.
+    try testing.expectEqual(Route.builtin, decideRoute(.builtin, true, true));
+    try testing.expectEqual(Route.curl, decideRoute(.curl, false, false));
+}
+
+test "FallbackMemory round trips through the file and expires after 24 hours" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const t0: i64 = 1_800_000_000;
+
+    var first = FallbackMemory.init(testing.allocator);
+    defer first.deinit();
+    first.record(tmp.dir, "github.com", "ConnectionResetByPeer", t0);
+    first.record(tmp.dir, "Objects.GitHubUserContent.com", "TlsAlert", t0 + 60);
+
+    // A later run reads the file back.
+    var second = FallbackMemory.init(testing.allocator);
+    defer second.deinit();
+    second.load(tmp.dir, t0 + 120);
+    try testing.expect(second.shouldSkip("github.com", t0 + 120));
+    try testing.expect(second.shouldSkip("GITHUB.COM", t0 + 120)); // host names are case-insensitive
+    try testing.expect(second.shouldSkip("objects.githubusercontent.com", t0 + 120));
+    try testing.expect(!second.shouldSkip("example.com", t0 + 120));
+
+    // Still in force just before the 24 hours are up, gone at the mark.
+    try testing.expect(second.shouldSkip("github.com", t0 + fallback_ttl_s - 1));
+    try testing.expect(!second.shouldSkip("github.com", t0 + fallback_ttl_s));
+    // Expired lines are dropped when loading, not resurrected.
+    var third = FallbackMemory.init(testing.allocator);
+    defer third.deinit();
+    third.load(tmp.dir, t0 + fallback_ttl_s + 30);
+    try testing.expect(!third.shouldSkip("github.com", t0 + fallback_ttl_s + 30));
+    try testing.expect(third.shouldSkip("objects.githubusercontent.com", t0 + fallback_ttl_s + 30));
+}
+
+test "FallbackMemory file keeps host, reason and time, and replaces atomically" {
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const t0: i64 = 1_800_000_000;
+
+    var m = FallbackMemory.init(testing.allocator);
+    defer m.deinit();
+    m.record(tmp.dir, "github.com", "TlsAlert", t0);
+    m.record(tmp.dir, "github.com", "ConnectionResetByPeer", t0 + 10); // same host: replaced, not duplicated
+
+    const text = try tmp.dir.readFileAlloc(testing.allocator, FallbackMemory.file_name, 4096);
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "github.com\t1800000010\tConnectionResetByPeer\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "TlsAlert") == null);
+
+    // No temporary file is left behind by the atomic write.
+    var it = tmp.dir.iterate();
+    var n: usize = 0;
+    while (try it.next()) |_| n += 1;
+    try testing.expectEqual(@as(usize, 1), n);
+}
+
+test "FallbackMemory ignores garbage, comments and future-dated lines" {
+    const now: i64 = 1_800_000_000;
+    const text =
+        "# a comment\n" ++
+        "\n" ++
+        "no-time-field\n" ++
+        "bad.test\tnot-a-number\tx\n" ++
+        "future.test\t1900000000\tx\n" ++ // clock was wrong when written
+        "has space.test\t1800000000\tx\n" ++
+        "ok.test\t1799999000\tTlsFailure\r\n";
+    var m = FallbackMemory.init(testing.allocator);
+    defer m.deinit();
+    try m.parse(text, now);
+    try testing.expectEqual(@as(usize, 1), m.entries.items.len);
+    try testing.expect(m.shouldSkip("ok.test", now));
+    try testing.expect(!m.shouldSkip("future.test", now));
+}
+
+test "FallbackMemory wildcard entry covers every host and the table is bounded" {
+    const now: i64 = 1_800_000_000;
+    var m = FallbackMemory.init(testing.allocator);
+    defer m.deinit();
+    m.record(null, "*", "ConnectionResetByPeer", now);
+    try testing.expect(m.shouldSkip("anything.example", now));
+
+    var other = FallbackMemory.init(testing.allocator);
+    defer other.deinit();
+    var i: usize = 0;
+    while (i < FallbackMemory.max_entries + 10) : (i += 1) {
+        var buf: [32]u8 = undefined;
+        other.record(null, std.fmt.bufPrint(&buf, "h{d}.test", .{i}) catch unreachable, "x", now + @as(i64, @intCast(i)));
+    }
+    try testing.expectEqual(@as(usize, FallbackMemory.max_entries), other.entries.items.len);
+    // The oldest were dropped, the newest kept.
+    try testing.expect(!other.shouldSkip("h0.test", now + 100));
+    try testing.expect(other.shouldSkip("h41.test", now + 100));
+}
+
+test "FallbackMemory refuses a host that would break the file format" {
+    var m = FallbackMemory.init(testing.allocator);
+    defer m.deinit();
+    m.record(null, "a\tb", "x", 1_800_000_000);
+    m.record(null, "a\nb", "x", 1_800_000_000);
+    m.record(null, "", "x", 1_800_000_000);
+    try testing.expectEqual(@as(usize, 0), m.entries.items.len);
+}
+
+test "HTTP answers stay errors; transport failures are what falls back to curl" {
+    // The contract downloadBuiltin relies on, pinned next to its users.
+    try testing.expect(http.isTransportError(error.ConnectionResetByPeer));
+    try testing.expect(http.isTransportError(error.TlsAlert));
+    try testing.expect(!http.isTransportError(error.HttpStatus));
+    try testing.expect(!http.isTransportError(error.UnsafeRedirect));
+    try testing.expect(!http.isTransportError(error.TooManyRedirects));
 }
