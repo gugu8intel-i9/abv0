@@ -21,17 +21,38 @@ abv0 shell ripgrep                       # ephemeral subshell with just that pac
 
 ## Install
 
-**Linux / macOS**
+**1. Run the installer.**
+
+Linux / macOS (Terminal):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/install.sh | sh
 ```
 
-**Windows** (PowerShell)
+Windows (PowerShell):
 
 ```powershell
 irm https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/install.ps1 | iex
 ```
+
+**2. Open a new terminal window**, so the updated `PATH` takes effect. The installer
+adds `~/.abv0/bin` to your shell profile; if it could not, it prints the line to add.
+
+**3. Check it works:**
+
+```bash
+abv0 --version
+abv0 doctor          # reports anything missing, such as PATH
+```
+
+**4. Install something:**
+
+```bash
+abv0 install ripgrep jq
+```
+
+To update later: `abv0 update && abv0 upgrade --all` for your programs, and
+`abv0 self-update` for abv0 itself.
 
 The installer downloads over HTTPS only, refuses protocol downgrades on redirect,
 verifies the published SHA-256 from `release/SHA256SUMS`, checks the payload is
@@ -53,8 +74,6 @@ cd abv0
 zig build -Doptimize=ReleaseFast
 ./zig-out/bin/abv0 --help
 ```
-
-Add `~/.abv0/bin` to your `PATH` (`abv0 doctor` will tell you if it is missing).
 
 ---
 
