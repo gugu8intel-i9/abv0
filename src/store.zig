@@ -854,16 +854,25 @@ pub const Store = struct {
             var walker = try dir.walk(a);
             defer walker.deinit();
 
+            // The same name can appear more than once (cmake ships bin/cpack
+            // and share/bash-completion/completions/cpack), so each wanted bin
+            // keeps its best match rather than the first one the walk meets.
+            const main_dir = std.fs.path.dirnamePosix(info.bin_path) orelse "";
+            var ranks = std.StringHashMap(u32).init(a);
+            defer ranks.deinit();
+
             while (try walker.next()) |entry| {
                 if (entry.kind != .file) continue;
 
                 const base = entry.basename;
                 const stem = stripExeSuffix(base);
 
-                if (wanted.getPtr(base) orelse wanted.getPtr(stem)) |slot| {
-                    if (slot.* == null) {
-                        slot.* = try std.fs.path.join(a, &.{ pkg_dir, entry.path });
-                    }
+                if (wanted.getEntry(base) orelse wanted.getEntry(stem)) |slot| {
+                    if (slot.value_ptr.* != null and ranks.get(slot.key_ptr.*) == null) continue; // bin_path hit
+                    const r = binMatchRank(entry.path, main_dir);
+                    if (ranks.get(slot.key_ptr.*)) |best| if (best <= r) continue;
+                    try ranks.put(slot.key_ptr.*, r);
+                    slot.value_ptr.* = try std.fs.path.join(a, &.{ pkg_dir, entry.path });
                     continue;
                 }
                 if (alias_path == null and alias_target.len > 0 and
@@ -896,6 +905,32 @@ pub const Store = struct {
     }
 
     const LinkPlan = struct { bin: []const u8, src: []const u8, dst: []const u8 };
+
+    /// Lower is better: a file beside the package's main program, then one in
+    /// a bin/ directory, then anything else; shallower paths first in each.
+    fn binMatchRank(rel: []const u8, main_dir: []const u8) u32 {
+        const dir = std.fs.path.dirname(rel) orelse "";
+        var depth: u32 = 0;
+        for (rel) |c| {
+            if (c == '/' or c == std.fs.path.sep) depth += 1;
+        }
+        depth = @min(depth, 999);
+        if (main_dir.len > 0 and samePath(dir, main_dir)) return depth;
+        const leaf = std.fs.path.basename(dir);
+        if (std.mem.eql(u8, leaf, "bin")) return 1000 + depth;
+        return 2000 + depth;
+    }
+
+    /// Equal relative paths, treating `/` and the native separator alike.
+    fn samePath(x: []const u8, y: []const u8) bool {
+        if (x.len != y.len) return false;
+        for (x, y) |cx, cy| {
+            const nx = if (cx == std.fs.path.sep) '/' else cx;
+            const ny = if (cy == std.fs.path.sep) '/' else cy;
+            if (nx != ny) return false;
+        }
+        return true;
+    }
 
     /// Link every planned executable into the bin directory, recording each in
     /// the ownership file. Refuses the whole set if any destination belongs to
@@ -3699,4 +3734,15 @@ test "reinstalling and upgrading share unchanged files through the CAS" {
     try testing.expectEqual(@as(u64, 1), s.pruneCas(a, true).files);
     _ = try s.gc(a);
     try testing.expectEqual(@as(u64, 0), s.casStats(a).files);
+}
+
+test "binMatchRank prefers the main program's directory, then bin/" {
+    const r = Store.binMatchRank;
+    const sep = std.fs.path.sep_str;
+    const main_dir = "cmake-4/bin";
+    const beside = r("cmake-4" ++ sep ++ "bin" ++ sep ++ "cpack", main_dir);
+    const completion = r("cmake-4" ++ sep ++ "share" ++ sep ++ "bash-completion" ++ sep ++ "completions" ++ sep ++ "cpack", main_dir);
+    try testing.expect(beside < completion);
+    try testing.expect(r("x" ++ sep ++ "bin" ++ sep ++ "tool", "") < r("tool-data" ++ sep ++ "tool", ""));
+    try testing.expect(r("tool", "") < r("a" ++ sep ++ "b" ++ sep ++ "tool", ""));
 }
