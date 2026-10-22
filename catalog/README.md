@@ -19,7 +19,8 @@ For each line in `sources.txt`, `tools/build-catalog.zig`:
 3. pins each asset's SHA-256 from GitHub's `digest` field, else from a checksums file in
    the same release (`src/ghverify.zig`), else by downloading the asset and hashing it;
 4. downloads one asset per changed package, unpacks it with abv0's own extractor, and
-   finds the executables inside (`src/bindetect.zig`);
+   finds the executables inside (`src/bindetect.zig`); a `kind=app` source skips this and
+   only reads the `.app` name from a zip;
 5. reads the description, license and homepage from the repository record.
 
 The builder is:
@@ -55,6 +56,8 @@ name  owner/repo  [key=value ...]
 | `desc="..."` | Replaces the repository description. |
 | `license=SPDX` | Replaces the repository license. |
 | `tag=<release tag>` | Pin a release instead of following the latest. |
+| `kind=app` | A macOS application (what Homebrew calls a cask). See [GUI apps](#gui-apps). `kind=cli` is the default. |
+| `app=Name.app` | The application bundle's name; implies `kind=app`. Required when the Mac asset is a `.dmg`. Quote names with spaces: `app="Brave Browser.app"`. |
 
 The platforms for `asset.` and `skip=` are `x86_64-linux`, `aarch64-linux`,
 `x86_64-macos`, `aarch64-macos`, `x86_64-windows` and `aarch64-windows`.
@@ -70,6 +73,36 @@ out of that package. Two existing lines as examples:
 ripgrep  BurntSushi/ripgrep  bin=rg
 fd       sharkdp/fd
 ```
+
+Names are unique across the file and sorted within each `# ----` section; a test
+(`zig build test`) checks both and that every line parses.
+
+### GUI apps
+
+A `kind=app` line is a macOS application bundle, the equivalent of a Homebrew cask:
+
+```
+rectangle  rxhanson/Rectangle  app=Rectangle.app
+alt-tab    lwouis/alt-tab-macos  kind=app
+```
+
+- Only the two Mac platforms are published, and only a `.dmg` or `.zip`. Assets for
+  Linux, Windows and iOS, source archives, debug symbols and checksum files are never
+  chosen. The asset for each Mac is picked by architecture (`arm64`, `x64`,
+  `universal`, or no marker at all).
+- `archive_type` is `dmg` or `zip`, `bin` is empty, `bin_path` is empty and
+  `app_bundles` holds the bundle name. No executables are detected.
+- A `.dmg` cannot be opened off macOS, so its line must say `app=Name.app`. When the
+  line gives `app=`, a `.dmg` is preferred over a `.zip` (abv0 unpacks it with the
+  system, which keeps permissions and symlinks).
+- Without `app=`, a `.zip` is chosen. The builder downloads it once and reads the
+  names of the `*.app` directories at its top level. A zip whose app sits one level
+  down (`Name-1.0/Name.app`) is refused, because abv0 links `<package>/Name.app`.
+- `asset.<platform>=TEXT` still overrides the picker.
+
+A project's Linux and Windows builds are separate CLI-style lines named
+`<app>-portable` (an AppImage is a raw executable), so that `abv0 install <app>`
+keeps meaning the macOS bundle.
 
 ## Running the builder locally
 
@@ -106,7 +139,8 @@ The builder's options, from its usage text:
 | `--manual FILE` | Hand-written entries copied through (default: `manual.json` beside the sources file, if it exists) |
 | `--only a,b` | Refresh only these packages; the rest come from `--previous` |
 | `--force` | Ignore `--previous` and rebuild every selected package |
-| `--jobs N` | Packages processed in parallel (default 4) |
+| `--jobs N` | Packages processed in parallel (default 8). The run is network bound, so this is what makes a full build fast; the final line reports the wall-clock time |
+| `--summary FILE` | Also write a Markdown report (counts, then every failed source with its reason) for `$GITHUB_STEP_SUMMARY` |
 | `--curl` | Use curl instead of `std.http` for all network access |
 | `--offline-fixtures DIR` | Read `<owner>__<repo>.release.json` / `.repo.json` and `<owner>__<repo>/<asset>` from DIR instead of the network |
 | `--max-download-mb N` | Skip assets larger than this when they must be fetched |
@@ -125,6 +159,30 @@ the public half, compiled into every abv0 binary.
 ./zig-out/bin/sign-manifest sign <secret-key-file> packages/index.json   # writes packages/index.json.sig
 ./zig-out/bin/sign-manifest verify keys/manifest.pub packages/index.json
 ```
+
+## The full unsigned build
+
+`.github/workflows/catalog-build.yml` builds the whole catalog and publishes it
+without a signature, for review. It runs on manual dispatch (optional input `force`)
+and on a push to a `claude/**` branch that changes `catalog/**`,
+`tools/build-catalog.zig` or the workflow itself. It needs no secrets:
+
+1. Build `abv0` and `build-catalog`.
+2. Choose the previous catalog: `packages/index.json` on the `catalog-unsigned`
+   branch if there is one (so unchanged versions are reused with no download), else
+   the committed `packages/index.json`.
+3. Run `build-catalog --previous <that> --allow-failures --jobs 8 --summary ...` with
+   `GITHUB_TOKEN`.
+4. Validate: `abv0 --registry <out> --allow-unsigned-manifest list` must load and
+   count every package, and `--dry-run install` of 10 random packages that have a
+   Linux x86_64 build must name each of them.
+5. Write counts, every failed source with its reason, and the run time to the job
+   summary.
+6. Force-push one orphan commit holding only `packages/index.json` (no `.sig`) to the
+   `catalog-unsigned` branch, as `github-actions[bot]`. No other branch is touched,
+   and nothing is pushed when the file is byte-identical to the branch's.
+
+Review that file, then sign it with `sign-manifest` and commit it with its `.sig`.
 
 ## The daily workflow
 

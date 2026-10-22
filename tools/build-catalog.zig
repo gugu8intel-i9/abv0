@@ -5,7 +5,7 @@
 //!                 [--previous packages/index.json] [--manual catalog/manual.json]
 //!                 [--only name,...] [--force] [--jobs N] [--curl]
 //!                 [--offline-fixtures dir] [--allow-shrink] [--allow-failures]
-//!                 [--max-download-mb N]
+//!                 [--max-download-mb N] [--summary report.md]
 //!
 //! For every source line the tool
 //!   1. asks the GitHub API for the latest (or the pinned) release,
@@ -16,6 +16,11 @@
 //!   4. downloads ONE asset per changed package, unpacks it with abv0's own
 //!      extractor and finds the executables inside, and
 //!   5. reads description, license and homepage from the repository record.
+//!
+//! A `kind=app` source is a macOS application (a "cask"): only the two Mac
+//! platforms are published, as a .dmg or .zip, with `app_bundles` set and no
+//! executables detected. A .dmg needs `app=Name.app` on its line; for a .zip the
+//! tool downloads it once and lists the `*.app` directories at its top level.
 //!
 //! It is incremental: a package whose version equals the one in `--previous`
 //! is copied over untouched, with no download. A source that fails keeps its
@@ -44,6 +49,9 @@ const max_bins = 8;
 const max_description_len = 240;
 const max_checksum_bytes = 4 * 1024 * 1024;
 const default_max_download_bytes: u64 = 400 * 1024 * 1024;
+/// Sources processed at once. The work is network bound, so this is well above
+/// the core count; the GitHub API allows far more requests than a run makes.
+const default_jobs: usize = 8;
 
 // ---------------------------------------------------------------------------
 // Platforms
@@ -87,6 +95,10 @@ const detect_order = [_]usize{ 3, 0, 5, 2, 4, 1 };
 // sources.txt
 // ---------------------------------------------------------------------------
 
+/// What a source publishes: command-line tools found by unpacking (`cli`), or
+/// a macOS application bundle to link under the apps directory (`app`).
+pub const SourceKind = enum { cli, app };
+
 pub const Source = struct {
     name: []const u8,
     owner: []const u8,
@@ -99,6 +111,10 @@ pub const Source = struct {
     desc: ?[]const u8 = null,
     license: ?[]const u8 = null,
     tag: ?[]const u8 = null,
+    kind: SourceKind = .cli,
+    /// `app=Name.app`: the bundle's name. Required when the macOS asset is a
+    /// .dmg (its contents cannot be listed off macOS); detected for a .zip.
+    apps: []const []const u8 = &.{},
     line: usize = 0,
 };
 
@@ -151,6 +167,15 @@ fn tokenize(arena: Allocator, line: []const u8) TokenError![]const []const u8 {
     return toks.toOwnedSlice();
 }
 
+/// A bundle name abv0 can link: one plain `Name.app` path component.
+pub fn isUsableAppName(name: []const u8) bool {
+    if (name.len <= ".app".len or !std.mem.endsWith(u8, name, ".app")) return false;
+    for (name) |c| {
+        if (c < 0x20 or c == 0x7f or c == '/' or c == '\\' or c == ':') return false;
+    }
+    return safepath.isSafeRelPath(name);
+}
+
 const LineResult = union(enum) { source: Source, bad: []const u8 };
 
 fn bad(arena: Allocator, comptime fmt: []const u8, args: anytype) !LineResult {
@@ -170,6 +195,7 @@ fn parseLine(arena: Allocator, toks: []const []const u8, line_no: usize) !LineRe
         return bad(arena, "'{s}' is not a valid owner/repo", .{toks[1]});
 
     var src = Source{ .name = name, .owner = spec.owner, .repo = spec.repo, .line = line_no };
+    var kind_key: ?SourceKind = null;
 
     for (toks[2..]) |t| {
         const eq = std.mem.indexOfScalar(u8, t, '=') orelse
@@ -200,6 +226,20 @@ fn parseLine(arena: Allocator, toks: []const []const u8, line_no: usize) !LineRe
             const probe = try std.fmt.allocPrint(arena, "{s}/{s}@{s}", .{ spec.owner, spec.repo, val });
             if (ghrelease.parseSpec(probe) == null) return bad(arena, "'{s}' is not a valid release tag", .{val});
             src.tag = val;
+        } else if (std.mem.eql(u8, key, "kind")) {
+            if (std.mem.eql(u8, val, "app")) {
+                kind_key = .app;
+            } else if (std.mem.eql(u8, val, "cli")) {
+                kind_key = .cli;
+            } else return bad(arena, "unknown kind '{s}' (want app or cli)", .{val});
+        } else if (std.mem.eql(u8, key, "app")) {
+            var list = std.ArrayList([]const u8).init(arena);
+            var it = std.mem.splitScalar(u8, val, ',');
+            while (it.next()) |n| {
+                if (!isUsableAppName(n)) return bad(arena, "app '{s}' is not a usable bundle name (want Name.app)", .{n});
+                try list.append(n);
+            }
+            src.apps = try list.toOwnedSlice();
         } else if (std.mem.startsWith(u8, key, "asset.")) {
             const pi = platformIndex(key["asset.".len..]) orelse
                 return bad(arena, "unknown platform in '{s}'", .{key});
@@ -208,6 +248,10 @@ fn parseLine(arena: Allocator, toks: []const []const u8, line_no: usize) !LineRe
             return bad(arena, "unknown key '{s}'", .{key});
         }
     }
+    // `app=` alone means an app source; `kind=` says it outright.
+    src.kind = kind_key orelse if (src.apps.len != 0) SourceKind.app else SourceKind.cli;
+    if (src.kind == .cli and src.apps.len != 0) return bad(arena, "app= needs kind=app", .{});
+    if (src.kind == .app and src.bin.len != 0) return bad(arena, "bin= does not apply to kind=app", .{});
     return .{ .source = src };
 }
 
@@ -361,7 +405,10 @@ pub fn validateEntry(e: Entry) ?[]const u8 {
         .deps = e.deps,
     };
     if (!registry.isUsablePackage(pkg)) return "name, version, bin or dependency rejected by registry rules";
-    if (e.bin.len == 0) return "no executables";
+    if (e.bin.len == 0 and e.app_bundles.len == 0) return "no executables";
+    for (e.app_bundles) |a| {
+        if (!isUsableAppName(a)) return "app bundle name is not a plain Name.app";
+    }
     if (e.plats.len == 0) return "no platforms";
     if (e.homepage.len != 0 and !net.isSafeUrl(e.homepage)) return "homepage is not an https URL";
     for (e.plats) |p| {
@@ -1170,7 +1217,7 @@ pub const Options = struct {
     only: []const []const u8 = &.{},
     fixtures_dir: ?[]const u8 = null,
     use_curl: bool = false,
-    jobs: usize = 4,
+    jobs: usize = default_jobs,
     force: bool = false,
     allow_shrink: bool = false,
     allow_failures: bool = false,
@@ -1179,6 +1226,8 @@ pub const Options = struct {
     now_epoch: ?i64 = null,
     token: ?[]const u8 = null,
     quiet: bool = false,
+    /// Markdown report (counts and failures with reasons) for a CI summary page.
+    summary_path: ?[]const u8 = null,
 };
 
 const Status = enum { new, updated, kept, stale, skipped, carried, not_selected };
@@ -1288,6 +1337,26 @@ fn buildEntry(ctx: *Ctx, a: Allocator, src: Source, prev: ?Entry, index: usize) 
     var notes = std.ArrayList(u8).init(a);
     for (platform_tags, 0..) |tag, i| {
         if (src.skip[i]) continue;
+        if (src.kind == .app) {
+            // An app source publishes macOS bundles only.
+            if (osOfPlatform(i) != .macos) continue;
+            const found = if (src.assets[i]) |want| findAssetNamed(rel.assets, want) else pickAppAsset(rel.assets, tag, src.apps.len != 0);
+            const chosen = found orelse {
+                try notes.writer().print("{s}: no .dmg or .zip for this Mac; ", .{tag});
+                continue;
+            };
+            const akind = ghrelease.archiveKindOf(rel.assets[chosen].name) orelse "";
+            if (!std.mem.eql(u8, akind, "dmg") and !std.mem.eql(u8, akind, "zip")) {
+                try notes.writer().print("{s}: {s} is not a .dmg or .zip; ", .{ tag, rel.assets[chosen].name });
+                continue;
+            }
+            if (std.mem.eql(u8, akind, "dmg") and src.apps.len == 0) {
+                try notes.writer().print("{s}: {s} is a .dmg, so the line needs app=Name.app; ", .{ tag, rel.assets[chosen].name });
+                continue;
+            }
+            pick[i] = chosen;
+            continue;
+        }
         const idx = if (src.assets[i]) |want| findAssetNamed(rel.assets, want) else ghrelease.pickAsset(rel.assets, tag);
         const chosen = idx orelse continue;
         const kind = ghrelease.archiveKindOf(rel.assets[chosen].name) orelse continue;
@@ -1298,7 +1367,7 @@ fn buildEntry(ctx: *Ctx, a: Allocator, src: Source, prev: ?Entry, index: usize) 
     for (pick) |p| {
         if (p != null) n_picked += 1;
     }
-    if (n_picked == 0) return failf(a, "no usable asset for any platform ({d} assets in {s})", .{ rel.assets.len, rel.tag });
+    if (n_picked == 0) return failf(a, "no usable asset for any platform ({d} assets in {s}) {s}", .{ rel.assets.len, rel.tag, notes.items });
 
     // ---- 2. checksums ------------------------------------------------------
     var locals = std.ArrayList(Local).init(a);
@@ -1352,6 +1421,9 @@ fn buildEntry(ctx: *Ctx, a: Allocator, src: Source, prev: ?Entry, index: usize) 
         if (p != null) n_picked += 1;
     }
     if (n_picked == 0) return failf(a, "no platform could be pinned: {s}", .{notes.items});
+
+    // An application bundle is linked as it is: nothing to detect.
+    if (src.kind == .app) return buildApp(ctx, a, src, rel, version, &pick, shas, &locals, tmp_dir, &notes);
 
     // ---- 3. executables ----------------------------------------------------
     const Detected = struct {
@@ -1530,7 +1602,20 @@ fn buildEntry(ctx: *Ctx, a: Allocator, src: Source, prev: ?Entry, index: usize) 
     }
     if (plats.items.len == 0) return failf(a, "no platform left after layout checks: {s}", .{notes.items});
 
-    // ---- 5. metadata -------------------------------------------------------
+    return finishEntry(ctx, a, src, version, try names.toOwnedSlice(), &.{}, try plats.toOwnedSlice());
+}
+
+/// Step 5, shared by both kinds: description, license and homepage from the
+/// repository record, then the entry itself, checked against the registry's rules.
+fn finishEntry(
+    ctx: *Ctx,
+    a: Allocator,
+    src: Source,
+    version: []const u8,
+    bin: []const []const u8,
+    apps: []const []const u8,
+    plats: []const PlatEntry,
+) !Outcome {
     const repo_json = ctx.net.fetchRepo(a, src.owner, src.repo) catch |e|
         return failf(a, "repository lookup failed: {s}", .{netErrorName(e)});
     const info = parseRepoInfo(a, repo_json, src.owner, src.repo) catch |e|
@@ -1548,11 +1633,207 @@ fn buildEntry(ctx: *Ctx, a: Allocator, src: Source, prev: ?Entry, index: usize) 
         .description = description,
         .homepage = info.homepage,
         .license = license,
-        .bin = try names.toOwnedSlice(),
-        .plats = try plats.toOwnedSlice(),
+        .bin = bin,
+        .app_bundles = apps,
+        .plats = plats,
     };
     if (validateEntry(entry)) |why| return failf(a, "invalid entry: {s}", .{why});
     return .{ .built = entry };
+}
+
+// ---------------------------------------------------------------------------
+// macOS application bundles (GUI apps)
+// ---------------------------------------------------------------------------
+
+/// Words that mark a .dmg or .zip as something other than the Mac app itself.
+const app_reject_tokens = [_][]const u8{
+    "linux",   "windows",  "win",       "win32",   "win64",    "ios",   "ipados", "tvos",
+    "android", "freebsd",  "appimage",  "exe",     "msi",      "deb",   "rpm",    "snap",
+    "flatpak", "src",      "source",    "sources", "debug",    "dsym",  "dsyms",  "symbols",
+    "sbom",    "checksum", "checksums", "sha256",  "blockmap", "delta", "deltas", "sparkle",
+};
+const app_mac_tokens = [_][]const u8{ "mac", "macos", "darwin", "osx", "apple" };
+const app_arm_hints = [_][]const u8{ "arm64", "aarch64", "apple-silicon", "apple_silicon", "applesilicon", "silicon" };
+const app_x86_hints = [_][]const u8{ "x86_64", "x86-64", "x64", "amd64", "intel", "x86" };
+
+fn hasWord(name: []const u8, words: []const []const u8) bool {
+    var it = std.mem.tokenizeAny(u8, name, "-_. +()[]");
+    while (it.next()) |t| {
+        for (words) |w| {
+            if (std.ascii.eqlIgnoreCase(t, w)) return true;
+        }
+    }
+    return false;
+}
+
+fn hasSubstring(name: []const u8, needles: []const []const u8) bool {
+    for (needles) |n| {
+        if (std.ascii.indexOfIgnoreCase(name, n) != null) return true;
+    }
+    return false;
+}
+
+/// The release asset that installs the app on the Mac `platform_tag` names, or
+/// null. Only .dmg and .zip files count. An asset for the other architecture,
+/// or for another system, never does; one that names no architecture (or says
+/// `universal`) fits both. With `know_app` (the line has `app=`) a .dmg is
+/// preferred, because abv0 unpacks it with the system and keeps symlinks and
+/// permissions; without it a .zip is, because its bundle name can be read.
+pub fn pickAppAsset(assets: []const ghrelease.Asset, platform_tag: []const u8, know_app: bool) ?usize {
+    const want_arm = std.mem.startsWith(u8, platform_tag, "aarch64");
+    var best: ?usize = null;
+    var best_score: u32 = 0;
+    for (assets, 0..) |asset, i| {
+        const name = asset.name;
+        const is_dmg = std.ascii.endsWithIgnoreCase(name, ".dmg");
+        if (!is_dmg and !std.ascii.endsWithIgnoreCase(name, ".zip")) continue;
+        if (hasWord(name, &app_reject_tokens)) continue;
+
+        const arm = hasSubstring(name, &app_arm_hints);
+        const x86 = hasSubstring(name, &app_x86_hints);
+        var score: u32 = 50;
+        if (std.ascii.indexOfIgnoreCase(name, "universal") != null or (arm and x86)) {
+            score = 50;
+        } else if (arm) {
+            if (!want_arm) continue;
+            score = 100;
+        } else if (x86) {
+            if (want_arm) continue;
+            score = 100;
+        }
+        // The kind of file outranks the architecture: a universal .zip is
+        // taken over an Apple-silicon-only .dmg when the bundle name is unknown.
+        if (is_dmg == know_app) score += 1000;
+        if (hasWord(name, &app_mac_tokens)) score += 2;
+
+        const better = if (best) |b|
+            (score > best_score or (score == best_score and name.len < assets[b].name.len))
+        else
+            true;
+        if (better) {
+            best = i;
+            best_score = score;
+        }
+    }
+    return best;
+}
+
+/// The names of the `*.app` directories at the top level of a zip archive,
+/// sorted. `seekable` is a `std.io.SeekableStream` over the archive.
+pub fn zipTopLevelApps(a: Allocator, seekable: anytype) ![]const []const u8 {
+    var iter = try std.zip.Iterator(@TypeOf(seekable)).init(seekable);
+    var found = std.ArrayList([]const u8).init(a);
+    var name_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+    while (try iter.next()) |entry| {
+        if (entry.filename_len > name_buf.len) continue;
+        const name = name_buf[0..entry.filename_len];
+        try iter.stream.seekTo(entry.header_zip_offset + @sizeOf(std.zip.CentralDirectoryFileHeader));
+        const got = try iter.stream.context.reader().readAll(name);
+        if (got != name.len) return error.ZipTruncated;
+
+        // A bundle is a directory: its name is followed by '/'.
+        const slash = std.mem.indexOfScalar(u8, name, '/') orelse continue;
+        const top = name[0..slash];
+        if (!isUsableAppName(top)) continue;
+        var dup = false;
+        for (found.items) |f| {
+            if (std.mem.eql(u8, f, top)) dup = true;
+        }
+        if (!dup) try found.append(try a.dupe(u8, top));
+    }
+    std.mem.sort([]const u8, found.items, {}, struct {
+        fn lt(_: void, x: []const u8, y: []const u8) bool {
+            return std.mem.order(u8, x, y) == .lt;
+        }
+    }.lt);
+    return found.toOwnedSlice();
+}
+
+fn zipAppsOfFile(a: Allocator, path: []const u8) ![]const []const u8 {
+    const f = try std.fs.cwd().openFile(path, .{});
+    defer f.close();
+    return zipTopLevelApps(a, f.seekableStream());
+}
+
+fn containsName(list: []const []const u8, want: []const u8) bool {
+    for (list) |n| {
+        if (std.mem.eql(u8, n, want)) return true;
+    }
+    return false;
+}
+
+/// Entry for an application source. A .zip is downloaded (once) to read the
+/// bundle names it holds and to make sure the bundle sits at its top level,
+/// which is where abv0 looks for it. A .dmg is taken on the line's word.
+fn buildApp(
+    ctx: *Ctx,
+    a: Allocator,
+    src: Source,
+    rel: ghrelease.Release,
+    version: []const u8,
+    pick: *[6]?usize,
+    shas: [6]?[64]u8,
+    locals: *std.ArrayList(Local),
+    tmp_dir: []const u8,
+    notes: *std.ArrayList(u8),
+) !Outcome {
+    var apps: []const []const u8 = src.apps;
+
+    for (pick, 0..) |p, pi| {
+        const idx = p orelse continue;
+        const asset = rel.assets[idx];
+        const kind = ghrelease.archiveKindOf(asset.name).?;
+        if (!std.mem.eql(u8, kind, "zip")) continue;
+        var on_disk = false;
+        for (locals.items) |l| {
+            if (l.asset == idx) on_disk = true;
+        }
+        // With app= and no copy on disk, the line's word is enough.
+        if (apps.len != 0 and !on_disk) continue;
+
+        const l = ensureLocal(ctx, a, rel.assets, idx, tmp_dir, locals) catch |e| {
+            try notes.writer().print("{s}: cannot download {s} to read its app ({s}); ", .{ platform_tags[pi], asset.name, netErrorName(e) });
+            pick[pi] = null;
+            continue;
+        };
+        if (!std.mem.eql(u8, &l.sha, &(shas[pi].?))) {
+            return failf(a, "{s}: downloaded file does not match its published SHA-256", .{asset.name});
+        }
+        const listed = zipAppsOfFile(a, l.path) catch |e| {
+            try notes.writer().print("{s}: cannot read {s} ({s}); ", .{ platform_tags[pi], asset.name, @errorName(e) });
+            pick[pi] = null;
+            continue;
+        };
+        if (listed.len == 0) {
+            try notes.writer().print("{s}: {s} has no .app at its top level; ", .{ platform_tags[pi], asset.name });
+            pick[pi] = null;
+            continue;
+        }
+        if (apps.len == 0) {
+            apps = listed;
+        } else for (apps) |want| {
+            if (!containsName(listed, want)) {
+                try notes.writer().print("{s}: {s} has no top-level {s}; ", .{ platform_tags[pi], asset.name, want });
+                pick[pi] = null;
+                break;
+            }
+        }
+    }
+
+    var plats = std.ArrayList(PlatEntry).init(a);
+    for (pick, 0..) |p, pi| {
+        const idx = p orelse continue;
+        const asset = rel.assets[idx];
+        try plats.append(.{
+            .tag = platform_tags[pi],
+            .url = asset.url,
+            .sha256 = try a.dupe(u8, &(shas[pi].?)),
+            .archive_type = ghrelease.archiveKindOf(asset.name).?,
+            .bin_path = "",
+        });
+    }
+    if (plats.items.len == 0 or apps.len == 0) return failf(a, "no installable app bundle: {s}", .{notes.items});
+    return finishEntry(ctx, a, src, version, &.{}, apps, try plats.toOwnedSlice());
 }
 
 fn processSource(ctx: *Ctx, a: Allocator, res: Allocator, i: usize) Result {
@@ -1783,6 +2064,16 @@ pub fn execute(gpa: Allocator, opts: Options, out: anytype) !Report {
     report.api_calls = network.api_calls.load(.monotonic);
     report.bytes = network.bytes.load(.monotonic);
 
+    // Written before the guards, so a run that refuses to publish still says why.
+    if (opts.summary_path) |sp| {
+        var md = std.ArrayList(u8).init(arena);
+        const fetch_secs = @as(f64, @floatFromInt(timer.read())) / 1e9;
+        writeSummaryMarkdown(md.writer(), entries.items, parsed.sources, results, report, fetch_secs, opts.jobs) catch {};
+        std.fs.cwd().writeFile(.{ .sub_path = sp, .data = md.items }) catch |e| {
+            try out.print("warning: cannot write {s}: {s}\n", .{ sp, @errorName(e) });
+        };
+    }
+
     // ---- guards: never publish an empty or collapsed catalog ---------------
     if (entries.items.len == 0) {
         try out.print("error: no packages were produced; leaving {s} untouched\n", .{opts.out_path});
@@ -1838,7 +2129,7 @@ pub fn execute(gpa: Allocator, opts: Options, out: anytype) !Report {
     const secs = @as(f64, @floatFromInt(timer.read())) / 1e9;
     try out.print(
         "\n{d} packages in {s} ({s}): {d} new, {d} updated, {d} kept, {d} carried, {d} stale, {d} skipped, {d} manual\n" ++
-            "API calls: {d}   downloaded: {d:.1} MB   time: {d:.1}s   registry check: 0 rejected\n",
+            "API calls: {d}   downloaded: {d:.1} MB   time: {d:.1}s ({d} jobs)   registry check: 0 rejected\n",
         .{
             report.packages,                                opts.out_path,
             if (report.changed) "changed" else "unchanged", report.new,
@@ -1846,10 +2137,56 @@ pub fn execute(gpa: Allocator, opts: Options, out: anytype) !Report {
             report.carried,                                 report.stale,
             report.skipped,                                 report.manual,
             report.api_calls,                               @as(f64, @floatFromInt(report.bytes)) / 1048576.0,
-            secs,
+            secs,                                           if (opts.jobs <= 1 or parsed.sources.len <= 1) 1 else @min(opts.jobs, parsed.sources.len),
         },
     );
     return report;
+}
+
+fn mdCell(w: anytype, s: []const u8) !void {
+    for (s) |c| {
+        switch (c) {
+            '|' => try w.writeAll("\\|"),
+            '\n', '\r' => try w.writeByte(' '),
+            else => try w.writeByte(c),
+        }
+    }
+}
+
+/// GitHub-flavoured Markdown for `$GITHUB_STEP_SUMMARY`: counts, then every
+/// source that failed with the reason.
+fn writeSummaryMarkdown(
+    w: anytype,
+    entries: []const Entry,
+    sources: []const Source,
+    results: []const Result,
+    report: Report,
+    secs: f64,
+    jobs: usize,
+) !void {
+    var apps: usize = 0;
+    for (entries) |e| {
+        if (e.app_bundles.len != 0) apps += 1;
+    }
+    try w.print("### Catalog build\n\n", .{});
+    try w.print("| | |\n| :--- | ---: |\n", .{});
+    try w.print("| Packages | {d} ({d} GUI apps, {d} manual) |\n", .{ report.packages, apps, report.manual });
+    try w.print("| New | {d} |\n| Updated | {d} |\n| Unchanged | {d} |\n", .{ report.new, report.updated, report.kept });
+    try w.print("| Stale (failed, previous entry kept) | {d} |\n| Skipped (failed, nothing to keep) | {d} |\n", .{ report.stale, report.skipped });
+    try w.print("| GitHub API calls | {d} |\n| Downloaded | {d:.1} MB |\n", .{ report.api_calls, @as(f64, @floatFromInt(report.bytes)) / 1048576.0 });
+    try w.print("| Time | {d:.1} s with {d} jobs |\n\n", .{ secs, jobs });
+
+    if (report.stale + report.skipped == 0) {
+        try w.writeAll("No source failed.\n");
+        return;
+    }
+    try w.print("#### Failures ({d})\n\n| Package | Source | Outcome | Reason |\n| :--- | :--- | :--- | :--- |\n", .{report.stale + report.skipped});
+    for (sources, results) |src, r| {
+        if (r.status != .stale and r.status != .skipped) continue;
+        try w.print("| {s} | {s}/{s} | {s} | ", .{ src.name, src.owner, src.repo, if (r.status == .stale) "stale" else "skipped" });
+        try mdCell(w, r.note);
+        try w.writeAll(" |\n");
+    }
 }
 
 fn printSummary(out: anytype, sources: []const Source, results: []const Result, selective: bool) !void {
@@ -1880,7 +2217,8 @@ const usage =
     \\                          beside the sources file, if it exists)
     \\  --only a,b              refresh only these packages; the rest come from --previous
     \\  --force                 ignore --previous and rebuild every selected package
-    \\  --jobs N                packages processed in parallel (default 4)
+    \\  --jobs N                packages processed in parallel (default 8)
+    \\  --summary FILE          also write a Markdown report (counts, failures and why)
     \\  --curl                  use curl instead of std.http for all network access
     \\  --offline-fixtures DIR  read <owner>__<repo>.release.json / .repo.json and
     \\                          <owner>__<repo>/<asset> from DIR instead of the network
@@ -1911,7 +2249,7 @@ pub fn main() !void {
     var i: usize = 1;
     while (i < argv.len) : (i += 1) {
         const arg = argv[i];
-        const value_opts = [_][]const u8{ "--sources", "--out", "--previous", "--manual", "--only", "--offline-fixtures", "--jobs", "--max-download-mb" };
+        const value_opts = [_][]const u8{ "--sources", "--out", "--previous", "--manual", "--only", "--offline-fixtures", "--jobs", "--max-download-mb", "--summary" };
         var needs_value = false;
         for (value_opts) |o| {
             if (std.mem.eql(u8, arg, o)) needs_value = true;
@@ -1940,6 +2278,8 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, arg, "--jobs")) {
             opts.jobs = std.fmt.parseInt(usize, value, 10) catch die("--jobs wants a number", .{});
             if (opts.jobs == 0) opts.jobs = 1;
+        } else if (std.mem.eql(u8, arg, "--summary")) {
+            opts.summary_path = value;
         } else if (std.mem.eql(u8, arg, "--max-download-mb")) {
             const mb = std.fmt.parseInt(u64, value, 10) catch die("--max-download-mb wants a number", .{});
             opts.max_download_bytes = mb * 1024 * 1024;
@@ -2535,4 +2875,367 @@ test "when most sources fail nothing is written" {
     try testing.expectEqual(@as(usize, 12), r.skipped);
     try testing.expectEqual(@as(usize, 1), r.packages);
     try testing.expectEqual(@as(usize, 1), r.manual);
+}
+
+// ---- GUI apps: parsing, picking, zip listing --------------------------------
+
+test "sources: kind=app and app=" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    const text =
+        \\rectangle rxhanson/Rectangle kind=app app=Rectangle.app
+        \\maccy p0deje/Maccy kind=app
+        \\brave brave/brave-browser app="Brave Browser.app" skip=x86_64-macos
+        \\tool acme/tool
+        \\both acme/both kind=cli app=Both.app
+        \\appbin acme/appbin kind=app bin=appbin
+        \\badkind acme/badkind kind=gui
+        \\notapp acme/notapp app=NotAnApp
+        \\slash acme/slash app=../Evil.app
+        \\colon acme/colon app=C:Evil.app
+        \\two acme/two app=One.app,Two.app
+    ;
+    const parsed = try parseSources(a, text);
+    try testing.expectEqual(@as(usize, 5), parsed.sources.len);
+
+    try testing.expect(parsed.sources[0].kind == .app);
+    try testing.expectEqualStrings("Rectangle.app", parsed.sources[0].apps[0]);
+    // No app= is fine for a .zip: the name is read from the archive.
+    try testing.expect(parsed.sources[1].kind == .app);
+    try testing.expectEqual(@as(usize, 0), parsed.sources[1].apps.len);
+    // app= alone implies kind=app; quotes keep the space.
+    try testing.expect(parsed.sources[2].kind == .app);
+    try testing.expectEqualStrings("Brave Browser.app", parsed.sources[2].apps[0]);
+    try testing.expect(parsed.sources[2].skip[4]);
+    try testing.expect(parsed.sources[3].kind == .cli);
+    try testing.expectEqual(@as(usize, 2), parsed.sources[4].apps.len);
+
+    const bad_lines = [_]usize{ 5, 6, 7, 8, 9, 10 };
+    try testing.expectEqual(bad_lines.len, parsed.problems.len);
+    for (bad_lines, parsed.problems) |want, p| try testing.expectEqual(want, p.line);
+}
+
+test "app bundle names" {
+    try testing.expect(isUsableAppName("Rectangle.app"));
+    try testing.expect(isUsableAppName("Brave Browser.app"));
+    try testing.expect(!isUsableAppName(".app"));
+    try testing.expect(!isUsableAppName("Rectangle"));
+    try testing.expect(!isUsableAppName("a/b.app"));
+    try testing.expect(!isUsableAppName("a\\b.app"));
+    try testing.expect(!isUsableAppName("C:b.app"));
+    try testing.expect(!isUsableAppName("../b.app"));
+    try testing.expect(!isUsableAppName("a\nb.app"));
+}
+
+fn namedAssets(arena: Allocator, names: []const []const u8) ![]ghrelease.Asset {
+    const out = try arena.alloc(ghrelease.Asset, names.len);
+    for (names, out) |n, *x| x.* = .{ .name = n, .url = "https://example.com/dl", .size = 0, .sha256 = null };
+    return out;
+}
+
+fn expectAppPick(assets: []const ghrelease.Asset, tag: []const u8, know_app: bool, want: ?[]const u8) !void {
+    const got = pickAppAsset(assets, tag, know_app);
+    if (want) |w| {
+        try testing.expectEqualStrings(w, assets[got orelse return error.TestExpectedEqual].name);
+    } else {
+        try testing.expect(got == null);
+    }
+}
+
+test "the app picker chooses the right .dmg or .zip for each Mac" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    // One universal disk image.
+    const one = try namedAssets(a, &.{ "Rectangle0.80.dmg", "Rectangle0.80.dmg.sha256", "source.zip" });
+    try expectAppPick(one, "aarch64-macos", true, "Rectangle0.80.dmg");
+    try expectAppPick(one, "x86_64-macos", true, "Rectangle0.80.dmg");
+
+    // Per-architecture images, plus Windows and Linux files that must not match.
+    const split = try namedAssets(a, &.{
+        "App-1.0-arm64.dmg",    "App-1.0-x64.dmg",             "App-1.0-win-x64.zip",
+        "App-1.0-linux.zip",    "App-1.0.AppImage",            "App-1.0-arm64.dmg.blockmap",
+        "App-1.0-mac-dSYM.zip", "App-1.0-macos-universal.zip",
+    });
+    try expectAppPick(split, "aarch64-macos", true, "App-1.0-arm64.dmg");
+    try expectAppPick(split, "x86_64-macos", true, "App-1.0-x64.dmg");
+
+    // Without app= a .zip wins, because its bundle name can be read.
+    try expectAppPick(split, "aarch64-macos", false, "App-1.0-macos-universal.zip");
+
+    // An x64-only release has nothing for Apple silicon.
+    const intel = try namedAssets(a, &.{"App-intel.dmg"});
+    try expectAppPick(intel, "aarch64-macos", true, null);
+    try expectAppPick(intel, "x86_64-macos", true, "App-intel.dmg");
+
+    // A bare name with no hints is taken for both Macs.
+    const bare = try namedAssets(a, &.{ "Ice.zip", "Ice.zip.sig" });
+    try expectAppPick(bare, "aarch64-macos", false, "Ice.zip");
+    try expectAppPick(bare, "x86_64-macos", false, "Ice.zip");
+
+    const none = try namedAssets(a, &.{ "tool-linux-amd64.tar.gz", "tool-windows.zip", "tool-ios.zip" });
+    try expectAppPick(none, "aarch64-macos", false, null);
+}
+
+/// Appends a stored (uncompressed) zip with the given members. A name ending
+/// in '/' is a directory.
+fn storedZip(list: *std.ArrayList(u8), members: []const struct { name: []const u8, data: []const u8 }) !void {
+    const w = list.writer();
+    var offsets: [16]u32 = undefined;
+    for (members, 0..) |m, i| {
+        offsets[i] = @intCast(list.items.len);
+        try w.writeInt(u32, 0x04034b50, .little);
+        try w.writeInt(u16, 20, .little);
+        try w.writeInt(u16, 0, .little);
+        try w.writeInt(u16, 0, .little);
+        try w.writeInt(u32, 0, .little);
+        try w.writeInt(u32, std.hash.Crc32.hash(m.data), .little);
+        try w.writeInt(u32, @intCast(m.data.len), .little);
+        try w.writeInt(u32, @intCast(m.data.len), .little);
+        try w.writeInt(u16, @intCast(m.name.len), .little);
+        try w.writeInt(u16, 0, .little);
+        try w.writeAll(m.name);
+        try w.writeAll(m.data);
+    }
+    const cd_start: u32 = @intCast(list.items.len);
+    for (members, 0..) |m, i| {
+        try w.writeInt(u32, 0x02014b50, .little);
+        try w.writeInt(u16, 20, .little);
+        try w.writeInt(u16, 20, .little);
+        try w.writeInt(u16, 0, .little);
+        try w.writeInt(u16, 0, .little);
+        try w.writeInt(u32, 0, .little);
+        try w.writeInt(u32, std.hash.Crc32.hash(m.data), .little);
+        try w.writeInt(u32, @intCast(m.data.len), .little);
+        try w.writeInt(u32, @intCast(m.data.len), .little);
+        try w.writeInt(u16, @intCast(m.name.len), .little);
+        try w.writeInt(u16, 0, .little);
+        try w.writeInt(u16, 0, .little);
+        try w.writeInt(u16, 0, .little);
+        try w.writeInt(u16, 0, .little);
+        try w.writeInt(u32, 0, .little);
+        try w.writeInt(u32, offsets[i], .little);
+        try w.writeAll(m.name);
+    }
+    const cd_len: u32 = @as(u32, @intCast(list.items.len)) - cd_start;
+    try w.writeInt(u32, 0x06054b50, .little);
+    try w.writeInt(u16, 0, .little);
+    try w.writeInt(u16, 0, .little);
+    try w.writeInt(u16, @intCast(members.len), .little);
+    try w.writeInt(u16, @intCast(members.len), .little);
+    try w.writeInt(u32, cd_len, .little);
+    try w.writeInt(u32, cd_start, .little);
+    try w.writeInt(u16, 0, .little);
+}
+
+test "zip listing finds the top-level .app bundles" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    var z = std.ArrayList(u8).init(a);
+    try storedZip(&z, &.{
+        .{ .name = "Zeta.app/", .data = "" },
+        .{ .name = "Zeta.app/Contents/MacOS/zeta", .data = "\xcf\xfa\xed\xfe" },
+        .{ .name = "Alpha Tool.app/Contents/Info.plist", .data = "<plist/>" },
+        .{ .name = "__MACOSX/._Zeta.app", .data = "x" },
+        .{ .name = "README.txt", .data = "hello" },
+        .{ .name = "nested/Inner.app/Contents/Info.plist", .data = "<plist/>" },
+        .{ .name = "Zeta.app/Contents/Resources/Helper.app/Contents/Info.plist", .data = "<plist/>" },
+    });
+    var fbs = std.io.fixedBufferStream(z.items);
+    const apps = try zipTopLevelApps(a, fbs.seekableStream());
+    try testing.expectEqual(@as(usize, 2), apps.len);
+    try testing.expectEqualStrings("Alpha Tool.app", apps[0]);
+    try testing.expectEqualStrings("Zeta.app", apps[1]);
+
+    // An archive whose bundle is not at the top level has none for abv0 to link.
+    var nested = std.ArrayList(u8).init(a);
+    try storedZip(&nested, &.{
+        .{ .name = "Thing-1.0/Thing.app/Contents/Info.plist", .data = "<plist/>" },
+        .{ .name = "Thing-1.0/README", .data = "x" },
+    });
+    var fbs2 = std.io.fixedBufferStream(nested.items);
+    try testing.expectEqual(@as(usize, 0), (try zipTopLevelApps(a, fbs2.seekableStream())).len);
+}
+
+test "an app source: bundle name read from a zip, dmg taken from app=, dmg without app= refused" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    var env = try TestEnv.init(a);
+    defer env.tmp.cleanup();
+
+    // foo: a universal zip; its bundle is found by listing it.
+    var zip = std.ArrayList(u8).init(a);
+    try storedZip(&zip, &.{
+        .{ .name = "Foo Pro.app/Contents/MacOS/foo", .data = "\xcf\xfa\xed\xfe" },
+        .{ .name = "__MACOSX/._Foo Pro.app", .data = "x" },
+    });
+    const h_zip = hexOf(zip.items);
+    const foo_release = try std.fmt.allocPrint(a,
+        \\{{"tag_name":"v2.1.0","assets":[
+        \\ {{"name":"Foo-2.1.0.zip","browser_download_url":"https://github.com/acme/foo/releases/download/v2.1.0/Foo-2.1.0.zip","size":{d},"digest":"sha256:{s}"}},
+        \\ {{"name":"Foo-2.1.0-windows.zip","browser_download_url":"https://github.com/acme/foo/releases/download/v2.1.0/Foo-2.1.0-windows.zip","size":10,"digest":"sha256:{s}"}},
+        \\ {{"name":"Foo-2.1.0.AppImage","browser_download_url":"https://github.com/acme/foo/releases/download/v2.1.0/Foo-2.1.0.AppImage","size":10,"digest":"sha256:{s}"}}
+        \\]}}
+    , .{ zip.items.len, h_zip, h_zip, h_zip });
+    try writeTestFile(env.tmp.dir, "fx/acme__foo.release.json", foo_release);
+    try writeTestFile(env.tmp.dir, "fx/acme__foo.repo.json", widget_repo_json);
+    try writeTestFile(env.tmp.dir, "fx/acme__foo/Foo-2.1.0.zip", zip.items);
+
+    // bar: per-architecture disk images; nothing is downloaded, the line names the app.
+    const h_dmg = hexOf("not a real disk image");
+    const bar_release = try std.fmt.allocPrint(a,
+        \\{{"tag_name":"1.4","assets":[
+        \\ {{"name":"Bar-1.4-arm64.dmg","browser_download_url":"https://github.com/acme/bar/releases/download/1.4/Bar-1.4-arm64.dmg","size":99,"digest":"sha256:{s}"}},
+        \\ {{"name":"Bar-1.4-x64.dmg","browser_download_url":"https://github.com/acme/bar/releases/download/1.4/Bar-1.4-x64.dmg","size":99,"digest":"sha256:{s}"}}
+        \\]}}
+    , .{ h_dmg, h_dmg });
+    try writeTestFile(env.tmp.dir, "fx/acme__bar.release.json", bar_release);
+    try writeTestFile(env.tmp.dir, "fx/acme__bar.repo.json", widget_repo_json);
+
+    // baz: a .dmg and no app= - cannot be listed off macOS, so it is refused.
+    const baz_release = try std.fmt.allocPrint(a,
+        \\{{"tag_name":"v3","assets":[{{"name":"Baz.dmg","browser_download_url":"https://github.com/acme/baz/releases/download/v3/Baz.dmg","size":99,"digest":"sha256:{s}"}}]}}
+    , .{h_dmg});
+    try writeTestFile(env.tmp.dir, "fx/acme__baz.release.json", baz_release);
+    try writeTestFile(env.tmp.dir, "fx/acme__baz.repo.json", widget_repo_json);
+
+    // qux: a zip whose bundle is one level down.
+    var nested = std.ArrayList(u8).init(a);
+    try storedZip(&nested, &.{.{ .name = "Qux-1/Qux.app/Contents/Info.plist", .data = "<plist/>" }});
+    const qux_release = try std.fmt.allocPrint(a,
+        \\{{"tag_name":"v1","assets":[{{"name":"Qux.zip","browser_download_url":"https://github.com/acme/qux/releases/download/v1/Qux.zip","size":99,"digest":"sha256:{s}"}}]}}
+    , .{hexOf(nested.items)});
+    try writeTestFile(env.tmp.dir, "fx/acme__qux.release.json", qux_release);
+    try writeTestFile(env.tmp.dir, "fx/acme__qux.repo.json", widget_repo_json);
+    try writeTestFile(env.tmp.dir, "fx/acme__qux/Qux.zip", nested.items);
+
+    try writeTestFile(env.tmp.dir, "sources.txt",
+        \\bar acme/bar app="Bar Studio.app"
+        \\baz acme/baz kind=app
+        \\foo acme/foo kind=app
+        \\qux acme/qux kind=app
+    );
+
+    var sink = std.ArrayList(u8).init(a);
+    const summary = try std.fs.path.join(a, &.{ env.root, "summary.md" });
+    const opts = Options{ .sources_path = env.sources, .out_path = env.out, .fixtures_dir = env.fixtures, .jobs = 2, .now_epoch = 1781740800, .quiet = true, .summary_path = summary, .allow_failures = true };
+    const r = try execute(testing.allocator, opts, sink.writer());
+    try testing.expectEqual(@as(usize, 2), r.new);
+    try testing.expectEqual(@as(usize, 2), r.skipped);
+
+    var diags = registry.LoadDiagnostics{};
+    var reg = try registry.loadFromJsonFile(testing.allocator, env.out, &diags);
+    defer reg.deinit();
+    try testing.expectEqual(@as(usize, 0), diags.rejected_packages);
+    try testing.expectEqual(@as(usize, 2), reg.count());
+
+    const foo = reg.get("foo").?;
+    try testing.expectEqual(@as(usize, 0), foo.bin.len);
+    try testing.expectEqual(@as(usize, 1), foo.app_bundles.len);
+    try testing.expectEqualStrings("Foo Pro.app", foo.app_bundles[0]);
+    try testing.expectEqual(@as(usize, 2), foo.platforms.len); // the Windows zip and the AppImage are not Mac apps
+    for (foo.platforms) |p| {
+        try testing.expect(std.mem.endsWith(u8, p.name, "-macos"));
+        try testing.expectEqualStrings("zip", p.archive_type);
+        try testing.expectEqualStrings("", p.bin_path);
+        try testing.expectEqualStrings(&h_zip, p.sha256);
+    }
+
+    const bar = reg.get("bar").?;
+    try testing.expectEqualStrings("Bar Studio.app", bar.app_bundles[0]);
+    try testing.expectEqualStrings("1.4", bar.version);
+    try testing.expectEqualStrings("dmg", bar.platform("aarch64-macos").?.archive_type);
+    try testing.expect(std.mem.indexOf(u8, bar.platform("aarch64-macos").?.url, "arm64") != null);
+    try testing.expect(std.mem.indexOf(u8, bar.platform("x86_64-macos").?.url, "x64") != null);
+
+    try testing.expect(std.mem.indexOf(u8, sink.items, "needs app=Name.app") != null);
+    try testing.expect(std.mem.indexOf(u8, sink.items, "no .app at its top level") != null);
+
+    // The Markdown report names the failures and the reasons.
+    const md = try std.fs.cwd().readFileAlloc(a, summary, 1 << 20);
+    try testing.expect(std.mem.indexOf(u8, md, "### Catalog build") != null);
+    try testing.expect(std.mem.indexOf(u8, md, "| baz | acme/baz | skipped |") != null);
+    try testing.expect(std.mem.indexOf(u8, md, "| qux | acme/qux | skipped |") != null);
+
+    // App entries survive the round trip through --previous: nothing is fetched.
+    try env.tmp.dir.deleteTree("fx/acme__foo");
+    var again = opts;
+    again.out_path = try std.fs.path.join(a, &.{ env.root, "again.json" });
+    again.previous_path = env.out;
+    again.summary_path = null;
+    const second = try execute(testing.allocator, again, sink.writer());
+    try testing.expectEqual(@as(usize, 2), second.kept);
+    // Only qux, which has no previous entry and fails again, is fetched.
+    try testing.expectEqual(@as(u64, nested.items.len), second.bytes);
+    try testing.expect(!second.changed);
+}
+
+// ---- the real catalog/sources.txt -------------------------------------------
+
+fn readRealSources(a: Allocator) ![]u8 {
+    return std.fs.cwd().readFileAlloc(a, "catalog/sources.txt", 8 * 1024 * 1024) catch |e| switch (e) {
+        error.FileNotFound => error.SkipZigTest, // not run from the repository root
+        else => e,
+    };
+}
+
+test "catalog/sources.txt parses cleanly with unique names" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    const text = try readRealSources(a);
+    const parsed = try parseSources(a, text);
+    for (parsed.problems) |p| std.debug.print("sources.txt:{d}: {s}\n", .{ p.line, p.text });
+    try testing.expectEqual(@as(usize, 0), parsed.problems.len);
+    try testing.expect(parsed.sources.len >= 250);
+
+    // parseSources reports a repeat as a problem; this checks the names again,
+    // independently of that.
+    var seen = std.StringHashMap(void).init(a);
+    for (parsed.sources) |s| {
+        const slot = try seen.getOrPut(s.name);
+        if (slot.found_existing) std.debug.print("duplicate name {s}\n", .{s.name});
+        try testing.expect(!slot.found_existing);
+    }
+
+    var apps: usize = 0;
+    for (parsed.sources) |s| {
+        if (s.kind == .app) apps += 1;
+    }
+    try testing.expect(apps >= 25);
+}
+
+test "catalog/sources.txt is sorted within each section" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    const text = try readRealSources(a);
+    var prev: []const u8 = "";
+    var line_no: usize = 0;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw| {
+        line_no += 1;
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (std.mem.startsWith(u8, line, "# ----")) {
+            prev = "";
+            continue;
+        }
+        if (line.len == 0 or line[0] == '#') continue;
+        const end = std.mem.indexOfAny(u8, line, " \t") orelse line.len;
+        const name = line[0..end];
+        if (prev.len != 0 and std.mem.order(u8, prev, name) != .lt) {
+            std.debug.print("sources.txt:{d}: '{s}' should come before '{s}'\n", .{ line_no, name, prev });
+            return error.TestUnexpectedResult;
+        }
+        prev = name;
+    }
 }

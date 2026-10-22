@@ -1,0 +1,201 @@
+name: Catalog build
+
+# Builds the FULL catalog from catalog/sources.txt (every listed project's latest
+# GitHub release), checks it with abv0 itself and publishes the result, UNSIGNED,
+# to the branch `catalog-unsigned`. Nothing here signs anything and no other
+# branch is ever written: a maintainer reviews packages/index.json on that branch
+# and signs it (see catalog.yml and catalog/README.md).
+#
+# Needs no secrets. GITHUB_TOKEN raises the API limit to 1,000 requests an hour
+# per repository and lets the run push its one branch.
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Rebuild every package, even those whose version is unchanged"
+        type: boolean
+        required: false
+        default: false
+  push:
+    branches:
+      - "claude/**"
+    paths:
+      - "catalog/**"
+      - "tools/build-catalog.zig"
+      - ".github/workflows/catalog-build.yml"
+
+permissions:
+  contents: write
+
+# One build at a time: two runs would race on the catalog-unsigned branch.
+concurrency:
+  group: catalog-build
+  cancel-in-progress: false
+
+env:
+  UNSIGNED_BRANCH: catalog-unsigned
+  # Sources processed in parallel. The work is network bound.
+  CATALOG_JOBS: "8"
+
+jobs:
+  build:
+    name: Build, validate and publish unsigned
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+
+      - name: Build abv0 and the catalog tool
+        run: zig build install catalog-tool -Doptimize=ReleaseSafe
+
+      - name: Pick the previous catalog
+        # Unchanged versions are reused without a download. The last unsigned
+        # build is the best source of those; the committed catalog is the fallback.
+        run: |
+          set -euo pipefail
+          prev="${RUNNER_TEMP}/previous.json"
+          if git fetch --quiet --depth=1 origin "+refs/heads/${UNSIGNED_BRANCH}:refs/remotes/origin/${UNSIGNED_BRANCH}" 2>/dev/null \
+             && git show "origin/${UNSIGNED_BRANCH}:packages/index.json" > "${prev}" 2>/dev/null; then
+            echo "Previous catalog: ${UNSIGNED_BRANCH} ($(git rev-parse --short "origin/${UNSIGNED_BRANCH}"))"
+          else
+            cp packages/index.json "${prev}"
+            echo "Previous catalog: packages/index.json (no ${UNSIGNED_BRANCH} branch yet)"
+          fi
+          echo "PREVIOUS=${prev}" >> "${GITHUB_ENV}"
+
+      - name: Build the full catalog from upstream releases
+        id: build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/catalog-out"
+          mkdir -p "${out}"
+          args=(--sources catalog/sources.txt --manual catalog/manual.json
+                --out "${out}/index.json" --previous "${PREVIOUS}"
+                --jobs "${CATALOG_JOBS}" --allow-failures
+                --summary "${RUNNER_TEMP}/build-summary.md")
+          if [ "${INPUT_FORCE:-false}" = "true" ]; then args+=(--force); fi
+          start="$(date +%s)"
+          ./zig-out/bin/build-catalog "${args[@]}" 2>&1 | tee "${RUNNER_TEMP}/build.log"
+          echo "wall clock: $(( $(date +%s) - start )) s"
+          echo "OUT=${out}/index.json" >> "${GITHUB_ENV}"
+
+      - name: Validate with abv0
+        run: |
+          set -euo pipefail
+          abv0=./zig-out/bin/abv0
+          home="$(mktemp -d)"
+
+          # 1. abv0 loads the registry (every package passes its loader) and
+          #    lists as many packages as the file holds.
+          expected="$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["packages"]))' "${OUT}")"
+          listed="$(HOME="${home}" "${abv0}" --registry "${OUT}" --allow-unsigned-manifest list | tee "${RUNNER_TEMP}/list.txt" | tail -n 1)"
+          echo "abv0 list: ${listed} (file holds ${expected})"
+          case "${listed}" in
+            "${expected} packages") ;;
+            *) echo "::error title=Catalog does not load::abv0 listed '${listed}', the file holds ${expected} packages"; exit 1 ;;
+          esac
+
+          # 2. A dry-run install of 10 random packages that have a Linux x86_64 build.
+          python3 - "${OUT}" > "${RUNNER_TEMP}/sample.txt" <<'PY'
+          import json, random, sys
+          packages = json.load(open(sys.argv[1]))["packages"]
+          names = sorted(n for n, p in packages.items() if "x86_64-linux" in p["platforms"])
+          random.shuffle(names)
+          print("\n".join(sorted(names[:10])))
+          PY
+          mapfile -t sample < "${RUNNER_TEMP}/sample.txt"
+          echo "dry-run sample (${#sample[@]}): ${sample[*]}"
+          if [ "${#sample[@]}" -lt 10 ]; then
+            echo "::error title=Too few Linux packages::only ${#sample[@]} packages have an x86_64-linux build"
+            exit 1
+          fi
+          HOME="${home}" "${abv0}" --registry "${OUT}" --allow-unsigned-manifest --dry-run install "${sample[@]}" \
+            | tee "${RUNNER_TEMP}/dry-run.txt"
+          for name in "${sample[@]}"; do
+            if ! awk -v n="${name}" '$1 == "install" && $2 == n { found = 1 } END { exit !found }' "${RUNNER_TEMP}/dry-run.txt"; then
+              echo "::error title=Dry run failed::${name} would not be installed"
+              exit 1
+            fi
+          done
+          if awk '$1 == "unknown" { found = 1 } END { exit !found }' "${RUNNER_TEMP}/dry-run.txt"; then
+            echo "::error title=Dry run failed::a package is not in the catalog"
+            exit 1
+          fi
+
+      - name: Write the job summary
+        if: always()
+        run: |
+          {
+            if [ -f "${RUNNER_TEMP}/build-summary.md" ]; then
+              cat "${RUNNER_TEMP}/build-summary.md"
+            else
+              echo '### Catalog build'
+              echo
+              echo 'The builder did not finish; see the log.'
+            fi
+            echo
+            if [ -f "${RUNNER_TEMP}/sample.txt" ]; then
+              echo '#### Validation'
+              echo
+              echo "- \`abv0 --registry … list\`: $(tail -n 1 "${RUNNER_TEMP}/list.txt" 2>/dev/null || echo 'not run')"
+              echo "- dry-run install (linux x86_64) of: $(paste -sd' ' "${RUNNER_TEMP}/sample.txt")"
+              echo
+            fi
+            if [ -f "${RUNNER_TEMP}/build.log" ]; then
+              echo '<details><summary>Builder log (tail)</summary>'
+              echo
+              echo '```'
+              tail -n 60 "${RUNNER_TEMP}/build.log"
+              echo '```'
+              echo '</details>'
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Publish packages/index.json (unsigned) to the catalog-unsigned branch
+        run: |
+          set -euo pipefail
+          new_blob="$(git hash-object "${OUT}")"
+          if old_blob="$(git rev-parse --verify --quiet "origin/${UNSIGNED_BRANCH}:packages/index.json")" \
+             && [ "${old_blob}" = "${new_blob}" ]; then
+            echo "Catalog identical to ${UNSIGNED_BRANCH}; nothing to push."
+            echo "Catalog identical to \`${UNSIGNED_BRANCH}\`; nothing pushed." >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+
+          # A throwaway worktree holding one orphan commit with one file. The
+          # checked-out branch and every other branch stay as they are.
+          wt="${RUNNER_TEMP}/unsigned-wt"
+          git worktree add --quiet --detach "${wt}" HEAD
+          cd "${wt}"
+          git checkout --quiet --orphan unsigned-publish
+          git rm -rf --quiet --ignore-unmatch .
+          mkdir -p packages
+          cp "${OUT}" packages/index.json
+          git add packages/index.json
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit --quiet -m "chore(catalog): unsigned build ${GITHUB_SHA::12}" \
+                     -m "packages/index.json only, NOT signed. Built by workflow run ${GITHUB_RUN_ID} from ${GITHUB_REPOSITORY}@${GITHUB_SHA}. A maintainer must review and sign it before it is published."
+          # An explicit refspec: only this one ref can change.
+          git push --force origin "HEAD:refs/heads/${UNSIGNED_BRANCH}"
+          echo "Pushed $(git rev-parse --short HEAD) to \`${UNSIGNED_BRANCH}\` (unsigned)." >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Keep the build outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: catalog-unsigned
+          path: |
+            ${{ runner.temp }}/catalog-out/index.json
+            ${{ runner.temp }}/build-summary.md
+            ${{ runner.temp }}/build.log
+          if-no-files-found: ignore
+          retention-days: 14
