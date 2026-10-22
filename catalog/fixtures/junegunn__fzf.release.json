@@ -1,0 +1,98 @@
+{
+ "tag_name": "v0.55.0",
+ "name": "v0.55.0",
+ "draft": false,
+ "prerelease": false,
+ "assets": [
+  {
+   "name": "fzf-0.55.0-darwin_amd64.tar.gz",
+   "browser_download_url": "https://github.com/junegunn/fzf/releases/download/v0.55.0/fzf-0.55.0-darwin_amd64.tar.gz",
+   "size": 1649822
+  },
+  {
+   "name": "fzf-0.55.0-darwin_arm64.tar.gz",
+   "browser_download_url": "https://github.com/junegunn/fzf/releases/download/v0.55.0/fzf-0.55.0-darwin_arm64.tar.gz",
+   "size": 1574393
+  },
+  {
+   "name": "fzf-0.55.0-freebsd_amd64.tar.gz",
+   "browser_download_url": "https://github.com/junegunn/fzf/releases/download/v0.55.0/fzf-0.55.0-freebsd_amd64.tar.gz",
+   "size": 1550134
+  },
+  {
+   "name": "fzf-0.55.0-linux_amd64.tar.gz",
+   "browser_download_url": "https://github.com/junegunn/fzf/releases/download/v0.55.0/fzf-0.55.0-linux_amd64.tar.gz",
+   "size": 1556217
+  },
+  {
+   "name": "fzf-0.55.0-linux_arm64.tar.gz",
+   "browser_download_url": "https://github.com/junegunn/fzf/releases/download/v0.55.0/fzf-0.55.0-linux_arm64.tar.gz",
+   "size": 1446020
+  },
+  {
+   "name": "fzf-0.55.0-linux_armv5.tar.gz",
+   "browser_download_url": "https://github.com/junegunn/fzf/releases/download/v0.55.0/fzf-0.55.0-linux_armv5.tar.gz",
+   "size": 1520091
+  },
+  {
+   "name": "fzf-0.55.0-linux_armv6.tar.gz",
+   "browser_download_url": "https://github.com/junegunn/fzf/releases/download/v0.55.0/fzf-0.55.0-linux_armv6.tar.gz",
+   "size": 1509380
+  },
+  {
+   "name": "fzf-0.55.0-linux_armv7.tar.gz",
+   "browser_download_url": "https://github.com/junegunn/fzf/releases/download/v0.55.0/fzf-0.55.0-linux_armv7.tar.gz",
+   "size": 1506601
+  },
+  {
+   "name": "fzf-0.55.0-linux_loong64.tar.gz",
+   "browser_download_url": "https://github.com/junegunn/fzf/releases/download/v0.55.0/fzf-0.55.0-linux_loong64.tar.gz",
+   "size": 1513148
+  },
+  {
+   "name": "fzf-0.55.0-linux_ppc64le.tar.gz",
+   "browser_download_url": "https://github.com/junegunn/fzf/releases/download/v0.55.0/fzf-0.55.0-linux_ppc64le.tar.gz",
+   "size": 1436049
+  },
+  {
+   "name": "fzf-0.55.0-linux_s390x.tar.gz",
+   "browser_download_url": "https://github.com/junegunn/fzf/releases/download/v0.55.0/fzf-0.55.0-linux_s390x.tar.gz",
+   "size": 1523393
+  },
+  {
+   "name": "fzf-0.55.0-openbsd_amd64.tar.gz",
+   "browser_download_url": "https://github.com/junegunn/fzf/releases/download/v0.55.0/fzf-0.55.0-openbsd_amd64.tar.gz",
+   "size": 1553626
+  },
+  {
+   "name": "fzf-0.55.0-windows_amd64.zip",
+   "browser_download_url": "https://github.com/junegunn/fzf/releases/download/v0.55.0/fzf-0.55.0-windows_amd64.zip",
+   "size": 1772992
+  },
+  {
+   "name": "fzf-0.55.0-windows_arm64.zip",
+   "browser_download_url": "https://github.com/junegunn/fzf/releases/download/v0.55.0/fzf-0.55.0-windows_arm64.zip",
+   "size": 1649431
+  },
+  {
+   "name": "fzf-0.55.0-windows_armv5.zip",
+   "browser_download_url": "https://github.com/junegunn/fzf/releases/download/v0.55.0/fzf-0.55.0-windows_armv5.zip",
+   "size": 1742733
+  },
+  {
+   "name": "fzf-0.55.0-windows_armv6.zip",
+   "browser_download_url": "https://github.com/junegunn/fzf/releases/download/v0.55.0/fzf-0.55.0-windows_armv6.zip",
+   "size": 1732027
+  },
+  {
+   "name": "fzf-0.55.0-windows_armv7.zip",
+   "browser_download_url": "https://github.com/junegunn/fzf/releases/download/v0.55.0/fzf-0.55.0-windows_armv7.zip",
+   "size": 1725820
+  },
+  {
+   "name": "fzf_0.55.0_checksums.txt",
+   "browser_download_url": "https://github.com/junegunn/fzf/releases/download/v0.55.0/fzf_0.55.0_checksums.txt",
+   "size": 1637
+  }
+ ]
+}

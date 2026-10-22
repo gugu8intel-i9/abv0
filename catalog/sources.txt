@@ -1,0 +1,456 @@
+# abv0 catalog sources
+#
+# Each line names one upstream project whose official GitHub releases become a
+# package in packages/index.json. tools/build-catalog.zig reads this file, finds
+# the latest release, picks the right asset for each of abv0's six platforms
+# (x86_64/aarch64 x linux/macos/windows), pins its SHA-256 and detects the
+# executables inside. A scheduled workflow (.github/workflows/catalog.yml)
+# re-runs it, so adding a project here is all it takes to publish it.
+#
+# Format, one per line:
+#
+#   name  owner/repo  [key=value ...]
+#
+#   name                      the abv0 package name (letters, digits, - _ . +)
+#   bin=a,b                   executables to expose; replaces detection. The
+#                             first one is the primary.
+#   asset.<platform>=TEXT     force the release asset whose name is TEXT (an
+#                             exact name wins, else the shortest name that
+#                             contains it). <platform> is one of
+#                             x86_64-linux aarch64-linux x86_64-macos
+#                             aarch64-macos x86_64-windows aarch64-windows.
+#   skip=<platform>,...       never publish for these platforms
+#   desc="..."                replaces the repository description
+#   license=SPDX              replaces the repository license
+#   tag=<release tag>         pin a release instead of following the latest
+#   kind=app                  a macOS application (a Homebrew "cask"): publishes
+#                             the release's .dmg or .zip for the two Macs only,
+#                             records the bundle in app_bundles and detects no
+#                             executables. kind=cli is the default.
+#   app=Name.app              the bundle's name (implies kind=app). Required when
+#                             the Mac asset is a .dmg, because a disk image
+#                             cannot be listed off macOS. For a .zip it is read
+#                             from the archive; the bundle has to sit at the
+#                             top level of the zip. Quote names with spaces:
+#                             app="Brave Browser.app".
+#
+# Values with spaces go in double quotes. '#' starts a comment. A line that
+# cannot be parsed is reported and skipped; it never stops the run.
+#
+# Order: names are sorted within each section (a test checks this) and unique
+# across the file. One section per kind of tool keeps additions mergeable.
+#
+# Software that is not distributed through GitHub releases (a project's own
+# download site, or a single script) lives in catalog/manual.json instead.
+#
+# Only list projects that publish prebuilt binaries as release assets. Whatever
+# the picker cannot match (no asset for a platform, an unsupported archive such
+# as .bz2, .gz or .7z) simply leaves that platform out, and a source that finds
+# nothing is reported and skipped; it never stops the run.
+
+# ---- searching, files and text -------------------------------------------
+bandwhich       imsnif/bandwhich
+bat             sharkdp/bat
+bottom          ClementTsang/bottom       bin=btm
+diskus          sharkdp/diskus
+dua             Byron/dua-cli
+duf             muesli/duf
+dust            bootandy/du-dust
+erdtree         solidiquis/erdtree
+eza             eza-community/eza
+fclones         pkolaczk/fclones
+fd              sharkdp/fd
+fend            printfn/fend
+fzf             junegunn/fzf
+gdu             dundee/gdu
+gping           orf/gping
+grex            pemistahl/grex
+hexyl           sharkdp/hexyl
+htmlq           mgdm/htmlq
+hyperfine       sharkdp/hyperfine
+jaq             01mf02/jaq
+jnv             ynqa/jnv
+lf              gokcehan/lf
+lsd             lsd-rs/lsd
+lychee          lycheeverse/lychee
+numbat          sharkdp/numbat
+ouch            ouch-org/ouch
+pastel          sharkdp/pastel
+peco            peco/peco
+procs           dalance/procs
+rip2            MilesCranmer/rip2
+ripgrep         BurntSushi/ripgrep        bin=rg
+ripgrep-all     phiresky/ripgrep-all
+sad             ms-jpq/sad
+scc             boyter/scc
+sd              chmln/sd
+skim            skim-rs/skim              bin=sk
+tokei           XAMPPRocky/tokei
+typos           crate-ci/typos
+vivid           sharkdp/vivid
+xan             medialab/xan
+xplr            sayanarijit/xplr
+xsv             BurntSushi/xsv
+yazi            sxyazi/yazi
+
+# ---- JSON, YAML and data -------------------------------------------------
+csvlens         YS-L/csvlens
+cue             cue-lang/cue
+dasel           TomWright/dasel
+fx              antonmedv/fx
+gojq            itchyny/gojq
+gron            tomnomnom/gron
+jless           PaulJuliusMartinez/jless
+jq              jqlang/jq
+jsonnet         google/go-jsonnet
+miller          johnkerl/miller
+yamlfmt         google/yamlfmt
+yq              mikefarah/yq
+
+# ---- databases and messaging ---------------------------------------------
+dbmate          amacneil/dbmate
+dolt            dolthub/dolt
+duckdb          duckdb/duckdb
+etcd            etcd-io/etcd
+goose           pressly/goose
+lazysql         jorgerojas26/lazysql
+litestream      benbjohnson/litestream
+mailpit         axllent/mailpit
+migrate         golang-migrate/migrate
+nats-server     nats-io/nats-server
+natscli         nats-io/natscli           bin=nats
+pgweb           sosedoff/pgweb
+pocketbase      pocketbase/pocketbase
+sqlc            sqlc-dev/sqlc
+tbls            k1LoW/tbls
+usql            xo/usql
+
+# ---- git and code hosting ------------------------------------------------
+act             nektos/act
+committed       crate-ci/committed
+delta           dandavison/delta
+difftastic      Wilfred/difftastic
+gh              cli/cli
+ghq             x-motemen/ghq
+git-absorb      tummychow/git-absorb
+git-cliff       orhun/git-cliff
+git-lfs         git-lfs/git-lfs
+gitleaks        gitleaks/gitleaks
+gitui           gitui-org/gitui
+jj              jj-vcs/jj
+lazygit         jesseduffield/lazygit
+lefthook        evilmartians/lefthook
+onefetch        o2sh/onefetch             asset.x86_64-linux=onefetch-linux.tar.gz asset.x86_64-macos=onefetch-mac.tar.gz asset.aarch64-macos=onefetch-mac.tar.gz asset.x86_64-windows=onefetch-windows.zip
+trufflehog      trufflesecurity/trufflehog
+zizmor          woodruffw/zizmor
+
+# ---- shells, prompts and terminal tools ----------------------------------
+agg             asciinema/agg
+asciinema       asciinema/asciinema
+atuin           atuinsh/atuin
+bombardier      codesenberg/bombardier
+carapace        carapace-sh/carapace-bin  bin=carapace
+chezmoi         twpayne/chezmoi
+curlie          rs/curlie
+direnv          direnv/direnv
+doggo           mr-karan/doggo
+fastfetch       fastfetch-cli/fastfetch
+fish            fish-shell/fish-shell
+freeze          charmbracelet/freeze
+glow            charmbracelet/glow
+grpcurl         fullstorydev/grpcurl
+gum             charmbracelet/gum
+helix           helix-editor/helix        bin=hx
+hurl            Orange-OpenSource/hurl
+joshuto         kamiyaa/joshuto
+just            casey/just
+k6              grafana/k6
+mask            jacobdeichert/mask
+mcfly           cantino/mcfly
+mise            jdx/mise
+mods            charmbracelet/mods
+navi            denisidoro/navi
+neovim          neovim/neovim
+nushell         nushell/nushell
+oh-my-posh      JanDeDobbeleer/oh-my-posh
+oha             hatoo/oha
+oxker           mrjackwills/oxker
+pop             charmbracelet/pop
+pueue           Nukesor/pueue
+pueued          Nukesor/pueue             bin=pueued asset.x86_64-linux=pueued-linux-x86_64 asset.aarch64-linux=pueued-linux-aarch64 asset.x86_64-macos=pueued-darwin-x86_64 asset.aarch64-macos=pueued-darwin-aarch64 asset.x86_64-windows=pueued-windows-x86_64.exe
+sesh            joshmedeski/sesh
+skate           charmbracelet/skate
+slides          maaslalani/slides
+soft-serve      charmbracelet/soft-serve
+sshs            quantumsheep/sshs
+starship        starship/starship
+task            go-task/task
+tealdeer        tealdeer-rs/tealdeer      bin=tldr
+television      alexpasmantier/television bin=tv
+topgrade        topgrade-rs/topgrade
+trippy          fujiapple852/trippy       bin=trip
+ttyd            tsl0922/ttyd              asset.x86_64-linux=ttyd.x86_64 asset.aarch64-linux=ttyd.aarch64 asset.x86_64-windows=ttyd.win32.exe
+vegeta          tsenart/vegeta
+vhs             charmbracelet/vhs
+viddy           sachaos/viddy
+watchexec       watchexec/watchexec
+websocat        vi/websocat
+wishlist        charmbracelet/wishlist
+xh              ducaale/xh
+zellij          zellij-org/zellij
+zoxide          ajeetdsouza/zoxide
+
+# ---- languages, runtimes and build tools ---------------------------------
+ast-grep        ast-grep/ast-grep         bin=ast-grep
+bazelisk        bazelbuild/bazelisk
+biome           biomejs/biome
+buf             bufbuild/buf
+bun             oven-sh/bun
+cargo-binstall  cargo-bins/cargo-binstall
+cargo-deny      EmbarkStudios/cargo-deny
+cargo-dist      axodotdev/cargo-dist
+cargo-generate  cargo-generate/cargo-generate
+cargo-hack      taiki-e/cargo-hack
+cargo-llvm-cov  taiki-e/cargo-llvm-cov
+cargo-machete   bnjbvr/cargo-machete
+cargo-make      sagiegurari/cargo-make
+cargo-release   crate-ci/cargo-release
+cargo-zigbuild  rust-cross/cargo-zigbuild
+ccache          ccache/ccache
+clangd          clangd/clangd             asset.x86_64-linux=clangd-linux- asset.x86_64-macos=clangd-mac- asset.aarch64-macos=clangd-mac- asset.x86_64-windows=clangd-windows-
+cmake           Kitware/CMake
+cross           cross-rs/cross
+dart-sass       sass/dart-sass            bin=sass
+deno            denoland/deno
+dprint          dprint/dprint
+fnm             Schniz/fnm                asset.x86_64-linux=fnm-linux.zip asset.aarch64-linux=fnm-arm64.zip asset.x86_64-macos=fnm-macos.zip asset.aarch64-macos=fnm-macos.zip asset.x86_64-windows=fnm-windows.zip
+gleam           gleam-lang/gleam
+hatch           pypa/hatch
+hugo            gohugoio/hugo
+lua-language-server LuaLS/lua-language-server
+luacheck        lunarmodules/luacheck     asset.x86_64-linux=luacheck asset.x86_64-windows=luacheck.exe
+marksman        artempyanykh/marksman     asset.x86_64-macos=marksman-macos asset.aarch64-macos=marksman-macos asset.x86_64-windows=marksman.exe
+mdbook          rust-lang/mdBook          bin=mdbook
+mold            rui314/mold
+moon            moonrepo/moon
+ninja           ninja-build/ninja         asset.x86_64-linux=ninja-linux.zip asset.aarch64-linux=ninja-linux-aarch64.zip asset.x86_64-macos=ninja-mac.zip asset.aarch64-macos=ninja-mac.zip asset.x86_64-windows=ninja-win.zip
+oxlint          oxc-project/oxc           bin=oxlint
+pandoc          jgm/pandoc
+pixi            prefix-dev/pixi
+pnpm            pnpm/pnpm
+proto           moonrepo/proto
+protoc          protocolbuffers/protobuf  bin=protoc
+rattler-build   prefix-dev/rattler-build
+ruff            astral-sh/ruff
+sccache         mozilla/sccache
+selene          Kampfkarren/selene        asset.x86_64-linux=linux.zip asset.x86_64-macos=macos.zip asset.aarch64-macos=macos.zip asset.x86_64-windows=windows.zip
+stylua          JohnnyMorganz/StyLua
+tailwindcss     tailwindlabs/tailwindcss
+trunk           trunk-rs/trunk
+ty              astral-sh/ty
+typst           typst/typst
+uv              astral-sh/uv
+wasm-bindgen    rustwasm/wasm-bindgen
+wasm-pack       rustwasm/wasm-pack
+wasmer          wasmerio/wasmer
+wasmtime        bytecodealliance/wasmtime
+zls             zigtools/zls
+zola            getzola/zola
+
+# ---- linters, formatters and checkers ------------------------------------
+actionlint      rhysd/actionlint
+air             air-verse/air
+editorconfig-checker editorconfig-checker/editorconfig-checker bin=ec
+gofumpt         mvdan/gofumpt
+golangci-lint   golangci/golangci-lint
+goreleaser      goreleaser/goreleaser
+gosec           securego/gosec
+gotestsum       gotestyourself/gotestsum
+hadolint        hadolint/hadolint
+ko              ko-build/ko
+mage            magefile/mage
+mockery         vektra/mockery
+revive          mgechev/revive
+shellcheck      koalaman/shellcheck
+shfmt           mvdan/sh                  bin=shfmt
+staticcheck     dominikh/go-tools
+templ           a-h/templ
+vale            vale-cli/vale             asset.x86_64-linux=Linux_64-bit asset.aarch64-linux=Linux_arm64 asset.x86_64-macos=macOS_64-bit asset.aarch64-macos=macOS_arm64 asset.x86_64-windows=Windows_64-bit asset.aarch64-windows=Windows_arm64
+
+# ---- containers, cloud and infrastructure --------------------------------
+argocd          argoproj/argo-cd          bin=argocd
+aws-vault       99designs/aws-vault
+buildkit        moby/buildkit
+cilium-cli      cilium/cilium-cli         bin=cilium
+conftest        open-policy-agent/conftest
+cosign          sigstore/cosign
+crane           google/go-containerregistry bin=crane
+ctop            bcicen/ctop
+dagger          dagger/dagger
+devbox          jetify-com/devbox
+devspace        devspace-sh/devspace
+dive            wagoodman/dive
+docker-buildx   docker/buildx             bin=docker-buildx
+docker-compose  docker/compose            bin=docker-compose
+dockle          goodwithtech/dockle
+doctl           digitalocean/doctl
+earthly         earthly/earthly
+eksctl          eksctl-io/eksctl
+flux            fluxcd/flux2
+flyctl          superfly/flyctl
+grype           anchore/grype
+hcloud          hetznercloud/cli          bin=hcloud
+helmfile        helmfile/helmfile
+infracost       infracost/infracost       bin=infracost
+k3d             k3d-io/k3d
+k9s             derailed/k9s
+kind            kubernetes-sigs/kind
+kompose         kubernetes/kompose
+kops            kubernetes/kops
+krew            kubernetes-sigs/krew
+kubebuilder     kubernetes-sigs/kubebuilder
+kubecolor       kubecolor/kubecolor
+kubeconform     yannh/kubeconform
+kubectx         ahmetb/kubectx
+kubent          doitintl/kube-no-trouble  bin=kubent
+kubeseal        bitnami-labs/sealed-secrets bin=kubeseal
+kubie           sbstp/kubie
+kustomize       kubernetes-sigs/kustomize
+lazydocker      jesseduffield/lazydocker
+minikube        kubernetes/minikube
+nerdctl         containerd/nerdctl
+notation        notaryproject/notation
+opa             open-policy-agent/opa
+opentofu        opentofu/opentofu         bin=tofu
+oras            oras-project/oras
+osv-scanner     google/osv-scanner
+popeye          derailed/popeye
+regctl          regclient/regclient       bin=regctl
+skaffold        GoogleContainerTools/skaffold
+slsa-verifier   slsa-framework/slsa-verifier
+step            smallstep/cli             bin=step
+stern           stern/stern
+stripe          stripe/stripe-cli         bin=stripe
+supabase        supabase/cli              bin=supabase
+syft            anchore/syft
+terraform-docs  terraform-docs/terraform-docs
+terragrunt      gruntwork-io/terragrunt
+tflint          terraform-linters/tflint
+tilt            tilt-dev/tilt
+trivy           aquasecurity/trivy
+vcluster        loft-sh/vcluster
+velero          vmware-tanzu/velero
+
+# ---- networking, proxies and security ------------------------------------
+adguardhome     AdguardTeam/AdGuardHome
+ali             nakabonne/ali
+atac            Julien-cpsn/ATAC
+blocky          0xERR0R/blocky
+bore            ekzhang/bore
+caddy           caddyserver/caddy
+cloudflared     cloudflare/cloudflared
+dnscrypt-proxy  DNSCrypt/dnscrypt-proxy
+dnsx            projectdiscovery/dnsx
+dufs            sigoden/dufs
+evans           ktr0731/evans
+feroxbuster     epi052/feroxbuster
+ffuf            ffuf/ffuf
+frp             fatedier/frp
+ghz             bojand/ghz
+gobuster        OJ/gobuster
+grpcui          fullstorydev/grpcui
+headscale       juanfont/headscale
+hey             rakyll/hey
+katana          projectdiscovery/katana
+lego            go-acme/lego
+miniserve       svenstaro/miniserve
+naabu           projectdiscovery/naabu
+nebula          slackhq/nebula
+nuclei          projectdiscovery/nuclei
+rathole         rapiz1/rathole
+sing-box        SagerNet/sing-box
+subfinder       projectdiscovery/subfinder
+syncthing       syncthing/syncthing
+traefik         traefik/traefik
+wstunnel        erebe/wstunnel
+
+# ---- secrets, encryption and transfer ------------------------------------
+age             FiloSottile/age
+cfssl           cloudflare/cfssl
+croc            schollz/croc
+doppler         DopplerHQ/cli             bin=doppler
+gallery-dl      mikf/gallery-dl           asset.x86_64-linux=gallery-dl.bin asset.x86_64-windows=gallery-dl.exe
+gomplate        hairyhenderson/gomplate
+gopass          gopasspw/gopass
+kopia           kopia/kopia
+mkcert          FiloSottile/mkcert
+oxipng          shssoichiro/oxipng
+rage            str4d/rage
+rbw             doy/rbw
+rclone          rclone/rclone
+rustic          rustic-rs/rustic
+sops            getsops/sops
+yt-dlp          yt-dlp/yt-dlp             asset.x86_64-linux=yt-dlp_linux asset.aarch64-linux=yt-dlp_linux_aarch64 asset.x86_64-macos=yt-dlp_macos asset.aarch64-macos=yt-dlp_macos asset.x86_64-windows=yt-dlp.exe asset.aarch64-windows=yt-dlp_arm64.exe
+
+# ---- GUI apps for macOS --------------------------------------------------
+alacritty       alacritty/alacritty       app=Alacritty.app
+alt-tab         lwouis/alt-tab-macos      kind=app
+amethyst        ianyh/Amethyst            kind=app
+appflowy        AppFlowy-IO/AppFlowy      app=AppFlowy.app
+audacity        audacity/audacity         app=Audacity.app
+brave           brave/brave-browser       app="Brave Browser.app"
+bruno           usebruno/bruno            app=Bruno.app
+cryptomator     cryptomator/cryptomator   app=Cryptomator.app
+dbeaver         dbeaver/dbeaver           app=DBeaver.app
+github-desktop  desktop/desktop           app="GitHub Desktop.app"
+godot           godotengine/godot         kind=app
+hammerspoon     Hammerspoon/hammerspoon   kind=app
+hyper           vercel/hyper              app=Hyper.app
+ice             jordanbaird/Ice           kind=app
+iina            iina/iina                 app=IINA.app
+jan             janhq/jan                 app=Jan.app
+joplin          laurent22/joplin          app=Joplin.app
+kap             wulkano/Kap               app=Kap.app
+keepassxc       keepassxreboot/keepassxc  app=KeePassXC.app
+keka            aonez/Keka                app=Keka.app
+kitty           kovidgoyal/kitty          app=kitty.app
+lapce           lapce/lapce               app=Lapce.app
+localsend       localsend/localsend       app=LocalSend.app
+logseq          logseq/logseq             app=Logseq.app
+loop            MrKai77/Loop              kind=app
+losslesscut     mifi/lossless-cut         app=LosslessCut.app
+maccy           p0deje/Maccy              app=Maccy.app
+monitorcontrol  MonitorControl/MonitorControl app=MonitorControl.app
+motrix          agalwood/Motrix           app=Motrix.app
+neovide         neovide/neovide           app=Neovide.app
+netnewswire     Ranchero-Software/NetNewsWire kind=app
+obs-studio      obsproject/obs-studio     app=OBS.app
+obsidian        obsidianmd/obsidian-releases app=Obsidian.app
+ollama          ollama/ollama             kind=app
+podman-desktop  podman-desktop/podman-desktop app="Podman Desktop.app"
+prism-launcher  PrismLauncher/PrismLauncher kind=app
+pulsar          pulsar-edit/pulsar        app=Pulsar.app
+rancher-desktop rancher-sandbox/rancher-desktop app="Rancher Desktop.app"
+rectangle       rxhanson/Rectangle        app=Rectangle.app
+stats           exelban/stats             app=Stats.app
+tabby           Eugeny/tabby              app=Tabby.app
+transmission    transmission/transmission app=Transmission.app
+ungoogled-chromium ungoogled-software/ungoogled-chromium-macos app=Chromium.app
+vscodium        VSCodium/vscodium         app=VSCodium.app
+wave            wavetermdev/waveterm      app=Wave.app
+whisky          Whisky-App/Whisky         kind=app
+zed             zed-industries/zed        app=Zed.app
+zettlr          Zettlr/Zettlr             app=Zettlr.app
+
+# ---- GUI apps: Linux and Windows builds ----------------------------------
+audacity-portable audacity/audacity         bin=audacity skip=x86_64-macos,aarch64-macos,x86_64-windows,aarch64-windows
+bruno-portable  usebruno/bruno            bin=bruno skip=x86_64-macos,aarch64-macos,x86_64-windows,aarch64-windows
+godot-portable  godotengine/godot         bin=godot skip=x86_64-macos,aarch64-macos,x86_64-windows,aarch64-windows
+localsend-portable localsend/localsend       bin=localsend skip=x86_64-macos,aarch64-macos,x86_64-windows,aarch64-windows
+logseq-portable logseq/logseq             bin=logseq skip=x86_64-macos,aarch64-macos,x86_64-windows,aarch64-windows
+losslesscut-portable mifi/lossless-cut         bin=losslesscut skip=x86_64-macos,aarch64-macos,x86_64-windows,aarch64-windows
+obsidian-portable obsidianmd/obsidian-releases bin=obsidian asset.x86_64-linux=.AppImage asset.aarch64-linux=arm64.AppImage skip=x86_64-macos,aarch64-macos,x86_64-windows,aarch64-windows
+ollama-portable ollama/ollama             bin=ollama skip=x86_64-macos,aarch64-macos
+tabby-portable  Eugeny/tabby              bin=tabby skip=x86_64-macos,aarch64-macos,x86_64-windows,aarch64-windows
+vscodium-portable VSCodium/vscodium         bin=codium skip=x86_64-macos,aarch64-macos,x86_64-windows,aarch64-windows
+zed-portable    zed-industries/zed        bin=zed skip=x86_64-macos,aarch64-macos,x86_64-windows,aarch64-windows

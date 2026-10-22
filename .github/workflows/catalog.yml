@@ -1,0 +1,139 @@
+name: Catalog
+
+# Rebuilds packages/index.json from catalog/sources.txt (the latest GitHub
+# release of every listed project), signs it with the manifest key, checks the
+# result with abv0 itself and commits it when something changed.
+#
+# Needs one repository secret, ABV0_MANIFEST_KEY: the 128-hex-character Ed25519
+# secret key whose public half is keys/manifest.pub. Without it the workflow
+# stops before doing anything; an unsigned catalog is never published.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "Refresh only these packages (comma separated); empty means all"
+        required: false
+        default: ""
+      force:
+        description: "Rebuild even packages whose version is unchanged"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: write
+
+# Two runs writing the same file would race; the later one waits.
+concurrency:
+  group: catalog
+  cancel-in-progress: false
+
+jobs:
+  catalog:
+    name: Rebuild, sign and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Require the signing key
+        env:
+          ABV0_MANIFEST_KEY: ${{ secrets.ABV0_MANIFEST_KEY }}
+        run: |
+          if [ -z "${ABV0_MANIFEST_KEY}" ]; then
+            echo "::error title=Missing secret::ABV0_MANIFEST_KEY is not set. Add the Ed25519 secret key (the counterpart of keys/manifest.pub) as a repository secret. Refusing to publish an unsigned catalog."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+
+      - name: Build the tools and abv0
+        run: zig build install catalog-tool sign-tool -Doptimize=ReleaseSafe
+
+      - name: Week key for the ETag cache
+        id: week
+        run: echo "week=$(date -u +%G-W%V)" >> "${GITHUB_OUTPUT}"
+
+      - name: Restore the ETag cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/catalog-etag
+          key: catalog-etag-${{ steps.week.outputs.week }}-${{ github.run_id }}
+          restore-keys: |
+            catalog-etag-${{ steps.week.outputs.week }}-
+            catalog-etag-
+
+      - name: Build the catalog from upstream releases
+        env:
+          # 1,000 requests an hour per repository, shared with the other
+          # workflows; the builder batches its lookups (GraphQL), sends
+          # If-None-Match, and waits out a rate limit for up to 50 minutes. What
+          # it cannot look at keeps its previous entry ("rate limited (carried
+          # forward)"), which is reported apart from real failures.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_ONLY: ${{ inputs.only }}
+          INPUT_FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          mkdir -p .cache/catalog-etag
+          args=(--sources catalog/sources.txt --manual catalog/manual.json
+                --out packages/index.json --previous packages/index.json
+                --max-wait-min 50 --etag-cache .cache/catalog-etag/etag.json
+                --summary "${RUNNER_TEMP}/catalog-summary.md")
+          if [ -n "${INPUT_ONLY:-}" ]; then args+=(--only "${INPUT_ONLY}"); fi
+          if [ "${INPUT_FORCE:-false}" = "true" ]; then args+=(--force); fi
+          ./zig-out/bin/build-catalog "${args[@]}" | tee "${RUNNER_TEMP}/catalog.log"
+          {
+            if [ -f "${RUNNER_TEMP}/catalog-summary.md" ]; then cat "${RUNNER_TEMP}/catalog-summary.md"; echo; fi
+            echo '#### Builder log (tail)'
+            echo '```'
+            tail -n 120 "${RUNNER_TEMP}/catalog.log"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+          if grep -q '^warning: the GitHub API rate limit stopped' "${RUNNER_TEMP}/catalog.log"; then
+            echo "::warning title=Catalog refresh was rate limited::$(grep -m1 '^warning: the GitHub API rate limit stopped' "${RUNNER_TEMP}/catalog.log")"
+          fi
+
+      - name: Save the ETag cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/catalog-etag
+          key: catalog-etag-${{ steps.week.outputs.week }}-${{ github.run_id }}
+
+      - name: Sign
+        env:
+          ABV0_MANIFEST_KEY: ${{ secrets.ABV0_MANIFEST_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          key="${RUNNER_TEMP}/manifest.key"
+          trap 'shred -u "${key}" 2>/dev/null || rm -f "${key}"' EXIT
+          printf '%s\n' "${ABV0_MANIFEST_KEY}" > "${key}"
+          ./zig-out/bin/sign-manifest sign "${key}" packages/index.json
+          # The key must be the one abv0 trusts, or no client could install from this catalog.
+          ./zig-out/bin/sign-manifest verify keys/manifest.pub packages/index.json
+
+      - name: Smoke test with abv0
+        run: |
+          set -euo pipefail
+          # Loads the manifest the way users do, which checks the signature against keys/manifest.pub.
+          HOME="$(mktemp -d)" ./zig-out/bin/abv0 --registry packages/index.json list | tail -n 5
+
+      - name: Commit and push if changed
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- packages/index.json packages/index.json.sig; then
+            echo "Catalog unchanged; nothing to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packages/index.json packages/index.json.sig
+          git commit -m "chore(catalog): refresh packages from upstream releases"
+          git push

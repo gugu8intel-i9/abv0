@@ -3,3 +3,5 @@ zig-out/
 *.tmp
 *.tar.xz
 *.tar.gz
+# Private signing keys must never be committed (public keys live in keys/).
+*.key

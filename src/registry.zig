@@ -16,8 +16,67 @@ const std = @import("std");
 const safepath = @import("safepath.zig");
 const platform_mod = @import("platform.zig");
 const bloom = @import("bloom.zig");
+const net = @import("net.zig");
 
 pub const sha256_skip = "SKIP";
+
+/// Executable names abv0 must never expose on PATH. Installing a package that
+/// ships one of these would shadow the shell, the privilege tools, or abv0
+/// itself the next time a user runs them.
+const reserved_bin_names = [_][]const u8{
+    "abv0", "sudo",  "su",     "doas",   "ssh",        "sh",   "bash", "zsh", "fish",
+    "env",  "login", "passwd", "pkexec", "powershell", "pwsh", "cmd",
+};
+
+/// True when `name` is one of the reserved executable names. The comparison
+/// ignores case, and a trailing `.exe` is ignored too, so `SUDO.exe` and
+/// `abv0.exe` are reserved as well.
+pub fn isReservedBinName(name: []const u8) bool {
+    var base = name;
+    if (base.len > 4 and std.ascii.eqlIgnoreCase(base[base.len - 4 ..], ".exe")) {
+        base = base[0 .. base.len - 4];
+    }
+    for (reserved_bin_names) |reserved| {
+        if (std.ascii.eqlIgnoreCase(base, reserved)) return true;
+    }
+    return false;
+}
+
+/// A manifest URL is only usable over https. Prevents a manifest pointing at
+/// file:// or a plaintext http mirror that an on-path attacker can rewrite.
+/// Shares the downloader's check, so a URL is never admitted here and then
+/// refused at download time.
+pub const isSafeUrl = net.isSafeUrl;
+
+/// A single executable name: a valid id that is not reserved.
+pub fn isUsableBinName(name: []const u8) bool {
+    return safepath.isValidId(name) and !isReservedBinName(name);
+}
+
+/// Checks applied to one platform entry. Shared by the JSON loader and the
+/// binary index loader so both admit exactly the same platforms.
+pub fn isUsablePlatform(name: []const u8, url: []const u8, bin_path: []const u8) bool {
+    if (!safepath.isValidId(name)) return false;
+    if (!isSafeUrl(url)) return false;
+    if (bin_path.len != 0 and !safepath.isSafeRelPath(bin_path)) return false;
+    return true;
+}
+
+/// Package-level checks shared by the JSON loader and the binary index loader.
+pub fn isUsablePackage(pkg: Package) bool {
+    if (!safepath.isValidId(pkg.name)) return false;
+    if (!safepath.isValidId(pkg.version)) return false;
+    for (pkg.bin) |b| {
+        if (!isUsableBinName(b)) return false;
+    }
+    for (pkg.app_bundles) |a| {
+        if (!safepath.isSafeRelPath(a)) return false;
+    }
+    for (pkg.deps) |d| {
+        if (!safepath.isValidId(d)) return false;
+    }
+    return true;
+}
 
 pub const PlatformInfo = struct {
     name: []const u8 = "",
@@ -84,6 +143,10 @@ pub const Registry = struct {
     packages: []Package = &.{},
     /// How many manifest entries were rejected during load.
     rejected: usize = 0,
+    /// Executable name -> package, sorted by name. Built by `buildBinIndex`
+    /// and owned by `arena`. Null means no table was built, and `findByBin`
+    /// falls back to a linear scan.
+    bin_index: ?[]const BinEntry = null,
 
     pub fn deinit(self: *Registry) void {
         if (self.arena) |a| {
@@ -96,6 +159,7 @@ pub const Registry = struct {
             self.mapped = null;
         }
         self.packages = &.{};
+        self.bin_index = null;
     }
 
     pub fn count(self: *const Registry) usize {
@@ -107,8 +171,26 @@ pub const Registry = struct {
         return self.packages[idx];
     }
 
-    /// Find whichever package ships an executable called `bin_name`.
+    /// Find whichever package ships an executable called `bin_name`. When more
+    /// than one package ships it, the one earliest in `packages` wins, which is
+    /// the answer a linear scan gives.
     pub fn findByBin(self: *const Registry, bin_name: []const u8) ?Package {
+        const table = self.bin_index orelse return self.findByBinScan(bin_name);
+        var lo: usize = 0;
+        var hi: usize = table.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (std.mem.order(u8, table[mid].bin, bin_name) == .lt) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        if (lo == table.len or !std.mem.eql(u8, table[lo].bin, bin_name)) return null;
+        return self.packages[table[lo].pkg];
+    }
+
+    fn findByBinScan(self: *const Registry, bin_name: []const u8) ?Package {
         for (self.packages) |p| {
             if (p.providesBin(bin_name)) return p;
         }
@@ -123,6 +205,42 @@ pub const Registry = struct {
         return .{ .allocator = allocator, .arena = arena };
     }
 };
+
+// ---------------------------------------------------------------------------
+// Bin lookup table
+// ---------------------------------------------------------------------------
+
+/// One executable name and the package that ships it. See `buildBinIndex`.
+pub const BinEntry = struct {
+    bin: []const u8,
+    /// Position in `Registry.packages`.
+    pkg: usize,
+};
+
+fn lessThanBinEntry(_: void, a: BinEntry, b: BinEntry) bool {
+    const ord = std.mem.order(u8, a.bin, b.bin);
+    if (ord != .eq) return ord == .lt;
+    return a.pkg < b.pkg;
+}
+
+/// Builds the bin-name table for `packages`, which must be sorted by name.
+/// Entries are ordered by bin name and then by package position, so the first
+/// entry for any name points at the package a linear scan would return.
+pub fn buildBinIndex(allocator: std.mem.Allocator, packages: []const Package) ![]BinEntry {
+    var total: usize = 0;
+    for (packages) |p| total += p.bin.len;
+
+    const table = try allocator.alloc(BinEntry, total);
+    var k: usize = 0;
+    for (packages, 0..) |p, i| {
+        for (p.bin) |b| {
+            table[k] = .{ .bin = b, .pkg = i };
+            k += 1;
+        }
+    }
+    std.mem.sort(BinEntry, table, {}, lessThanBinEntry);
+    return table;
+}
 
 // ---------------------------------------------------------------------------
 // JSON loading
@@ -176,19 +294,66 @@ pub fn loadFromJsonFile(
     path: []const u8,
     diags: ?*LoadDiagnostics,
 ) !Registry {
-    var reg = try Registry.initArena(allocator);
+    var manifest = try Manifest.read(allocator, path);
+    errdefer manifest.deinit();
+    return loadManifest(&manifest, diags);
+}
+
+/// An `index.json` read into memory once. The bytes live in an arena that
+/// becomes the Registry's arena when `loadManifest` succeeds, so every string
+/// the Registry hands out stays valid for the Registry's lifetime.
+pub const Manifest = struct {
+    allocator: std.mem.Allocator,
+    arena: ?*std.heap.ArenaAllocator,
+    bytes: []const u8,
+    mtime_ns: i64,
+
+    pub fn read(allocator: std.mem.Allocator, path: []const u8) !Manifest {
+        const arena = try allocator.create(std.heap.ArenaAllocator);
+        arena.* = std.heap.ArenaAllocator.init(allocator);
+        errdefer {
+            arena.deinit();
+            allocator.destroy(arena);
+        }
+
+        const file = try std.fs.cwd().openFile(path, .{});
+        defer file.close();
+        const st = try file.stat();
+
+        const bytes = try file.readToEndAlloc(arena.allocator(), 16 * 1024 * 1024);
+        if (bytes.len == 0) return error.EmptyManifest;
+
+        return .{
+            .allocator = allocator,
+            .arena = arena,
+            .bytes = bytes,
+            .mtime_ns = @truncate(st.mtime),
+        };
+    }
+
+    /// Frees the bytes if they never reached a Registry. Safe to call after
+    /// `loadManifest`, which leaves the Manifest empty.
+    pub fn deinit(self: *Manifest) void {
+        if (self.arena) |a| {
+            a.deinit();
+            self.allocator.destroy(a);
+            self.arena = null;
+        }
+    }
+};
+
+/// Parse a manifest that `Manifest.read` has already loaded. On success the
+/// Registry takes over the manifest's arena and `m` is left empty.
+pub fn loadManifest(m: *Manifest, diags: ?*LoadDiagnostics) !Registry {
+    const arena_state = m.arena orelse return error.ManifestConsumed;
+    var reg = Registry{ .allocator = m.allocator, .arena = arena_state };
+    m.arena = null;
     errdefer reg.deinit();
-    const arena = reg.arena.?.allocator();
+    const arena = arena_state.allocator();
 
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-
-    const content = try file.readToEndAlloc(arena, 16 * 1024 * 1024);
-    if (content.len == 0) return error.EmptyManifest;
-
-    // Leaky parse into our arena: string values alias `content`, which the
+    // Leaky parse into our arena: string values alias `m.bytes`, which the
     // arena also owns, so nothing is copied twice.
-    const root_value = std.json.parseFromSliceLeaky(std.json.Value, arena, content, .{}) catch {
+    const root_value = std.json.parseFromSliceLeaky(std.json.Value, arena, m.bytes, .{}) catch {
         return error.MalformedManifest;
     };
 
@@ -205,6 +370,10 @@ pub fn loadFromJsonFile(
 
     var list = try std.ArrayList(Package).initCapacity(arena, packages_obj.count());
     var rejected: usize = 0;
+
+    // Names already admitted. See admitUnique.
+    var seen = std.StringHashMap(void).init(m.allocator);
+    defer seen.deinit();
 
     var it = packages_obj.iterator();
     while (it.next()) |entry| {
@@ -224,6 +393,15 @@ pub fn loadFromJsonFile(
             }
             continue;
         };
+
+        const admitted = try admitUnique(&seen, pkg);
+        if (!admitted) {
+            rejected += 1;
+            if (diags) |d| {
+                if (d.first_error == null) d.first_error = key;
+            }
+            continue;
+        }
         try list.append(pkg);
     }
 
@@ -231,9 +409,19 @@ pub fn loadFromJsonFile(
     std.mem.sort(Package, pkgs, {}, lessThanByName);
 
     reg.packages = pkgs;
+    reg.bin_index = try buildBinIndex(arena, pkgs);
     reg.rejected = rejected;
     if (diags) |d| d.rejected_packages = rejected;
     return reg;
+}
+
+/// Records `pkg.name` in `seen`. Returns false, leaving `seen` unchanged, when
+/// the name was already admitted. The first package to claim a name wins, so
+/// a later duplicate can never shadow it.
+pub fn admitUnique(seen: *std.StringHashMap(void), pkg: Package) !bool {
+    if (seen.contains(pkg.name)) return false;
+    try seen.put(pkg.name, {});
+    return true;
 }
 
 fn parsePackage(
@@ -243,6 +431,9 @@ fn parsePackage(
 ) !Package {
     const name = getStringOr(obj, "name", key);
     if (!safepath.isValidId(name)) return error.InvalidPackageName;
+    // The key is what `index.json` says the package is called. A body that
+    // claims a different name is either a mistake or an attempt to impersonate.
+    if (!std.mem.eql(u8, name, key)) return error.NameKeyMismatch;
 
     const version = getStringOr(obj, "version", "0.0.0");
     if (!safepath.isValidId(version)) return error.InvalidPackageVersion;
@@ -265,13 +456,10 @@ fn parsePackage(
         };
 
         const url = getStringOr(pobj, "url", "");
-        // Only https. Prevents a manifest pointing at file:// or a plaintext
-        // http mirror that an on-path attacker can rewrite.
-        if (!std.mem.startsWith(u8, url, "https://")) continue;
-
+        // Only https; see isSafeUrl. Unusable platforms are skipped, not fatal.
         const bin_path = getStringOr(pobj, "bin_path", "");
         // THE v1.5.0 FIX THAT WAS NEVER ACTUALLY APPLIED.
-        if (bin_path.len != 0 and !safepath.isSafeRelPath(bin_path)) continue;
+        if (!isUsablePlatform(plat_name, url, bin_path)) continue;
 
         const archive_type = getStringOr(pobj, "archive_type", "raw");
         const sha256 = getStringOr(pobj, "sha256", "");
@@ -288,7 +476,9 @@ fn parsePackage(
 
     const bin = try getStringArray(arena, obj, "bin");
     for (bin) |b| {
-        if (!safepath.isValidId(b)) return error.InvalidBinaryName;
+        // Reserved names (shells, privilege tools, abv0 itself) are refused
+        // here so they can never reach PATH through a manifest.
+        if (!isUsableBinName(b)) return error.InvalidBinaryName;
     }
 
     const app_bundles = try getStringArray(arena, obj, "app_bundles");
@@ -318,8 +508,13 @@ fn parsePackage(
 // Dependency resolution
 // ---------------------------------------------------------------------------
 
+/// Deepest dependency chain `resolveOrder` will follow. Real trees are a few
+/// levels deep; the limit exists so a hostile manifest cannot exhaust the stack.
+pub const max_dependency_depth = 64;
+
 pub const ResolveError = error{
     DependencyCycle,
+    DependencyTooDeep,
     UnknownDependency,
     OutOfMemory,
 };
@@ -347,7 +542,7 @@ pub fn resolveOrder(
     var filter = bloom.Default.init();
 
     for (roots) |root| {
-        try visit(reg, root, &ordered, &done, &on_stack, &filter);
+        try visit(reg, root, 0, &ordered, &done, &on_stack, &filter);
     }
     return ordered.toOwnedSlice();
 }
@@ -355,12 +550,17 @@ pub fn resolveOrder(
 fn visit(
     reg: *const Registry,
     name: []const u8,
+    depth: usize,
     ordered: *std.ArrayList(Package),
     done: *std.StringHashMap(void),
     on_stack: *std.StringHashMap(void),
     filter: *bloom.Default,
 ) ResolveError!void {
     if (done.contains(name)) return;
+
+    // Each level of recursion costs a stack frame. A chain longer than the
+    // limit is refused instead of being followed to exhaustion.
+    if (depth >= max_dependency_depth) return error.DependencyTooDeep;
 
     // Fast path: the filter says this name was never pushed, so it cannot be
     // on the stack and we skip the hash lookup entirely.
@@ -374,7 +574,7 @@ fn visit(
     filter.insert(name);
 
     for (pkg.deps) |dep| {
-        try visit(reg, dep, ordered, done, on_stack, filter);
+        try visit(reg, dep, depth + 1, ordered, done, on_stack, filter);
     }
 
     _ = on_stack.remove(name);
@@ -608,4 +808,216 @@ test "findByBin maps an executable back to its package" {
 
     try testing.expectEqualStrings("ripgrep", reg.findByBin("rg").?.name);
     try testing.expectEqualStrings("rg", reg.get("ripgrep").?.primaryBin().?);
+}
+
+test "a package whose name duplicates an admitted name is rejected" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // A parsed JSON object cannot hold one key twice, so the admitted-name
+    // set is what stops two entries claiming the same name.
+    var seen = std.StringHashMap(void).init(testing.allocator);
+    defer seen.deinit();
+
+    const first = Package{ .name = "jq", .version = "1.7.1" };
+    const second = Package{ .name = try arena.dupe(u8, "jq"), .version = "9.9.9" };
+    try testing.expect(try admitUnique(&seen, first));
+    try testing.expect(!(try admitUnique(&seen, second)));
+    try testing.expect(try admitUnique(&seen, .{ .name = "rg", .version = "14.1.0" }));
+}
+
+test "a name that differs from its JSON key is rejected" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const p = try writeTempJson(&tmp, "mismatch.json",
+        \\{"packages":{
+        \\ "jq":{"name":"ripgrep","version":"1.0","bin":["rg"],
+        \\   "platforms":{"x86_64-linux":{"url":"https://e.com/x","sha256":"SKIP","archive_type":"raw","bin_path":"x"}}},
+        \\ "good":{"name":"good","version":"1.0","bin":["g"],
+        \\   "platforms":{"x86_64-linux":{"url":"https://e.com/g","sha256":"SKIP","archive_type":"raw","bin_path":"g"}}}
+        \\}}
+    );
+    defer testing.allocator.free(p);
+
+    var reg = try loadFromJsonFile(testing.allocator, p, null);
+    defer reg.deinit();
+
+    try testing.expect(reg.get("ripgrep") == null);
+    try testing.expect(reg.get("jq") == null);
+    try testing.expect(reg.get("good") != null);
+    try testing.expectEqual(@as(usize, 1), reg.rejected);
+}
+
+test "reserved binary names are refused case-insensitively, with or without .exe" {
+    try testing.expect(isReservedBinName("abv0"));
+    try testing.expect(isReservedBinName("abv0.exe"));
+    try testing.expect(isReservedBinName("SUDO.exe"));
+    try testing.expect(isReservedBinName("Bash"));
+    try testing.expect(isReservedBinName("pwsh.EXE"));
+    try testing.expect(!isReservedBinName("rg"));
+    try testing.expect(!isReservedBinName("sudoers"));
+    try testing.expect(!isReservedBinName("sudo.exe.bak"));
+    try testing.expect(!isReservedBinName(".exe"));
+}
+
+test "packages shipping a reserved binary name are rejected" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const p = try writeTempJson(&tmp, "reserved.json",
+        \\{"packages":{
+        \\ "evil1":{"name":"evil1","version":"1.0","bin":["abv0"],
+        \\   "platforms":{"x86_64-linux":{"url":"https://e.com/a","sha256":"SKIP","archive_type":"raw","bin_path":"a"}}},
+        \\ "evil2":{"name":"evil2","version":"1.0","bin":["rg","SUDO.exe"],
+        \\   "platforms":{"x86_64-linux":{"url":"https://e.com/b","sha256":"SKIP","archive_type":"raw","bin_path":"b"}}},
+        \\ "ripgrep":{"name":"ripgrep","version":"14.1.0","bin":["rg"],
+        \\   "platforms":{"x86_64-linux":{"url":"https://e.com/c","sha256":"SKIP","archive_type":"raw","bin_path":"c"}}}
+        \\}}
+    );
+    defer testing.allocator.free(p);
+
+    var reg = try loadFromJsonFile(testing.allocator, p, null);
+    defer reg.deinit();
+
+    try testing.expect(reg.get("evil1") == null);
+    try testing.expect(reg.get("evil2") == null);
+    try testing.expect(reg.findByBin("abv0") == null);
+    try testing.expect(reg.get("ripgrep") != null);
+    try testing.expectEqual(@as(usize, 2), reg.rejected);
+}
+
+/// Builds `count` packages p000 -> p001 -> ... where each depends on the next.
+fn chainRegistry(arena: std.mem.Allocator, count: usize) !Registry {
+    var list = std.ArrayList(Package).init(arena);
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        const name = try std.fmt.allocPrint(arena, "p{d:0>3}", .{i});
+        const deps: []const []const u8 = if (i + 1 < count)
+            try arena.dupe([]const u8, &.{try std.fmt.allocPrint(arena, "p{d:0>3}", .{i + 1})})
+        else
+            &.{};
+        try list.append(.{ .name = name, .version = "1.0", .deps = deps });
+    }
+    const pkgs = try list.toOwnedSlice();
+    std.mem.sort(Package, pkgs, {}, lessThanByName);
+    return Registry{ .allocator = testing.allocator, .packages = pkgs };
+}
+
+test "a dependency chain deeper than the limit errors instead of crashing" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    var reg = try chainRegistry(arena_state.allocator(), 100);
+    try testing.expectError(error.DependencyTooDeep, resolveOrder(testing.allocator, &reg, &.{"p000"}));
+}
+
+test "resolveOrder still accepts a chain just inside the depth limit" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const count = max_dependency_depth;
+    var reg = try chainRegistry(arena_state.allocator(), count);
+    const order = try resolveOrder(testing.allocator, &reg, &.{"p000"});
+    defer testing.allocator.free(order);
+    try testing.expectEqual(count, order.len);
+}
+
+test "findByBin finds the right package among many, and the earliest package wins a shared name" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Names are generated in ascending order, so the list is already sorted.
+    const count: usize = 2000;
+    var list = std.ArrayList(Package).init(arena);
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        const name = try std.fmt.allocPrint(arena, "pkg{d:0>5}", .{i});
+        const bin = try std.fmt.allocPrint(arena, "bin{d:0>5}", .{i});
+        const bins: []const []const u8 = if (i == 700 or i == 1500)
+            try arena.dupe([]const u8, &.{ bin, "shared" })
+        else
+            try arena.dupe([]const u8, &.{bin});
+        try list.append(.{ .name = name, .version = "1.0", .bin = bins });
+    }
+    const pkgs = try list.toOwnedSlice();
+    var reg = Registry{ .allocator = testing.allocator, .packages = pkgs };
+    reg.bin_index = try buildBinIndex(arena, pkgs);
+
+    i = 0;
+    while (i < count) : (i += 1) {
+        const bin = try std.fmt.allocPrint(arena, "bin{d:0>5}", .{i});
+        const want = try std.fmt.allocPrint(arena, "pkg{d:0>5}", .{i});
+        try testing.expectEqualStrings(want, reg.findByBin(bin).?.name);
+    }
+
+    // Both 700 and 1500 ship "shared"; the earlier package must win, exactly as
+    // the linear scan does.
+    try testing.expectEqualStrings("pkg00700", reg.findByBin("shared").?.name);
+    try testing.expectEqualStrings(reg.findByBinScan("shared").?.name, reg.findByBin("shared").?.name);
+
+    // Misses: absent, a prefix of a real name, and values before and after the
+    // whole table.
+    try testing.expect(reg.findByBin("nope") == null);
+    try testing.expect(reg.findByBin("bin0") == null);
+    try testing.expect(reg.findByBin("bin99999") == null);
+    try testing.expect(reg.findByBin("aaa") == null);
+    try testing.expect(reg.findByBin("zzz") == null);
+}
+
+test "findByBin without a bin table falls back to a scan" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const pkgs = try arena_state.allocator().dupe(Package, &.{
+        .{ .name = "a", .version = "1.0", .bin = &.{"alpha"} },
+        .{ .name = "b", .version = "1.0", .bin = &.{ "beta", "alpha" } },
+    });
+    const reg = Registry{ .allocator = testing.allocator, .packages = pkgs };
+    try testing.expect(reg.bin_index == null);
+    try testing.expectEqualStrings("a", reg.findByBin("alpha").?.name);
+    try testing.expectEqualStrings("b", reg.findByBin("beta").?.name);
+    try testing.expect(reg.findByBin("gamma") == null);
+}
+
+test "loadFromJsonFile builds the bin table" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const p = try writeTempJson(&tmp, "index.json",
+        \\{"packages":{
+        \\ "ripgrep":{"name":"ripgrep","version":"14.1.0","bin":["rg"],
+        \\   "platforms":{"x86_64-linux":{"url":"https://e.com/rg","sha256":"SKIP","archive_type":"raw","bin_path":"rg"}}},
+        \\ "jq":{"name":"jq","version":"1.7.1","bin":["jq","jqx"],
+        \\   "platforms":{"x86_64-linux":{"url":"https://e.com/jq","sha256":"SKIP","archive_type":"raw","bin_path":"jq"}}}
+        \\}}
+    );
+    defer testing.allocator.free(p);
+
+    var reg = try loadFromJsonFile(testing.allocator, p, null);
+    defer reg.deinit();
+
+    try testing.expect(reg.bin_index != null);
+    try testing.expectEqualStrings("ripgrep", reg.findByBin("rg").?.name);
+    try testing.expectEqualStrings("jq", reg.findByBin("jqx").?.name);
+    try testing.expect(reg.findByBin("ripgrep") == null);
+}
+
+test "a manifest read once is parsed, and is empty afterwards" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const p = try writeTempJson(&tmp, "index.json",
+        \\{"packages":{
+        \\ "jq":{"name":"jq","version":"1.7.1","bin":["jq"],
+        \\   "platforms":{"x86_64-linux":{"url":"https://e.com/jq","sha256":"SKIP","archive_type":"raw","bin_path":"jq"}}}
+        \\}}
+    );
+    defer testing.allocator.free(p);
+
+    var m = try Manifest.read(testing.allocator, p);
+    defer m.deinit();
+    try testing.expect(m.bytes.len > 0);
+
+    var reg = try loadManifest(&m, null);
+    defer reg.deinit();
+    try testing.expect(m.arena == null);
+    try testing.expectError(error.ManifestConsumed, loadManifest(&m, null));
+    try testing.expectEqualStrings("jq", reg.get("jq").?.name);
+    try testing.expectEqualStrings("1.7.1", reg.get("jq").?.version);
 }

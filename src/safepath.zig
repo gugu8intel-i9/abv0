@@ -63,6 +63,10 @@ pub fn isSafeRelPath(p: []const u8) bool {
 /// True when `target` (the destination of a symlink stored at `link_dir_rel`)
 /// stays inside the extraction root. Symlinks are the standard way to escape a
 /// tar sandbox even when every member name looks safe.
+///
+/// This reads the target text only. It cannot see links that earlier members
+/// put on disk, so `a/l/..` passes here even after `a/l -> ..` was extracted.
+/// The archive extractor checks the filesystem as well.
 pub fn symlinkStaysInside(link_dir_rel: []const u8, target: []const u8) bool {
     if (target.len == 0) return false;
     if (std.mem.indexOfScalar(u8, target, 0) != null) return false;
@@ -151,6 +155,12 @@ test "symlinkStaysInside permits internal links and blocks escapes" {
     try std.testing.expect(!symlinkStaysInside("", "../x"));
     try std.testing.expect(!symlinkStaysInside("bin", "/etc/passwd"));
     try std.testing.expect(!symlinkStaysInside("bin", "C:\\evil"));
+}
+
+test "symlinkStaysInside is textual, so chains need the filesystem check" {
+    // Only correct when `a/l` is a real directory. If an earlier member made
+    // `a/l` a link to "..", this target leaves the root.
+    try std.testing.expect(symlinkStaysInside("", "a/l/.."));
 }
 
 test "joinSafe refuses to build an escaping path" {

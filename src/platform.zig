@@ -57,6 +57,66 @@ pub fn envOwned(allocator: std.mem.Allocator, key: []const u8) ?[]u8 {
     return std.process.getEnvVarOwned(allocator, key) catch null;
 }
 
+// ---------------------------------------------------------------------------
+// ABV0_* path overrides
+// ---------------------------------------------------------------------------
+
+/// Accepts an `ABV0_HOME`, `ABV0_BIN_DIR` or `ABV0_REGISTRY_DIR` value only
+/// when it is an absolute path with no NUL or line breaks. Anything else is
+/// ignored, so the default under ~/.abv0 is used instead.
+pub fn acceptAbsolutePath(value: []const u8) ?[]const u8 {
+    if (value.len == 0) return null;
+    if (std.mem.indexOfAny(u8, value, "\x00\r\n") != null) return null;
+    if (!std.fs.path.isAbsolute(value)) return null;
+    return value;
+}
+
+fn envAbsolutePath(allocator: std.mem.Allocator, key: []const u8) ?[]u8 {
+    const raw = envOwned(allocator, key) orelse return null;
+    if (acceptAbsolutePath(raw) == null) {
+        allocator.free(raw);
+        return null;
+    }
+    return raw;
+}
+
+/// Root of the abv0 tree from `ABV0_HOME`, replacing `<home>/.abv0`.
+/// Caller frees the result.
+pub fn homeOverride(allocator: std.mem.Allocator) ?[]u8 {
+    return envAbsolutePath(allocator, "ABV0_HOME");
+}
+
+/// Bin directory from `ABV0_BIN_DIR`, replacing `<root>/bin`.
+/// Caller frees the result.
+pub fn binDirOverride(allocator: std.mem.Allocator) ?[]u8 {
+    return envAbsolutePath(allocator, "ABV0_BIN_DIR");
+}
+
+/// Registry directory from `ABV0_REGISTRY_DIR`, replacing `<root>/registry`.
+/// Caller frees the result.
+pub fn registryDirOverride(allocator: std.mem.Allocator) ?[]u8 {
+    return envAbsolutePath(allocator, "ABV0_REGISTRY_DIR");
+}
+
+/// Only https manifest URLs are accepted; a plain http or file URL is ignored.
+fn acceptRegistryUrl(url: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, url, "https://")) return null;
+    if (std.mem.indexOfAny(u8, url, "\x00\r\n") != null) return null;
+    return url;
+}
+
+/// Backing store for `registryUrlOverride`. The returned slice must outlive
+/// the call, and no allocator is passed in, so it lives in static memory.
+var registry_url_buf: [2048]u8 = undefined;
+
+/// Manifest URL from `ABV0_REGISTRY_URL`, if set to an https URL that fits in
+/// 2 KiB. The result points into static storage and is never freed.
+pub fn registryUrlOverride() ?[]const u8 {
+    var fba = std.heap.FixedBufferAllocator.init(&registry_url_buf);
+    const raw = std.process.getEnvVarOwned(fba.allocator(), "ABV0_REGISTRY_URL") catch return null;
+    return acceptRegistryUrl(raw);
+}
+
 /// The interactive shell to spawn for `abv0 shell`.
 pub fn defaultShell(allocator: std.mem.Allocator) ![]u8 {
     if (is_windows) {
@@ -137,6 +197,46 @@ pub fn makeSecureDir(path: []const u8) !void {
     chmodPath(path, 0o700);
 }
 
+/// `makeSecureDir` for directories touched on every run. The chmod is only
+/// paid when the directory is missing or does not already have mode 0700.
+pub fn ensureSecureDir(path: []const u8) !void {
+    if (comptime is_posix) {
+        if (std.fs.cwd().statFile(path)) |st| {
+            if (st.kind == .directory and (st.mode & 0o777) == 0o700) return;
+        } else |_| {}
+    }
+    try makeSecureDir(path);
+}
+
+/// True when anything exists at `path`, including a dangling symlink.
+pub fn pathExists(path: []const u8) bool {
+    if (std.fs.cwd().statFile(path)) |_| return true else |_| {}
+    if (comptime is_posix) {
+        var buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+        if (std.posix.readlink(path, &buf)) |_| return true else |e| return e != error.FileNotFound;
+    }
+    return false;
+}
+
+extern "c" fn getpid() c_int;
+
+/// Id of the current process, embedded in ephemeral directory names so that
+/// cleanup can tell whether the owner is still running. 0 on Windows.
+pub fn processId() i32 {
+    if (comptime is_windows) return 0;
+    if (comptime builtin.os.tag == .linux) return std.os.linux.getpid();
+    return getpid();
+}
+
+/// Whether process `pid` exists. Unclear answers (such as EPERM) count as
+/// alive, so a live process's directory is never reclaimed by mistake.
+pub fn processAlive(pid: i32) bool {
+    if (comptime is_posix) {
+        std.posix.kill(pid, 0) catch |e| return e != error.ProcessNotFound;
+    }
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Fast linking
 // ---------------------------------------------------------------------------
@@ -168,6 +268,31 @@ extern "kernel32" fn CreateHardLinkW(
     lpSecurityAttributes: ?*anyopaque,
 ) callconv(windows.WINAPI) windows.BOOL;
 
+/// Link an installed program into the bin directory. On Linux and macOS
+/// this is a symbolic link, as Homebrew does: a program that finds its own
+/// data relative to its executable (cmake's modules, a toolchain's lib/)
+/// resolves the link back into the store, which a hard link or a copy would
+/// not. Falls back to `fastLink` where a symlink cannot be made. Windows
+/// uses launcher shims instead and never reaches this.
+pub fn linkProgram(src_path: []const u8, dst_path: []const u8) !LinkKind {
+    if (is_windows) return fastLink(src_path, dst_path);
+    if (src_path.len >= std.fs.MAX_PATH_BYTES or dst_path.len >= std.fs.MAX_PATH_BYTES)
+        return error.NameTooLong;
+    std.fs.cwd().deleteFile(dst_path) catch |e| switch (e) {
+        error.FileNotFound => {},
+        error.IsDir => return error.DestinationIsDirectory,
+        else => {},
+    };
+    // A relative target would resolve against the bin directory, not ours.
+    var buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+    const target = if (std.fs.path.isAbsolute(src_path))
+        src_path
+    else
+        std.fs.cwd().realpath(src_path, &buf) catch return fastLink(src_path, dst_path);
+    if (std.posix.symlink(target, dst_path)) |_| return .symlinked else |_| {}
+    return fastLink(src_path, dst_path);
+}
+
 /// Link `src` to `dst` using the cheapest mechanism the platform offers.
 ///
 /// Unlike the original, this allocates nothing: the old implementation spun up
@@ -177,10 +302,11 @@ pub fn fastLink(src_path: []const u8, dst_path: []const u8) !LinkKind {
     if (src_path.len >= std.fs.MAX_PATH_BYTES or dst_path.len >= std.fs.MAX_PATH_BYTES)
         return error.NameTooLong;
 
-    // Every strategy below requires the destination to be absent.
+    // Every strategy below requires the destination to be absent. A directory
+    // here is never removed recursively on the caller's behalf.
     std.fs.cwd().deleteFile(dst_path) catch |e| switch (e) {
         error.FileNotFound => {},
-        error.IsDir => std.fs.cwd().deleteTree(dst_path) catch {},
+        error.IsDir => return error.DestinationIsDirectory,
         else => {},
     };
 
@@ -352,6 +478,25 @@ test "isKnownPlatformTag rejects junk" {
     try std.testing.expect(isKnownPlatformTag("x86_64-linux"));
 }
 
+test "absolute ABV0_* override is applied" {
+    const abs = if (is_windows) "C:\\abv0-test" else "/opt/abv0-test";
+    try std.testing.expectEqualStrings(abs, acceptAbsolutePath(abs).?);
+}
+
+test "relative, empty and malformed ABV0_* overrides are ignored" {
+    try std.testing.expect(acceptAbsolutePath("relative/dir") == null);
+    try std.testing.expect(acceptAbsolutePath("") == null);
+    try std.testing.expect(acceptAbsolutePath("/opt/abv0\nevil") == null);
+    try std.testing.expect(acceptAbsolutePath("/opt/abv0\x00evil") == null);
+}
+
+test "ABV0_REGISTRY_URL accepts only https" {
+    try std.testing.expectEqualStrings("https://example.com/index.json", acceptRegistryUrl("https://example.com/index.json").?);
+    try std.testing.expect(acceptRegistryUrl("http://example.com/index.json") == null);
+    try std.testing.expect(acceptRegistryUrl("file:///etc/passwd") == null);
+    try std.testing.expect(acceptRegistryUrl("https://example.com/\nx") == null);
+}
+
 test "fastLink produces a usable destination and is idempotent" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -396,4 +541,23 @@ test "MappedFile round-trips file contents" {
     var mf = try MappedFile.open(std.testing.allocator, p);
     defer mf.deinit();
     try std.testing.expectEqualStrings("mapped-content", mf.bytes);
+}
+
+test "linkProgram symlinks to an absolute target off Windows" {
+    if (is_windows) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makePath("store/bin");
+    try tmp.dir.makePath("bin");
+    try tmp.dir.writeFile(.{ .sub_path = "store/bin/tool", .data = "x" });
+    var root_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+    const root = try tmp.dir.realpath(".", &root_buf);
+    var src_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+    var dst_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+    const src = try std.fmt.bufPrint(&src_buf, "{s}/store/bin/tool", .{root});
+    const dst = try std.fmt.bufPrint(&dst_buf, "{s}/bin/tool", .{root});
+    try tmp.dir.writeFile(.{ .sub_path = "bin/tool", .data = "old" });
+    try std.testing.expectEqual(LinkKind.symlinked, try linkProgram(src, dst));
+    var link_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+    try std.testing.expectEqualStrings(src, try tmp.dir.readLink("bin/tool", &link_buf));
 }

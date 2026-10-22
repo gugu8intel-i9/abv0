@@ -18,8 +18,14 @@ $RegDir  = Join-Path $Root 'registry'
 
 function Die($msg) { Write-Error "error: $msg"; exit 1 }
 
-# TLS 1.2 is not the default on older PowerShell hosts.
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+# Allow TLS 1.2 and 1.3. TLS 1.2 is not the default on older PowerShell hosts,
+# and the Tls13 enum member is missing on runtimes that predate it, so fall
+# back to Tls12 alone in that case.
+if ([Enum]::GetNames([Net.SecurityProtocolType]) -contains 'Tls13') {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
+} else {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+}
 
 switch ($env:PROCESSOR_ARCHITECTURE) {
     'AMD64' { $Target = 'abv0-windows-x86_64.exe' }
@@ -73,13 +79,24 @@ try {
 
     Move-Item -Force -Path $exePath -Destination (Join-Path $BinDir 'abv0.exe')
 
+    # The index is installed only together with its detached signature. The
+    # signature is not checked here: abv0 verifies it the first time it reads
+    # the index. Without it, nothing is installed and abv0 fetches the index on
+    # first run.
     Write-Host 'fetching registry index'
     try {
-        $idx = Join-Path $Tmp 'index.json'
+        $idx    = Join-Path $Tmp 'index.json'
+        $idxSig = Join-Path $Tmp 'index.json.sig'
         Invoke-WebRequest -Uri "$Base/packages/index.json" -OutFile $idx -UseBasicParsing
+        Invoke-WebRequest -Uri "$Base/packages/index.json.sig" -OutFile $idxSig -UseBasicParsing
+        if ((Get-Item $idx).Length -eq 0 -or (Get-Item $idxSig).Length -eq 0) {
+            throw 'registry download is empty'
+        }
+        # Signature first: a new index is never on disk without its signature.
+        Move-Item -Force -Path $idxSig -Destination (Join-Path $RegDir 'index.json.sig')
         Move-Item -Force -Path $idx -Destination (Join-Path $RegDir 'index.json')
     } catch {
-        Write-Host "warning: could not fetch the registry index; run 'abv0 update' later"
+        Write-Host "warning: could not fetch the registry index and its signature; abv0 will fetch them on first run (or run 'abv0 update')"
     }
 }
 finally {

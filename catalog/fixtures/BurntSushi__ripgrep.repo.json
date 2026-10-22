@@ -1,0 +1,11 @@
+{
+ "full_name": "BurntSushi/ripgrep",
+ "html_url": "https://github.com/BurntSushi/ripgrep",
+ "description": "ripgrep recursively searches directories for a regex pattern while respecting your gitignore",
+ "homepage": null,
+ "license": {
+  "key": "unlicense",
+  "name": "The Unlicense",
+  "spdx_id": "Unlicense"
+ }
+}

@@ -12,16 +12,23 @@ the exploit details until it is triaged.
 hostile:
 
 1. **The registry manifest** (`index.json`). It arrives over the network and controls
-   package names, URLs, checksums and the paths written inside the store.
+   package names, URLs, checksums and the paths written inside the store. It is now
+   signed, and only a manifest whose signature verifies is used (finding 17).
 2. **Downloaded archives.** Member names, symlink targets, sizes and content are all
    attacker-controlled if the manifest or the upstream host is compromised.
+3. **GitHub release assets**, for `gh:` installs and for catalog sources. They are handled
+   as downloaded archives. Their checksums come from GitHub or from the same release, not
+   from the maintainer's signing key, except where the hash is in the signed catalog.
 
-Everything derived from those two inputs is validated before it reaches the
-filesystem or a `exec` call.
+Everything derived from those inputs is validated before it reaches the filesystem or a
+`exec` call.
 
 ---
 
-## Findings fixed in 2.0.0
+## Findings
+
+Findings 1 to 13 were fixed in 2.0.0. Findings 14 to 26 are in the Unreleased section of
+[CHANGELOG.md](CHANGELOG.md). Findings 27 onward are in this file.
 
 The audit covered the whole tree. Severities are the author's assessment for a user
 running `abv0 install` against a compromised or malicious manifest.
@@ -148,14 +155,22 @@ duration. The manifest is published atomically: downloaded to a unique temporary
 parsed, then renamed. Verified with 18 concurrent installs across fresh homes — zero
 failures, correct result each time.
 
-### 10. DMG images mounted writable — medium
+### 10. DMG images mounted without a private mount point — medium
 
-macOS `.dmg` handling ran `hdiutil attach` without `-readonly` and without
-`-nobrowse`, letting a crafted image's contents be modified during the copy and
-surfacing the mount in Finder.
+macOS `.dmg` handling ran `hdiutil attach -nobrowse -readonly -quiet <image>` at the
+default mount location and then copied from a volume it located under `/Volumes`
+(finding 20). Without a mount point of its own, abv0 could not be sure which volume it
+read from, and it did not pass `-noverify`, `-noautoopen` or `-mountpoint`.
 
-**Fixed.** `hdiutil attach -readonly -nobrowse -noverify -noautoopen` with an explicit
-detach in all paths.
+**Corrected.** The text previously in this entry said 2.0.0 passed
+`-readonly -nobrowse -noverify -noautoopen`, and that the image was mounted writable.
+Neither was accurate. 2.0.0 passed `-readonly` and `-nobrowse` only, so the image was
+already read-only.
+
+**Fixed.** The call is now `hdiutil attach -readonly -nobrowse -noverify -noautoopen
+-quiet -mountpoint <private directory> <image>`. The mount point is created by abv0,
+copies come only from it, and it is always detached with the same path. Copy errors are
+returned, not ignored.
 
 ### 11. A 0-byte binary was published as a release — medium
 
@@ -189,23 +204,243 @@ read whole files into memory with `readToEndAlloc`.
 streams line by line with a bounded line length and skips over-long lines with a
 warning.
 
----
+### 14. Malicious and mock executables in the public registry — critical
+
+The public registry carried `threat-sample`, a package whose binary was a script
+containing malware patterns (the repository's `packages/malware_sample.sh`). It also
+carried `git` and `wget` entries whose binaries were mock shell scripts
+(`packages/git_mock.sh`, `packages/wget_mock.sh`). Installing either put a script named
+`git` or `wget` on the user's `PATH` in place of the real tool, and the manifest gave it
+the same trust as every other entry. Test-only `mock-gui` was also published.
+
+**Fixed.** `threat-sample`, `git`, `wget` and `mock-gui` are removed from the manifest.
+The fixtures moved to `tests/fixtures/`, whose README says they are never published.
+They are used only by abv0's own tests. The manifest is signed (finding 17), so a later
+change to these entries needs the maintainer's signature.
+
+### 15. Symlink-chain escape during extraction — critical
+
+Tar members were checked by link text only. A member `a/l -> ..` followed by a member
+`p -> a/l/..` each passed the check, and then `p/x` was written outside the extraction
+root through the chain.
+
+**Fixed.** Before a member is written, every existing parent component of its path, and
+the final component, is checked on disk. A symlink target may not walk through a link
+that is already on disk. Setuid, setgid and sticky bits are masked off.
+
+### 16. Packages could claim bin names owned by others — critical
+
+Bin links were created by name in the bin directory, with no record of which package
+owned each one. A package could claim a name owned by another installed package, or a
+system command such as `sudo` or `ssh`, and nothing recorded which package the name
+belonged to.
+
+**Fixed.** Each bin link and app bundle is recorded with its owning package. A link owned
+by another package is a conflict and is refused unless `--force` is given. Reserved names
+are refused when the manifest is loaded: `abv0`, `sudo`, `su`, `doas`, `ssh`, `sh`,
+`bash`, `zsh`, `fish` and others, compared case-insensitively. Installs from before this
+change have links with no ownership record. They are adopted by the package that made
+them, not refused.
+
+### 17. Unsigned manifest, and the current directory's manifest was loaded — high
+
+The manifest was trusted without any authenticity check. Whoever controlled the download
+path (a mirror, a proxy, a compromised host) controlled every URL and checksum in it. A
+separate problem: a `packages/index.json` in the current directory was loaded
+automatically, so running `abv0` inside an untrusted checkout used that manifest. An old
+signed manifest could also be served again, so a vulnerable version could be reinstalled.
+
+**Fixed.** `update` and the first-run bootstrap download the manifest and `<url>.sig`,
+verify an Ed25519 detached signature against `keys/manifest.pub` (compiled in;
+`-Dmanifest-pubkey` overrides it at build time), and only then use the file. The
+manifest's `updated_at` may not be older than the last one accepted, which is stored in
+`<registry dir>/last-updated-at`. The current directory's manifest is no longer loaded.
+`--registry <path>` loads a manifest that must have a verifying `<path>.sig`.
+`--allow-unsigned-manifest` skips both checks, prints a warning, and is for testing only.
+The root of trust is now the maintainer's signing key. The key committed in
+`keys/manifest.pub` is a development placeholder and must be replaced before a real
+release is signed with it. `release/SHA256SUMS.sig` is checked by `self-update` in the
+same way.
+
+### 18. Uninstall deleted app bundles by name — high
+
+Uninstalling a package removed `<apps root>/<name>` for every name in the manifest's
+`app_bundles`, whether or not abv0 had installed that bundle. A manifest name could
+therefore delete an existing directory of that name under the apps root.
+
+**Fixed.** App bundle names must end in `.app` and must be a single plain path
+component, with no separators, drive colons or control bytes. Removal and replacement
+apply only to bundles abv0 installed, which the ownership record shows. Any other
+directory is left alone. A unit test checks that an existing `Other.app` survives.
+
+### 19. Uninstall matched by prefix, and store names were ambiguous — high
+
+Store directories were named `name-version-platform`. Uninstall matched store entries by
+the prefix `name-`, so uninstalling `foo` also removed the store directories of a package
+called `foo-tools`. Because `-` can appear in both names and versions, a store directory
+name could not be split reliably into its parts.
+
+**Fixed.** Store directories are named `name@version@platform`. `@` is not allowed in
+names or versions, so the split is unambiguous. Uninstall compares the parsed name
+exactly. Directories from the old naming scheme are still recognised, so their links are
+adopted rather than refused, and the packages need one reinstall (see CHANGELOG.md).
+
+### 20. DMG copy could read from a volume other than the image — medium
+
+After attaching an image, the 2.0.0 code iterated `/Volumes` and copied from a volume it
+found there, not from the mount point of the image it had just attached. A volume that
+was already mounted could be read in place of the image.
+
+**Fixed.** The image is attached at a private mount point that abv0 creates, and the
+copy reads only from that path. See finding 10 for the flags.
+
+### 21. Extraction had no size limit, curl read `~/.curlrc`, and userinfo URLs were accepted — medium
+
+Extraction had no limit on total size or member count, so one hostile archive could fill
+the disk or exhaust inodes. `curl` ran without `-q`, so it read `~/.curlrc` and applied
+whatever options it contained to abv0's downloads. URLs with userinfo, such as
+`https://host@evil.example`, were accepted, so the host a user reads in a URL could be
+different from the host the request went to.
+
+**Fixed.** tar and zip extraction stop at 4 GiB (`max_extract_bytes`) or 200,000 members
+(`max_extract_members`). curl is started with `-q` first, so `~/.curlrc` is ignored.
+Downloads are capped at 2 GiB (`--max-filesize`). URLs containing userinfo are rejected.
+
+### 22. Binary index offsets could overflow, and the cache trusted size and mtime — medium
+
+The binary index stored offsets and lengths as `u32`, and narrowed lengths with
+`@intCast`. Outside the range of `u32`, an out-of-range `@intCast` is undefined behaviour
+in ReleaseFast builds, so a large value could wrap. The index cache was reused when the
+source file's size and mtime matched. An `index.json` replaced with the same size and an
+old mtime could therefore be served from a stale cache.
+
+**Fixed.** Narrowing and addition go through `toU32` and `addU32`, which return
+`IndexTooLarge` instead of wrapping. The index format is version 2. The cache is keyed by
+the SHA-256 of `index.json`, not by size and mtime.
+
+### 23. Manifest text and JSON output were not escaped — medium
+
+Names and descriptions from the manifest were printed to the terminal as they were, so a
+control byte in one could move the cursor, overwrite earlier output, or change the
+terminal title. JSON output did not escape string values with the standard encoder, so a
+quote or backslash in a value could break the document.
+
+**Fixed.** Control bytes in manifest-derived text are printed as `?`. Every JSON string
+value goes through the standard encoder.
+
+### 24. Crash log recovery and package publish were not crash-safe — medium
+
+The write-ahead log did not fsync, did not recover a torn tail record, did not persist
+its sequence counter across runs, and was never compacted. Publishing a package tree was
+a single rename into place with no step to remove an existing tree first, so an
+interrupted publish over an existing install could leave the store in a state recovery
+did not expect.
+
+**Fixed.** The log fsyncs each record, recovers a torn tail record, persists its sequence
+number and compacts. A publish over an existing install moves the old tree aside, renames
+the new tree in, and deletes the old one only after success. A unit test checks that only
+the new tree remains.
+
+### 25. Upgrade removed the installed version before installing the new one — medium
+
+`upgrade` removed the installed version before the replacement was downloaded and
+installed. A failed download or verification therefore left the package missing.
+
+**Fixed.** `upgrade` installs the new version first. Older versions are pruned
+(`Store.pruneOtherVersions`) only after that succeeds. `upgrade` exits 1 when every
+requested name is unknown.
+
+### 26. Installer issues — low
+
+* `install.sh` wrote `export PATH="<bin dir>:$PATH"` into the shell profile without
+  quoting. A bin directory containing `$(...)` or a backtick ran commands each time the
+  profile loaded, and a newline in `ABV0_BIN_DIR` could add lines to the profile.
+* When no SHA-256 tool was found, the installer warned and continued unverified.
+* The installer ran `chmod 0700` on the parent of the bin directory, which could be a
+  directory the user did not create.
+* `install.ps1` allowed only TLS 1.2.
+
+**Fixed.** The profile line uses POSIX single-quoting for the path. A newline in
+`ABV0_BIN_DIR` is refused. A missing SHA-256 tool is an error unless
+`ABV0_ALLOW_UNVERIFIED=1` is set. Only directories this run creates under the default
+`~/.abv0` are made `0700`. `install.ps1` allows TLS 1.3 when the runtime supports it.
+
+### 27. Zip entries with drive, UNC or stream names could be written outside the store — high
+
+`std.zip.extract` rejects only a leading `/` and `..` components. A member named with
+forward slashes and a drive letter, such as
+`C:/Users/x/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup/x.cmd`, passed
+that check. On Windows, creating a file at a drive-absolute path ignores the destination
+directory, so the file was written outside the store. Drive-relative names (`C:x`), UNC
+names (`//server/share/x`) and NTFS alternate data streams (`a.exe:evil`) passed the same
+check.
+
+**Fixed.** `checkZipEntries` reads every entry name from the central directory before the
+first write, at the same offset `std.zip.extract` reads it from. If any name is not a safe
+relative path, or contains `:` or a backslash, the whole archive is refused with
+`error.UnsafeArchiveMember`. `std.zip` cannot skip one member, so refusing the archive is
+the only safe option. Tar members whose names contain `:` are skipped on Windows. Tests
+build small stored zips in memory and check that unsafe names are refused with nothing
+written, including when a safe member comes before the unsafe one.
+
+### 28. A manifest already on disk was trusted without a check — high
+
+A registry index that was already present was used without any check. A manifest placed
+there by the installer, or by anything else that could write to the registry directory,
+was never verified. The signature and replay checks from finding 17 ran only when abv0
+downloaded the manifest itself.
+
+**Fixed.** abv0 records the SHA-256 of the manifest it accepted in
+`<registry>/index.json.sha256`, written atomically after the signature and replay checks
+pass. A manifest on disk is trusted only if its hash matches that record. Otherwise, if
+`index.json.sig` sits beside it, the signature and replay checks run as they do for a
+download, and the hash is recorded on success. If there is no signature, or the check
+fails, the manifest is downloaded again through the verified path. Nothing is deleted
+first. The decision is the pure function `trustState`, and it has tests. `abv0 update`
+also records the hash. The installers now download `index.json.sig` with the index.
+
+### 29. A GitHub token appeared on the curl command line — medium
+
+When `GITHUB_TOKEN` or `GH_TOKEN` is set, API requests for `gh:` installs send an
+`Authorization: Bearer` header. When a request fell back to curl, `buildCurlArgv` passed each
+header as a `--header` argument, so the token was readable from the process list while curl
+ran.
+
+**Fixed.** Header lines are written to a new private file (mode 0600, created exclusively)
+beside the download, or in `<abv0 home>/tmp` (0700), and curl reads them with
+`--header @<file>`. The file is removed when curl exits, whatever the outcome. Headers
+containing CR, LF or NUL are refused before anything runs, and `buildCurlArgv` refuses to
+build an argv for headers that have no file. Tests assert the token never appears in argv.
 
 ## Hardening summary
 
 | Area | Control |
 | :--- | :--- |
-| Transport | HTTPS only, no protocol downgrade on redirect, `--fail`, bounded timeouts and retries |
-| Integrity | SHA-256 enforced by default; unverifiable installs require an explicit flag |
-| Extraction | Member-name validation, symlink-escape checks, no absolute or `..` paths, no drive letters or UNC |
-| Manifest | Per-record validation, invalid records dropped, no panics on malformed input |
-| Concurrency | Real advisory file locks, atomic temp-file-plus-rename publishes |
-| Filesystem | `0700` store root, `0600` state files, set in-process without subprocesses |
-| Binary index | Magic, version, size and every offset bounds-checked before dereference |
+| Transport | Built-in HTTPS client (`std.http`, TLS 1.3, connections reused within a run). curl is a fallback for transport failures only, under the same HTTPS-only policy: `https` on every redirect hop, `-q` so `~/.curlrc` is ignored, `--fail`, bounded timeouts and retries, 2 GiB download cap, userinfo URLs rejected. A host that fails is remembered for 24 hours. In the built-in client, API headers go only to the original host; see finding 29 for the curl fallback. |
+| Integrity | SHA-256 enforced by default; `gh:` installs are checked against GitHub's digest or the release's checksum file; an asset with neither is refused unless explicitly allowed; streamed bytes are published only after the digest matches |
+| Signing | Ed25519 detached signature on the manifest, checked before it is read; a manifest on disk is trusted only if its SHA-256 matches the recorded one; `updated_at` replay check; `release/SHA256SUMS.sig` checked by `self-update` |
+| Extraction | Member-name validation, every existing parent checked on disk, symlink targets may not walk through links, no absolute or `..` paths, no drive letters or UNC, zip names checked before the first write, 7z names and CRCs checked, 4 GiB and 200,000 member caps, setuid, setgid and sticky bits cleared |
+| Ownership | Bin links and app bundles recorded with their owning package; conflicts refused unless `--force`; reserved names refused; exact name match on uninstall; app bundles must end in `.app` |
+| Manifest | Per-record validation, invalid records dropped, duplicate and reserved names rejected, no panics on malformed input |
+| Concurrency | Real advisory file locks, atomic temp-file-plus-rename publishes, WAL with fsync and torn-tail recovery, install-first upgrades |
+| Filesystem | `0700` store root, `0600` state files, set in-process without subprocesses; DMG attached at a private mount point |
+| Binary index | Magic, version, size and every offset bounds-checked before dereference; `u32` overflow fails; cache keyed by SHA-256 |
+| Output | Manifest-derived text printed with control bytes replaced; JSON through the standard encoder |
 | Releases | Stripped release builds, published `SHA256SUMS`, installer verifies before publishing |
+| Catalog | Self-building: `packages/index.json` is generated from `catalog/sources.txt` and upstream releases; refuses to write when most sources fail or the catalog would lose more than half its packages; output must load with zero rejected packages; signed daily with `ABV0_MANIFEST_KEY` and checked before it is committed |
 
 ## Non-goals
 
-`abv0` does not currently verify code signatures or provenance attestations for
-upstream artifacts; it verifies that the bytes you received are the bytes the manifest
-pins. Trust in the manifest itself is the remaining root of trust.
+`abv0` does not verify code signatures or provenance attestations for upstream
+artifacts. It verifies that the bytes you received match the SHA-256 that the maintainer
+pinned in the manifest, and the manifest is signed with Ed25519 against `keys/manifest.pub`.
+
+The root of trust is therefore the maintainer's signing key. If that key is stolen, an
+attacker can sign a manifest that points at malicious archives with matching hashes. The
+secret key must stay out of git and off shared machines.
+
+For catalog packages, the expected SHA-256 is part of the signed `packages/index.json`, so
+it is covered by the signature. A direct `gh:` install is not in that index. Its expected
+hash is GitHub's digest for the asset, or a checksum file in the same release, and the
+maintainer's key covers neither. Trust in a direct `gh:` install therefore rests on the
+upstream project and on GitHub.

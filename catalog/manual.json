@@ -1,0 +1,66 @@
+{
+  "packages": {
+    "neofetch": {
+      "name": "neofetch",
+      "version": "7.1.0",
+      "description": "A highly customizable command-line system information tool written in bash 3.2+",
+      "homepage": "https://github.com/dylanaraps/neofetch",
+      "license": "MIT",
+      "bin": [
+        "neofetch"
+      ],
+      "app_bundles": [],
+      "platforms": {
+        "x86_64-macos": {
+          "url": "https://raw.githubusercontent.com/dylanaraps/neofetch/7.1.0/neofetch",
+          "sha256": "3dc33493e54029fb1528251552093a9f9a2894fcf94f9c3a6f809136a42348c7",
+          "archive_type": "raw",
+          "bin_path": "neofetch"
+        },
+        "aarch64-macos": {
+          "url": "https://raw.githubusercontent.com/dylanaraps/neofetch/7.1.0/neofetch",
+          "sha256": "3dc33493e54029fb1528251552093a9f9a2894fcf94f9c3a6f809136a42348c7",
+          "archive_type": "raw",
+          "bin_path": "neofetch"
+        },
+        "x86_64-linux": {
+          "url": "https://raw.githubusercontent.com/dylanaraps/neofetch/7.1.0/neofetch",
+          "sha256": "3dc33493e54029fb1528251552093a9f9a2894fcf94f9c3a6f809136a42348c7",
+          "archive_type": "raw",
+          "bin_path": "neofetch"
+        }
+      }
+    },
+    "zig": {
+      "name": "zig",
+      "version": "0.13.0",
+      "description": "General-purpose programming language and toolchain for maintaining robust, optimal, and reusable software",
+      "homepage": "https://ziglang.org/",
+      "license": "MIT",
+      "bin": [
+        "zig"
+      ],
+      "app_bundles": [],
+      "platforms": {
+        "x86_64-macos": {
+          "url": "https://ziglang.org/download/0.13.0/zig-macos-x86_64-0.13.0.tar.xz",
+          "sha256": "df06e87a2d480d1daea5040eec9a7861962a98f12cc20a10aa493397ab4ccbc1",
+          "archive_type": "tar.xz",
+          "bin_path": "zig-macos-x86_64-0.13.0/zig"
+        },
+        "aarch64-macos": {
+          "url": "https://ziglang.org/download/0.13.0/zig-macos-aarch64-0.13.0.tar.xz",
+          "sha256": "1bc78b3014a938c5b9679f2feaf1cd14fc8e5c2cfca50c6ca80bc4f78aa0e7d5",
+          "archive_type": "tar.xz",
+          "bin_path": "zig-macos-aarch64-0.13.0/zig"
+        },
+        "x86_64-linux": {
+          "url": "https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz",
+          "sha256": "0386ab4ec35850abdb158c5825cf8abf0d01b6973ba041b6ecbebb08ffbf78e7",
+          "archive_type": "tar.xz",
+          "bin_path": "zig-linux-x86_64-0.13.0/zig"
+        }
+      }
+    }
+  }
+}

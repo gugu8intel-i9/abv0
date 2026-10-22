@@ -1,0 +1,10 @@
+# Signed and hashed files must reach every checkout byte for byte. Without
+# this, Git for Windows (core.autocrlf) rewrites LF to CRLF and the Ed25519
+# signature over packages/index.json no longer verifies.
+packages/index.json      -text
+packages/index.json.sig  -text
+keys/*.pub               -text
+release/SHA256SUMS       -text
+release/SHA256SUMS.sig   -text
+catalog/fixtures/**      -text
+tests/fixtures/**        -text

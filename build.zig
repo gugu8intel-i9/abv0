@@ -46,9 +46,44 @@ const release_targets = [_]ReleaseTarget{
     },
 };
 
+/// Public key that trusts packages/index.json.sig, relative to the build root.
+/// Overridable with -Dmanifest-pubkey=<hex> (for example to test a release key).
+const default_pubkey_path = "keys/manifest.pub";
+
+/// Resolve the manifest public key as 64 hex characters, failing the build early
+/// if it is malformed so no step can silently embed a bad key.
+fn manifestPubkey(b: *std.Build) []const u8 {
+    const hex = if (b.option(
+        []const u8,
+        "manifest-pubkey",
+        "Ed25519 public key (64 hex chars) that trusts the package manifest",
+    )) |override|
+        std.mem.trim(u8, override, " \t\r\n")
+    else blk: {
+        const raw = b.build_root.handle.readFileAlloc(b.allocator, default_pubkey_path, 1024) catch |err| {
+            std.debug.panic(
+                "cannot read {s}: {s} (create it with `zig build sign-tool` and sign-manifest keygen, or pass -Dmanifest-pubkey=<hex>)",
+                .{ default_pubkey_path, @errorName(err) },
+            );
+        };
+        break :blk std.mem.trim(u8, raw, " \t\r\n");
+    };
+
+    var key: [32]u8 = undefined;
+    if (hex.len != 64) std.debug.panic("manifest public key must be 64 hex characters, got {d}", .{hex.len});
+    _ = std.fmt.hexToBytes(&key, hex) catch
+        std.debug.panic("manifest public key contains non-hex characters", .{});
+    return hex;
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+
+    // Compile-time configuration for src/sign.zig, exposed as `@import("build_options")`.
+    const options = b.addOptions();
+    options.addOption([]const u8, "manifest_pubkey", manifestPubkey(b));
+    const build_options_mod = options.createModule();
 
     // ---- main executable ---------------------------------------------------
     const exe = b.addExecutable(.{
@@ -57,6 +92,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    exe.root_module.addImport("build_options", build_options_mod);
     b.installArtifact(exe);
 
     // ---- run ---------------------------------------------------------------
@@ -73,8 +109,61 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    unit_tests.root_module.addImport("build_options", build_options_mod);
     const run_unit_tests = b.addRunArtifact(unit_tests);
-    b.step("test", "Run unit tests").dependOn(&run_unit_tests.step);
+
+    // sign.zig is not reachable from main.zig yet, so it gets its own test binary.
+    const sign_tests = b.addTest(.{
+        .root_source_file = b.path("src/sign.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sign_tests.root_module.addImport("build_options", build_options_mod);
+    const run_sign_tests = b.addRunArtifact(sign_tests);
+
+    const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&run_unit_tests.step);
+    test_step.dependOn(&run_sign_tests.step);
+
+    // ---- manifest signing tool ---------------------------------------------
+    // Standalone: keygen, sign and verify never touch the embedded key.
+    const sign_tool = b.addExecutable(.{
+        .name = "sign-manifest",
+        .root_source_file = b.path("tools/sign-manifest.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const install_sign_tool = b.addInstallArtifact(sign_tool, .{});
+    b.step("sign-tool", "Install the sign-manifest CLI (keygen, sign, verify)").dependOn(&install_sign_tool.step);
+
+    // ---- self-building catalog tool ----------------------------------------
+    // Turns catalog/sources.txt into packages/index.json by reading each
+    // project's GitHub releases. It reuses abv0's own asset picker, archive
+    // extractor and registry validator through one module (see catalog_deps.zig
+    // for why they cannot be imported file by file).
+    const catalog_deps = b.createModule(.{ .root_source_file = b.path("catalog_deps.zig") });
+    // The src/ files reached through it may read the embedded manifest key.
+    catalog_deps.addImport("build_options", build_options_mod);
+    const catalog_tool = b.addExecutable(.{
+        .name = "build-catalog",
+        .root_source_file = b.path("tools/build-catalog.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    catalog_tool.root_module.addImport("catalog_deps", catalog_deps);
+    const install_catalog_tool = b.addInstallArtifact(catalog_tool, .{});
+    b.step("catalog-tool", "Install the build-catalog CLI (sources.txt -> index.json)").dependOn(&install_catalog_tool.step);
+
+    const catalog_tests = b.addTest(.{
+        .root_source_file = b.path("tools/build-catalog.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    catalog_tests.root_module.addImport("catalog_deps", catalog_deps);
+    const run_catalog_tests = b.addRunArtifact(catalog_tests);
+    // The sources tests read this file at run time; re-run them when it changes.
+    run_catalog_tests.addFileInput(b.path("catalog/sources.txt"));
+    test_step.dependOn(&run_catalog_tests.step);
 
     // ---- compile check for every supported platform ------------------------
     // Catches Windows-only and macOS-only compile errors without needing those
@@ -88,7 +177,17 @@ pub fn build(b: *std.Build) void {
             .target = b.resolveTargetQuery(rt.query),
             .optimize = .Debug,
         });
+        chk.root_module.addImport("build_options", build_options_mod);
         check_step.dependOn(&chk.step);
+
+        const chk_catalog = b.addExecutable(.{
+            .name = b.fmt("check-catalog-{s}", .{rt.name}),
+            .root_source_file = b.path("tools/build-catalog.zig"),
+            .target = b.resolveTargetQuery(rt.query),
+            .optimize = .Debug,
+        });
+        chk_catalog.root_module.addImport("catalog_deps", catalog_deps);
+        check_step.dependOn(&chk_catalog.step);
     }
 
     // ---- release artifacts -------------------------------------------------
@@ -101,6 +200,7 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseFast,
             .strip = true,
         });
+        rel.root_module.addImport("build_options", build_options_mod);
         const install = b.addInstallArtifact(rel, .{
             .dest_dir = .{ .override = .{ .custom = "../release" } },
             .dest_sub_path = rt.name,
