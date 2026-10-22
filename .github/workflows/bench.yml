@@ -1,0 +1,86 @@
+name: Benchmark
+
+# abv0 against Homebrew, timed on the same runners with the same five tools.
+# Hosted runners are shared, so read the numbers as rough orders of magnitude.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "claude/**"
+    paths:
+      - "src/**"
+      - "build.zig"
+      - "packages/**"
+      - ".github/workflows/bench.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: abv0 vs Homebrew (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            bat: bat
+          # Zig 0.13 cannot link on macOS 26, so macOS 15 is pinned.
+          # The signed catalog has no bat build for arm64 macOS, so this row
+          # installs bat from its GitHub release instead.
+          - os: macos-15
+            bat: gh:sharkdp/bat
+          - os: macos-15-intel
+            bat: bat
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+      HOMEBREW_NO_ANALYTICS: "1"
+      HOMEBREW_NO_ENV_HINTS: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+
+      - name: Build release binary
+        run: zig build -Doptimize=ReleaseFast
+
+      # The runner context is not available in job-level env, so the isolated
+      # abv0 home is set from a step instead. Nothing is put on PATH for abv0.
+      - name: Isolated abv0 home
+        shell: bash
+        run: |
+          echo "ABV0_HOME=${RUNNER_TEMP}/abv0-home" >> "$GITHUB_ENV"
+          echo "ABV0_BIN_DIR=${RUNNER_TEMP}/abv0-bin" >> "$GITHUB_ENV"
+
+      # Homebrew is preinstalled on macOS (/opt/homebrew or /usr/local). On
+      # Ubuntu it lives under /home/linuxbrew and is not on PATH.
+      - name: Locate Homebrew
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -x /home/linuxbrew/.linuxbrew/bin/brew ]; then
+            eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          fi
+          brew_bin="$(command -v brew || true)"
+          if [ -z "$brew_bin" ]; then
+            echo "Homebrew not found; brew cells will show n/a"
+            exit 0
+          fi
+          echo "BREW_BIN=$brew_bin" >> "$GITHUB_ENV"
+          echo "$(dirname "$brew_bin")" >> "$GITHUB_PATH"
+          "$brew_bin" --version
+
+      # Uninstalls the preinstalled test formulae, then times everything.
+      # Each row prints as it finishes, and the table goes to the job summary.
+      - name: Benchmark abv0 against Homebrew
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BENCH_BAT: ${{ matrix.bat }}
+        run: python3 .github/scripts/bench.py
