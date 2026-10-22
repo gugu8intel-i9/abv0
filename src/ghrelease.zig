@@ -398,11 +398,29 @@ fn archScore(name: []const u8, os: Os, want_arch: Arch) ?u32 {
     return null;
 }
 
+/// A score split into what the build is (architecture and libc) and how it is
+/// packed. Two assets with the same `build` are the same program in different
+/// containers, and only `pack` tells them apart.
+const Score = struct {
+    build: u32,
+    pack: u32,
+    /// A bare executable: nothing to unpack at all.
+    bare: bool,
+
+    fn total(self: Score) u32 {
+        return self.build + self.pack;
+    }
+};
+
 /// Score for one asset against the wanted target, or null when it cannot be
 /// used. Higher is better. The bands are chosen so an exact architecture match
 /// always beats a weaker match, and libc and archive preferences only order
 /// candidates that already match.
 fn scoreAsset(name: []const u8, want: Target) ?u32 {
+    return (scoreParts(name, want) orelse return null).total();
+}
+
+fn scoreParts(name: []const u8, want: Target) ?Score {
     if (name.len == 0) return null;
     for (reject_suffixes) |s| {
         if (std.ascii.endsWithIgnoreCase(name, s)) return null;
@@ -436,26 +454,34 @@ fn scoreAsset(name: []const u8, want: Target) ?u32 {
     // libc, on Linux only. A static musl build runs on any distribution, so it
     // is preferred over glibc. A name with no libc marker is treated as neutral.
     // On Windows the MSVC build is the upstream default; MinGW (`gnu`) builds
-    // are usually larger and pull in extra runtime DLLs.
+    // are usually larger and pull in extra runtime DLLs. These steps are wider
+    // than the whole spread of `pack` scores below, so a packing preference can
+    // never outweigh them.
     const libc_score: u32 = if (os == .windows)
-        (if (has(name, "msvc", .token)) @as(u32, 2) else 0)
+        (if (has(name, "msvc", .token)) @as(u32, 8) else 0)
     else if (os != .linux)
         0
     else if (has(name, "musl", .token))
-        8
+        32
     else if (has(name, "gnu", .token))
         0
     else
-        4;
+        16;
 
-    // Archive kind. Archives beat raw binaries, and a Windows `.zip` beats
-    // anything else on Windows.
+    // Archive kind, ordered by how fast it unpacks at a similar size:
+    // zstd, then gzip, then zip, then xz (the slowest to decode). Everything
+    // that is compressed beats a bare tar or an app image, and a Windows `.zip`
+    // beats the other formats on Windows, where it is the native one. A bare
+    // executable is handled in `pickAsset`, which can compare sizes.
     const kind = archiveKindOf(name) orelse return null;
-    const kind_score: u32 = if (std.mem.eql(u8, kind, "tar.gz"))
-        4
+    var bare = false;
+    const pack_score: u32 = if (std.mem.eql(u8, kind, "tar.zst"))
+        6
+    else if (std.mem.eql(u8, kind, "tar.gz"))
+        5
     else if (std.mem.eql(u8, kind, "zip"))
-        if (os == .windows) 5 else 4
-    else if (std.mem.eql(u8, kind, "tar.xz") or std.mem.eql(u8, kind, "tar.zst"))
+        if (os == .windows) 7 else 4
+    else if (std.mem.eql(u8, kind, "tar.xz"))
         3
     else if (std.mem.eql(u8, kind, "tar"))
         2
@@ -467,10 +493,19 @@ fn scoreAsset(name: []const u8, want: Target) ?u32 {
             if (os != .linux) return null;
             break :blk 0;
         }
+        bare = true;
         break :blk 1;
     } else return null;
 
-    return arch_score + libc_score + kind_score;
+    return .{ .build = arch_score + libc_score, .pack = pack_score, .bare = bare };
+}
+
+/// A bare executable beats a packed archive of the same build when it is not
+/// much bigger, since there is nothing to unpack. 125% keeps a bare binary that
+/// is mostly incompressible in the running and leaves a 3x larger one out.
+fn bareIsSimilarSize(bare_size: u64, packed_size: u64) bool {
+    if (bare_size == 0 or packed_size == 0) return false;
+    return bare_size <= packed_size +| packed_size / 4;
 }
 
 /// Index of the asset that best matches `platform_tag` (one of the six tags in
@@ -493,7 +528,20 @@ pub fn pickAsset(assets: []const Asset, platform_tag: []const u8) ?usize {
             best_score = score;
         }
     }
-    return best;
+
+    // Prefer the bare executable of the same build when it costs about the same
+    // to download: it skips unpacking altogether.
+    const chosen = best orelse return null;
+    const chosen_parts = scoreParts(assets[chosen].name, want).?;
+    if (chosen_parts.bare) return chosen;
+    var bare_best: ?usize = null;
+    for (assets, 0..) |asset, i| {
+        const parts = scoreParts(asset.name, want) orelse continue;
+        if (!parts.bare or parts.build != chosen_parts.build) continue;
+        if (!bareIsSimilarSize(asset.size, assets[chosen].size)) continue;
+        if (bare_best == null or asset.name.len < assets[bare_best.?].name.len) bare_best = i;
+    }
+    return bare_best orelse chosen;
 }
 
 // ---------------------------------------------------------------------------
@@ -721,6 +769,79 @@ test "pickAsset: refuses ambiguous and non-binary names" {
     // Only the AppImage is a usable Linux file here, and it ranks last.
     try expectPick(assets, "x86_64-linux", "tool-linux-x86_64.AppImage");
     try expectPick(assets, "x86_64-macos", null);
+}
+
+fn sizedAssets(arena: std.mem.Allocator, names: []const []const u8, sizes: []const u64) ![]Asset {
+    const out = try makeAssets(arena, names);
+    for (out, sizes) |*a, sz| a.size = sz;
+    return out;
+}
+
+test "pickAsset: fastest to decode wins among archive formats" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // zstd > gzip > zip > xz, whatever order the release lists them in.
+    const all = [_][]const u8{
+        "tool-1.0-x86_64-unknown-linux-musl.tar.xz",
+        "tool-1.0-x86_64-unknown-linux-musl.zip",
+        "tool-1.0-x86_64-unknown-linux-musl.tar.gz",
+        "tool-1.0-x86_64-unknown-linux-musl.tar.zst",
+    };
+    try expectPick(try makeAssets(a, &all), "x86_64-linux", "tool-1.0-x86_64-unknown-linux-musl.tar.zst");
+    try expectPick(try makeAssets(a, all[0..3]), "x86_64-linux", "tool-1.0-x86_64-unknown-linux-musl.tar.gz");
+    try expectPick(try makeAssets(a, all[0..2]), "x86_64-linux", "tool-1.0-x86_64-unknown-linux-musl.zip");
+    try expectPick(try makeAssets(a, all[0..1]), "x86_64-linux", "tool-1.0-x86_64-unknown-linux-musl.tar.xz");
+
+    // helix ships xz only for Linux, so xz is still picked when it is all there is.
+    const helix = [_][]const u8{ "helix-24.07-x86_64-linux.tar.xz", "helix-24.07-x86_64-macos.tar.xz" };
+    try expectPick(try makeAssets(a, &helix), "x86_64-linux", "helix-24.07-x86_64-linux.tar.xz");
+}
+
+test "pickAsset: packing never outweighs musl or MSVC" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // A musl xz still beats a glibc zstd, and a no-libc-marker gzip.
+    const linux = [_][]const u8{
+        "tool-1.0-x86_64-unknown-linux-gnu.tar.zst",
+        "tool-1.0-linux-x86_64.tar.gz",
+        "tool-1.0-x86_64-unknown-linux-musl.tar.xz",
+    };
+    try expectPick(try makeAssets(a, &linux), "x86_64-linux", "tool-1.0-x86_64-unknown-linux-musl.tar.xz");
+
+    // MSVC beats MinGW whatever the container; on Windows a zip beats gzip.
+    const win = [_][]const u8{
+        "tool-1.0-x86_64-pc-windows-gnu.zip",
+        "tool-1.0-x86_64-pc-windows-msvc.tar.xz",
+        "tool-1.0-x86_64-pc-windows-msvc.tar.gz",
+    };
+    try expectPick(try makeAssets(a, &win), "x86_64-windows", "tool-1.0-x86_64-pc-windows-msvc.tar.gz");
+    const win2 = [_][]const u8{
+        "tool-1.0-x86_64-pc-windows-msvc.tar.gz",
+        "tool-1.0-x86_64-pc-windows-msvc.zip",
+        "tool-1.0-x86_64-pc-windows-gnu.zip",
+    };
+    try expectPick(try makeAssets(a, &win2), "x86_64-windows", "tool-1.0-x86_64-pc-windows-msvc.zip");
+}
+
+test "pickAsset: a bare binary wins only at a similar size" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const names = [_][]const u8{ "tool-linux-amd64.tar.gz", "tool-linux-amd64" };
+
+    // Nearly the same size: skip the unpacking.
+    try expectPick(try sizedAssets(a, &names, &.{ 4_000_000, 4_400_000 }), "x86_64-linux", "tool-linux-amd64");
+    // A raw binary three times the size costs more to download than it saves.
+    try expectPick(try sizedAssets(a, &names, &.{ 4_000_000, 12_000_000 }), "x86_64-linux", "tool-linux-amd64.tar.gz");
+    // Unknown sizes keep the archive.
+    try expectPick(try sizedAssets(a, &names, &.{ 0, 0 }), "x86_64-linux", "tool-linux-amd64.tar.gz");
+    // A different build is never swapped in: the musl archive stays.
+    const mixed = [_][]const u8{ "tool-x86_64-linux-musl.tar.gz", "tool-x86_64-linux" };
+    try expectPick(try sizedAssets(a, &mixed, &.{ 4_000_000, 4_100_000 }), "x86_64-linux", "tool-x86_64-linux-musl.tar.gz");
 }
 
 test "pickAsset: name length breaks ties" {
