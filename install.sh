@@ -104,8 +104,9 @@ fetch "${BASE}/release/${TARGET}" "${TMP_DIR}/abv0" \
 
 # Reject anything that is obviously not a program (an error page, an LFS
 # pointer, a rate-limit JSON body).
-case "$(head -c 4 "${TMP_DIR}/abv0" | od -An -c | tr -d ' \n')" in
-    177ELF*|\\312\\376\\272\\276*|\\317\\372\\355\\376*|MZ*) ;;
+# Hex, because `od -c` prints high bytes differently on macOS and Linux.
+case "$(head -c 4 "${TMP_DIR}/abv0" | od -An -tx1 | tr -d ' \n')" in
+    7f454c46*|cafebabe*|cffaedfe*|4d5a*) ;;
     *) die "downloaded file is not an executable (the server may have returned an error page)" ;;
 esac
 
