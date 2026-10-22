@@ -218,7 +218,7 @@ jobs:
           version: 0.13.0
 
       - name: Build the catalog tool
-        run: zig build catalog-tool
+        run: zig build && zig build catalog-tool   # abv0 lists the result below
 
       - name: Build three packages from live GitHub releases
         env:
