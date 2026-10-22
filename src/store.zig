@@ -2053,6 +2053,7 @@ pub const Store = struct {
                                     .tar_zst => "tar.zst",
                                     .zip => "zip",
                                     .dmg => "dmg",
+                                    .sevenz => "7z",
                                     .tar => "tar",
                                     .raw => "raw",
                                 } else "raw";

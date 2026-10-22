@@ -2793,6 +2793,7 @@ comptime {
     _ = @import("bloom.zig");
     _ = @import("wal.zig");
     _ = @import("archive.zig");
+    _ = @import("sevenzip.zig");
     _ = @import("registry.zig");
     _ = @import("abvindex.zig");
     _ = @import("net.zig");

@@ -13,6 +13,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const safepath = @import("safepath.zig");
 const platform = @import("platform.zig");
+const sevenzip = @import("sevenzip.zig");
 
 pub const Kind = enum {
     tar,
@@ -22,6 +23,7 @@ pub const Kind = enum {
     zip,
     raw,
     dmg,
+    sevenz,
 
     pub fn fromString(s: []const u8) ?Kind {
         const table = .{
@@ -34,6 +36,7 @@ pub const Kind = enum {
             .{ "zip", Kind.zip },
             .{ "raw", Kind.raw },
             .{ "dmg", Kind.dmg },
+            .{ "7z", Kind.sevenz },
         };
         inline for (table) |pair| {
             if (std.mem.eql(u8, s, pair[0])) return pair[1];
@@ -51,6 +54,7 @@ pub const Kind = enum {
             .{ ".tar", Kind.tar },
             .{ ".zip", Kind.zip },
             .{ ".dmg", Kind.dmg },
+            .{ ".7z", Kind.sevenz },
         };
         inline for (table) |pair| {
             if (std.mem.endsWith(u8, name, pair[0])) return pair[1];
@@ -88,6 +92,7 @@ pub fn sniffBytes(buf: []const u8) ?Kind {
     if (n >= 6 and std.mem.eql(u8, buf[0..6], &.{ 0xFD, '7', 'z', 'X', 'Z', 0x00 })) return .tar_xz;
     if (n >= 4 and std.mem.eql(u8, buf[0..4], &.{ 0x28, 0xB5, 0x2F, 0xFD })) return .tar_zst;
     if (n >= 4 and std.mem.eql(u8, buf[0..4], &.{ 'P', 'K', 0x03, 0x04 })) return .zip;
+    if (n >= sevenzip.magic.len and std.mem.eql(u8, buf[0..sevenzip.magic.len], &sevenzip.magic)) return .sevenz;
     if (n >= 262 and std.mem.eql(u8, buf[257..262], "ustar")) return .tar;
     return null;
 }
@@ -162,6 +167,12 @@ pub fn extract(
         },
         .tar, .tar_gz, .tar_xz, .tar_zst => try extractTar(allocator, kind, archive_path, dest, options),
         .dmg => try extractDmg(allocator, archive_path, dest_dir_path),
+        .sevenz => {
+            // 7z finds its streams by offset, so it needs the file itself.
+            const file = try std.fs.cwd().openFile(archive_path, .{});
+            defer file.close();
+            try sevenzip.extract(allocator, file, dest, options);
+        },
     }
 }
 
@@ -245,7 +256,7 @@ fn hasColon(name: []const u8) bool {
     return std.mem.indexOfScalar(u8, name, ':') != null;
 }
 
-fn stripComponents(path: []const u8, count: u32) []const u8 {
+pub fn stripComponents(path: []const u8, count: u32) []const u8 {
     var i: usize = 0;
     var c = count;
     while (c > 0) : (c -= 1) {
@@ -456,6 +467,9 @@ test "Kind parsing" {
     try testing.expect(Kind.fromString("rar") == null);
     try testing.expectEqual(Kind.tar_xz, Kind.fromFilename("tool-v1.2.3-x86_64.tar.xz").?);
     try testing.expectEqual(Kind.zip, Kind.fromFilename("tool.zip").?);
+    try testing.expectEqual(Kind.sevenz, Kind.fromString("7z").?);
+    try testing.expectEqual(Kind.sevenz, Kind.fromFilename("node-v22-win-x64.7z").?);
+    try testing.expectEqual(Kind.sevenz, sniffBytes("7z\xBC\xAF\x27\x1C\x00\x04").?);
 }
 
 test "stripComponents" {

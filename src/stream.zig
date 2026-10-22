@@ -142,7 +142,7 @@ pub fn streamInstall(
     // Decided before any connection is made. These formats need a seekable
     // file (zip's central directory, a disk image), so they cannot stream.
     switch (declared) {
-        .zip, .dmg => return error.NotStreamable,
+        .zip, .dmg, .sevenz => return error.NotStreamable,
         else => {},
     }
     if (!net.isSafeUrl(url)) return error.UnsafeUrl;
@@ -206,7 +206,7 @@ pub fn unpackStream(
     else
         archive.sniffBytes(head) orelse declared;
     switch (kind) {
-        .zip, .dmg => return error.NotStreamable,
+        .zip, .dmg, .sevenz => return error.NotStreamable,
         else => {},
     }
 
@@ -245,7 +245,7 @@ pub fn unpackStream(
             var dec = std.compress.zstd.decompressor(src, .{ .window_buffer = window });
             try archive.pipeTar(a, dec.reader(), dest, opts);
         },
-        .zip, .dmg => unreachable,
+        .zip, .dmg, .sevenz => unreachable,
     }
 
     // The extractor stops at the archive's end marker, but the response may
