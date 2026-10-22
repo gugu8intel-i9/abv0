@@ -62,8 +62,9 @@
 - **API headers stay with the original host.** The built-in client sends the GitHub API
   headers, including the optional token, only to the host of the original request. A
   redirect to another host does not receive them.
-- **Known issue.** When a request falls back to curl, its headers, including a GitHub token,
-  are passed on curl's command line. Finding 29 in SECURITY.md is open.
+- **Tokens never on a command line.** When a request falls back to curl, its headers,
+  including a GitHub token, reach curl through a private 0600 file (`--header @file`), not
+  argv. Finding 29.
 
 ### Performance
 
@@ -129,9 +130,11 @@
   workflow signs the result. See [catalog/README.md](catalog/README.md).
 - **Install scripts** `install.sh` and `install.ps1` download `packages/index.json.sig` with
   the index and install it first.
-- **Launcher module** (`src/shim.zig`). When `abv0.exe` runs under another name with a
-  `<name>.shim` file beside it, it runs that target from the target's own directory, so DLL
-  lookup works. Installs do not write shim files yet.
+- **Windows launcher shims.** On Windows each installed program is linked as
+  `<bin>\<name>.exe` (a copy or hard link of abv0 itself) plus `<name>.shim` naming the real
+  executable. Started under the program's name, abv0 runs the target from its own directory,
+  so DLLs and data files next to it load. `doctor` reports broken pairs, `fix` rewrites them,
+  and `which` shows the target. Linux and macOS keep plain links.
 
 ### Changed
 

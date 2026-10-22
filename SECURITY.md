@@ -399,20 +399,18 @@ fails, the manifest is downloaded again through the verified path. Nothing is de
 first. The decision is the pure function `trustState`, and it has tests. `abv0 update`
 also records the hash. The installers now download `index.json.sig` with the index.
 
-### 29. Open: a GitHub token can appear on the curl command line — medium
-
-**Status: open, not fixed.**
+### 29. A GitHub token appeared on the curl command line — medium
 
 When `GITHUB_TOKEN` or `GH_TOKEN` is set, API requests for `gh:` installs send an
-`Authorization: Bearer` header. The built-in client sends that header only to the host of
-the original request. When a request falls back to curl, `buildCurlArgv` passes each
-header as a `--header` argument. The token then appears on curl's command line, which can be
-read from the process list while curl runs.
+`Authorization: Bearer` header. When a request fell back to curl, `buildCurlArgv` passed each
+header as a `--header` argument, so the token was readable from the process list while curl
+ran.
 
-Until this is fixed, `ABV0_DOWNLOADER=builtin` keeps the request away from curl, so the token
-is not on a command line. The cost is that a transport failure is then reported rather than
-retried through curl. A fix would keep the header out of argv, for example by passing it to
-curl through its configuration input.
+**Fixed.** Header lines are written to a new private file (mode 0600, created exclusively)
+beside the download, or in `<abv0 home>/tmp` (0700), and curl reads them with
+`--header @<file>`. The file is removed when curl exits, whatever the outcome. Headers
+containing CR, LF or NUL are refused before anything runs, and `buildCurlArgv` refuses to
+build an argv for headers that have no file. Tests assert the token never appears in argv.
 
 ## Hardening summary
 

@@ -64,7 +64,11 @@ Add `~/.abv0/bin` to your `PATH` (`abv0 doctor` will tell you if it is missing).
 | :--- | :--- | :--- |
 | macOS arm64 / x86_64 | supported | APFS `clonefile(2)`, falls back to hard link |
 | Linux x86_64 / aarch64 | supported (static musl) | hard link, falls back to symlink |
-| Windows x86_64 / arm64 | supported | `CreateHardLinkW`, falls back to copy |
+| Windows x86_64 / arm64 | supported | launcher shim (`name.exe` + `name.shim`), so DLLs next to the program load |
+
+CI installs real packages on Linux (x86_64, arm64), macOS 15 (arm64, x86_64) and Windows
+x86_64 on every push. Building abv0 itself needs Zig 0.13.0, which cannot link on macOS 26;
+build on macOS 15 or cross-compile (`zig build release`).
 
 `zig build check` type-checks the whole codebase against all six targets, so a
 Windows-only or macOS-only compile error fails on any machine.
@@ -438,8 +442,8 @@ Behaviour you can rely on:
   and a redirect cannot downgrade to plaintext.
 - **Tokens stay with their host.** The built-in client sends the GitHub API headers,
   including any token, only to the host of the original request. A redirect to another host
-  does not receive them. The curl fallback is different; see finding 29 in
-  [SECURITY.md](SECURITY.md).
+  does not receive them. When curl is used instead, headers go through a private file,
+  never the command line.
 - **GitHub installs are verified or refused.** A `gh:` install is checked against GitHub's
   digest or the release's checksum file. An asset with neither is refused unless
   `--allow-unverified` is given. A bare name the registry lacks is never searched on GitHub.
