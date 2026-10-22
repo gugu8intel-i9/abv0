@@ -10,6 +10,9 @@
 //!   * No timeouts, so a hung server hung the installer forever.
 //!   * URLs interpolated from user input were never validated; a package name
 //!     could inject extra query parameters into the GitHub API request.
+//!   * Request headers (the GitHub token in `Authorization`) were passed to
+//!     curl as `--header <value>`, so any local user could read them from `ps`.
+//!     They now go through a private 0600 file, passed as `--header @<path>`.
 //!
 //! Who does the downloading:
 //!   * `http.zig` is the built-in HTTPS client (std.http + std.crypto.tls). It
@@ -37,10 +40,17 @@ pub const Options = struct {
     user_agent: []const u8 = http.user_agent,
     /// Extra request headers, each a complete `Name: value` line.
     headers: []const []const u8 = &.{},
+    /// Path of the private file that holds `headers` (see `writeHeaderFile`).
+    /// Set internally before curl runs; `buildCurlArgv` requires it whenever
+    /// `headers` is non-empty.
+    header_file: ?[]const u8 = null,
 };
 
 pub const Error = error{
     UnsafeUrl,
+    UnsafeHeader,
+    HeaderFileMissing,
+    NoPrivateDir,
     DownloadFailed,
     NoDownloaderAvailable,
 };
@@ -93,6 +103,76 @@ pub fn urlEncode(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
     return out.toOwnedSlice();
 }
 
+/// Reject a header that would break the header file: CR or LF would start a
+/// new line in it, and NUL would cut the line short. Each header is one line.
+pub fn validHeaders(headers: []const []const u8) bool {
+    for (headers) |h| {
+        if (std.mem.indexOfAny(u8, h, "\r\n\x00") != null) return false;
+    }
+    return true;
+}
+
+/// `<abv0 home>`, found the way `Store.init` finds it: `ABV0_HOME`, else
+/// `~/.abv0`. Caller frees the result.
+fn stateRoot(allocator: std.mem.Allocator) ?[]u8 {
+    return platform.homeOverride(allocator) orelse blk: {
+        const home = platform.homeDir(allocator) catch return null;
+        defer allocator.free(home);
+        break :blk std.fs.path.join(allocator, &.{ home, ".abv0" }) catch return null;
+    };
+}
+
+/// `<abv0 home>/tmp`, created 0700 when missing. Private scratch space for
+/// requests that have no download destination beside them.
+fn privateTmpDir(allocator: std.mem.Allocator) ![]u8 {
+    const root = stateRoot(allocator) orelse return Error.NoPrivateDir;
+    defer allocator.free(root);
+    const tmp = try std.fs.path.join(allocator, &.{ root, "tmp" });
+    errdefer allocator.free(tmp);
+    try platform.ensureSecureDir(tmp);
+    return tmp;
+}
+
+/// Write `headers`, one per line, to a new private file (mode 0600, created
+/// exclusively) in `dir`, or in `<abv0 home>/tmp` when `dir` is null. Returns
+/// its path, or null when there are no headers. Remove it with
+/// `removeHeaderFile` once curl has exited, whatever curl did.
+pub fn writeHeaderFile(allocator: std.mem.Allocator, dir: ?[]const u8, headers: []const []const u8) !?[]u8 {
+    if (headers.len == 0) return null;
+    if (!validHeaders(headers)) return Error.UnsafeHeader;
+
+    const owned_dir: ?[]u8 = if (dir == null) try privateTmpDir(allocator) else null;
+    defer if (owned_dir) |d| allocator.free(d);
+    const dir_path = dir orelse owned_dir.?;
+
+    var rand: [8]u8 = undefined;
+    std.crypto.random.bytes(&rand);
+    const name = try std.fmt.allocPrint(allocator, "abv0-headers-{s}", .{std.fmt.fmtSliceHexLower(&rand)});
+    defer allocator.free(name);
+    const path = try std.fs.path.join(allocator, &.{ dir_path, name });
+    errdefer allocator.free(path);
+
+    // Exclusive: a file that already exists is never ours to write or remove.
+    const file = try std.fs.cwd().createFile(path, .{ .exclusive = true, .mode = platform.mode_private });
+    var written = false;
+    defer {
+        file.close();
+        if (!written) removeHeaderFile(path);
+    }
+    for (headers) |h| {
+        try file.writeAll(h);
+        try file.writeAll("\n");
+    }
+    written = true;
+    return path;
+}
+
+/// Delete a file made by `writeHeaderFile`. Best effort; null is a no-op.
+pub fn removeHeaderFile(path: ?[]const u8) void {
+    const p = path orelse return;
+    std.fs.cwd().deleteFile(p) catch {};
+}
+
 /// Build the curl argv. Pure (no spawning) so it can be unit tested.
 /// `-q` must stay first: it stops curl from reading ~/.curlrc or
 /// $CURL_HOME, which could otherwise add proxies, headers or `--insecure`.
@@ -135,7 +215,13 @@ pub fn buildCurlArgv(
         opts.user_agent,
     });
     try args.appendSlice(extra);
-    for (opts.headers) |h| try args.appendSlice(&.{ "--header", h });
+    if (opts.headers.len > 0) {
+        // Header values stay out of argv, where `ps` shows them to every user.
+        // curl reads them from the private file instead.
+        const path = opts.header_file orelse return Error.HeaderFileMissing;
+        const arg = try std.fmt.allocPrint(allocator, "@{s}", .{path});
+        try args.appendSlice(&.{ "--header", arg });
+    }
     if (dest) |d| try args.appendSlice(&.{ "--output", d });
     try args.append(url);
     return args.toOwnedSlice();
@@ -149,13 +235,20 @@ pub fn download(
     opts: Options,
 ) !void {
     if (!isSafeUrl(url)) return Error.UnsafeUrl;
+    if (!validHeaders(opts.headers)) return Error.UnsafeHeader;
     if (try downloadBuiltin(allocator, url, dest_path, opts)) return;
 
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const argv = try buildCurlArgv(arena, url, dest_path, opts, &.{});
+    // Headers reach curl through a file beside the download, not through argv.
+    const header_file = try writeHeaderFile(arena, std.fs.path.dirname(dest_path) orelse ".", opts.headers);
+    defer removeHeaderFile(header_file);
+    var curl_opts = opts;
+    curl_opts.header_file = header_file;
+
+    const argv = try buildCurlArgv(arena, url, dest_path, curl_opts, &.{});
 
     const res = std.process.Child.run(.{
         .allocator = arena,
@@ -230,13 +323,19 @@ pub fn fetchToString(
     opts: Options,
 ) ![]u8 {
     if (!isSafeUrl(url)) return Error.UnsafeUrl;
+    if (!validHeaders(opts.headers)) return Error.UnsafeHeader;
     if (try fetchBuiltin(allocator, url, max_bytes, opts)) |body| return body;
 
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const argv = try buildCurlArgv(arena, url, null, opts, &.{});
+    const header_file = try writeHeaderFile(arena, null, opts.headers);
+    defer removeHeaderFile(header_file);
+    var curl_opts = opts;
+    curl_opts.header_file = header_file;
+
+    const argv = try buildCurlArgv(arena, url, null, curl_opts, &.{});
 
     const res = std.process.Child.run(.{
         .allocator = arena,
@@ -442,15 +541,11 @@ fn runTripped() bool {
         @atomicLoad(u32, &run_successes, .acquire) == 0;
 }
 
-/// `<abv0 home>`, found the way `Store.init` finds it: `ABV0_HOME`, else
-/// `~/.abv0`. Duplicated here because the download functions take no store.
+/// The abv0 home as a directory handle. The download functions take no store,
+/// so they find it through `stateRoot`.
 fn openStateDir() ?std.fs.Dir {
     const a = std.heap.page_allocator;
-    const root = platform.homeOverride(a) orelse blk: {
-        const home = platform.homeDir(a) catch return null;
-        defer a.free(home);
-        break :blk std.fs.path.join(a, &.{ home, ".abv0" }) catch return null;
-    };
+    const root = stateRoot(a) orelse return null;
     defer a.free(root);
     return std.fs.cwd().openDir(root, .{}) catch null;
 }
@@ -592,12 +687,18 @@ pub const RemoteInfo = struct {
 
 pub fn head(allocator: std.mem.Allocator, url: []const u8, opts: Options) !RemoteInfo {
     if (!isSafeUrl(url)) return Error.UnsafeUrl;
+    if (!validHeaders(opts.headers)) return Error.UnsafeHeader;
 
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const argv = try buildCurlArgv(arena, url, null, opts, &.{ "--head", "--request", "GET" });
+    const header_file = try writeHeaderFile(arena, null, opts.headers);
+    defer removeHeaderFile(header_file);
+    var curl_opts = opts;
+    curl_opts.header_file = header_file;
+
+    const argv = try buildCurlArgv(arena, url, null, curl_opts, &.{ "--head", "--request", "GET" });
     const res = std.process.Child.run(.{
         .allocator = arena,
         .argv = argv,
@@ -643,7 +744,11 @@ pub const ChunkJob = struct {
         const arena = arena_state.allocator();
 
         const range = std.fmt.allocPrint(arena, "{d}-{d}", .{ self.start, self.end }) catch return;
-        const argv = buildCurlArgv(arena, self.url, self.dest, self.opts, &.{ "--range", range }) catch return;
+        const header_file = writeHeaderFile(arena, std.fs.path.dirname(self.dest) orelse ".", self.opts.headers) catch return;
+        defer removeHeaderFile(header_file);
+        var curl_opts = self.opts;
+        curl_opts.header_file = header_file;
+        const argv = buildCurlArgv(arena, self.url, self.dest, curl_opts, &.{ "--range", range }) catch return;
 
         const res = std.process.Child.run(.{
             .allocator = arena,
@@ -888,4 +993,102 @@ test "HTTP answers stay errors; transport failures are what falls back to curl" 
     try testing.expect(!http.isTransportError(error.HttpStatus));
     try testing.expect(!http.isTransportError(error.UnsafeRedirect));
     try testing.expect(!http.isTransportError(error.TooManyRedirects));
+}
+
+test "buildCurlArgv passes headers as a file reference, never their values" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const headers = [_][]const u8{"Authorization: Bearer ghp_TESTSECRET123"};
+    const argv = try buildCurlArgv(arena, "https://api.github.com/x", null, .{
+        .headers = &headers,
+        .header_file = "/home/u/.abv0/tmp/abv0-headers-1",
+    }, &.{});
+
+    var saw_header = false;
+    for (argv, 0..) |a, i| {
+        try testing.expect(std.mem.indexOf(u8, a, "TESTSECRET") == null);
+        if (std.mem.eql(u8, a, "--header")) {
+            try testing.expectEqualStrings("@/home/u/.abv0/tmp/abv0-headers-1", argv[i + 1]);
+            saw_header = true;
+        }
+    }
+    try testing.expect(saw_header);
+
+    // Headers with no file to go in cannot be sent, so the call fails rather
+    // than silently dropping them.
+    try testing.expectError(Error.HeaderFileMissing, buildCurlArgv(arena, "https://api.github.com/x", null, .{ .headers = &headers }, &.{}));
+}
+
+test "header lines with CR, LF or NUL are refused" {
+    try testing.expect(validHeaders(&.{}));
+    try testing.expect(validHeaders(&.{"Authorization: Bearer x"}));
+    try testing.expect(!validHeaders(&.{"Authorization: Bearer x\r"}));
+    try testing.expect(!validHeaders(&.{"Authorization: Bearer x\nEvil: 1"}));
+    try testing.expect(!validHeaders(&.{"X: a\r\nY: b"}));
+    try testing.expect(!validHeaders(&.{"X: a\x00b"}));
+
+    // A bad header creates no file at all.
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(dir_path);
+    try testing.expectError(Error.UnsafeHeader, writeHeaderFile(testing.allocator, dir_path, &.{"X: a\r\nY: b"}));
+    var it = tmp.dir.iterate();
+    var n: usize = 0;
+    while (try it.next()) |_| n += 1;
+    try testing.expectEqual(@as(usize, 0), n);
+}
+
+test "header file holds the headers and is private (mode 0600)" {
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const dir_path = try tmp.dir.realpathAlloc(arena, ".");
+
+    const path = (try writeHeaderFile(arena, dir_path, &.{ "Authorization: Bearer secret", "Accept: application/json" })).?;
+    const text = try tmp.dir.readFileAlloc(arena, std.fs.path.basename(path), 4096);
+    try testing.expectEqualStrings("Authorization: Bearer secret\nAccept: application/json\n", text);
+
+    if (!platform.is_windows) {
+        const st = try std.fs.cwd().statFile(path);
+        try testing.expectEqual(@as(std.fs.File.Mode, 0), st.mode & 0o077);
+    }
+    removeHeaderFile(path);
+}
+
+/// Stand-in for a curl run that fails.
+fn failingCurl(header_file: ?[]const u8) Error!void {
+    _ = header_file;
+    return Error.DownloadFailed;
+}
+
+test "header file is removed after a failing curl call" {
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const dir_path = try tmp.dir.realpathAlloc(arena, ".");
+
+    {
+        // The same write-then-defer-remove shape as the callers use.
+        const header_file = try writeHeaderFile(arena, dir_path, &.{"Authorization: Bearer secret"});
+        defer removeHeaderFile(header_file);
+        try testing.expectError(Error.DownloadFailed, failingCurl(header_file));
+    }
+
+    var it = tmp.dir.iterate();
+    var left: usize = 0;
+    while (try it.next()) |_| left += 1;
+    try testing.expectEqual(@as(usize, 0), left);
+}
+
+test "download and fetchToString refuse a header with a line break before spawning anything" {
+    const bad = [_][]const u8{"Authorization: x\r\nEvil: y"};
+    try testing.expectError(Error.UnsafeHeader, download(testing.allocator, "https://x.test/y", "/nonexistent/x", .{ .headers = &bad }));
+    try testing.expectError(Error.UnsafeHeader, fetchToString(testing.allocator, "https://x.test/y", 1024, .{ .headers = &bad }));
 }
