@@ -2868,8 +2868,8 @@ test "uninstall foo leaves foo-bar alone" {
 
     try tmp.dir.makePath("store/foo@1.0@x86_64-linux");
     try tmp.dir.makePath("store/foo-bar@1.0@x86_64-linux");
-    try tmp.dir.writeFile(.{ .sub_path = "bin/foo", .data = "foo" });
-    try tmp.dir.writeFile(.{ .sub_path = "bin/foo-bar", .data = "foo-bar" });
+    try tmp.dir.writeFile(.{ .sub_path = "bin/foo" ++ platform.exe_suffix, .data = "foo" });
+    try tmp.dir.writeFile(.{ .sub_path = "bin/foo-bar" ++ platform.exe_suffix, .data = "foo-bar" });
     const recs = [_]Store.OwnerRec{
         .{ .kind = "bin", .name = "foo", .pkg = "foo" },
         .{ .kind = "bin", .name = "foo-bar", .pkg = "foo-bar" },
@@ -2881,9 +2881,9 @@ test "uninstall foo leaves foo-bar alone" {
     try testing.expect(try s.uninstall(a, pkg));
 
     try tmp.dir.access("store/foo-bar@1.0@x86_64-linux", .{});
-    try tmp.dir.access("bin/foo-bar", .{});
+    try tmp.dir.access("bin/foo-bar" ++ platform.exe_suffix, .{});
     try testing.expectError(error.FileNotFound, tmp.dir.access("store/foo@1.0@x86_64-linux", .{}));
-    try testing.expectError(error.FileNotFound, tmp.dir.access("bin/foo", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.access("bin/foo" ++ platform.exe_suffix, .{}));
 }
 
 test "bin conflicts are refused unless forced" {
@@ -2896,8 +2896,8 @@ test "bin conflicts are refused unless forced" {
     const a = arena.allocator();
 
     try tmp.dir.makePath("store/tool@1.0@x86_64-linux");
-    try tmp.dir.writeFile(.{ .sub_path = "store/tool@1.0@x86_64-linux/tool", .data = "new" });
-    try tmp.dir.writeFile(.{ .sub_path = "bin/tool", .data = "user's own file" });
+    try tmp.dir.writeFile(.{ .sub_path = "store/tool@1.0@x86_64-linux/tool" ++ platform.exe_suffix, .data = "new" });
+    try tmp.dir.writeFile(.{ .sub_path = "bin/tool" ++ platform.exe_suffix, .data = "user's own file" });
 
     const pkg_dir = try std.fs.path.join(a, &.{ s.store_root, "tool@1.0@x86_64-linux" });
     const plats = [_]registry.PlatformInfo{.{ .name = "x86_64-linux" }};
@@ -2905,7 +2905,7 @@ test "bin conflicts are refused unless forced" {
     const pkg = Package{ .name = "tool", .version = "1.0", .bin = &bins, .platforms = &plats };
 
     try testing.expectError(StoreError.BinaryConflict, s.linkBinaries(a, pkg, plats[0], pkg_dir, .{ .quiet = true }));
-    const kept = try tmp.dir.readFileAlloc(a, "bin/tool", 64);
+    const kept = try tmp.dir.readFileAlloc(a, "bin/tool" ++ platform.exe_suffix, 64);
     try testing.expectEqualStrings("user's own file", kept);
 
     try testing.expectEqual(@as(usize, 1), try s.linkBinaries(a, pkg, plats[0], pkg_dir, .{ .quiet = true, .force = true }));
@@ -2928,23 +2928,23 @@ test "bin_path links the named file directly and still maps an alias" {
     const a = arena.allocator();
 
     try tmp.dir.makePath("store/tool@1.0@x86_64-linux/bin");
-    try tmp.dir.writeFile(.{ .sub_path = "store/tool@1.0@x86_64-linux/bin/tool", .data = "exe" });
+    try tmp.dir.writeFile(.{ .sub_path = "store/tool@1.0@x86_64-linux/bin/tool" ++ platform.exe_suffix, .data = "exe" });
     const tool_dir = try std.fs.path.join(a, &.{ s.store_root, "tool@1.0@x86_64-linux" });
-    const tool_plats = [_]registry.PlatformInfo{.{ .name = "x86_64-linux", .bin_path = "bin/tool" }};
+    const tool_plats = [_]registry.PlatformInfo{.{ .name = "x86_64-linux", .bin_path = "bin/tool" ++ platform.exe_suffix }};
     const tool_bins = [_][]const u8{"tool"};
     const tool = Package{ .name = "tool", .version = "1.0", .bin = &tool_bins, .platforms = &tool_plats };
     try testing.expectEqual(@as(usize, 1), try s.linkBinaries(a, tool, tool_plats[0], tool_dir, .{ .quiet = true }));
-    try tmp.dir.access("bin/tool", .{});
+    try tmp.dir.access("bin/tool" ++ platform.exe_suffix, .{});
 
     // The package calls the binary `btm`, but the archive ships `real/bottom`.
     try tmp.dir.makePath("store/btop@2.0@x86_64-linux/real");
-    try tmp.dir.writeFile(.{ .sub_path = "store/btop@2.0@x86_64-linux/real/bottom", .data = "exe" });
+    try tmp.dir.writeFile(.{ .sub_path = "store/btop@2.0@x86_64-linux/real/bottom" ++ platform.exe_suffix, .data = "exe" });
     const btop_dir = try std.fs.path.join(a, &.{ s.store_root, "btop@2.0@x86_64-linux" });
-    const btop_plats = [_]registry.PlatformInfo{.{ .name = "x86_64-linux", .bin_path = "real/bottom" }};
+    const btop_plats = [_]registry.PlatformInfo{.{ .name = "x86_64-linux", .bin_path = "real/bottom" ++ platform.exe_suffix }};
     const btop_bins = [_][]const u8{"btm"};
     const btop = Package{ .name = "btop", .version = "2.0", .bin = &btop_bins, .platforms = &btop_plats };
     try testing.expectEqual(@as(usize, 1), try s.linkBinaries(a, btop, btop_plats[0], btop_dir, .{ .quiet = true }));
-    try tmp.dir.access("bin/btm", .{});
+    try tmp.dir.access("bin/btm" ++ platform.exe_suffix, .{});
 }
 
 test "a package can never link a bin named abv0" {
@@ -3216,7 +3216,7 @@ test "windows shim pairs: create, own, health, replace, remove" {
     // The script is skipped; the program gets a launcher pair.
     try testing.expectEqual(@as(usize, 1), try s.linkPlansFor(a, pkg, &plans, o, .windows, self_exe));
     try testing.expectError(error.FileNotFound, tmp.dir.access("bin/helper", .{}));
-    try testing.expectEqualStrings("FAKE ABV0 LAUNCHER", try tmp.dir.readFileAlloc(a, "bin/tool", 64));
+    try testing.expectEqualStrings("FAKE ABV0 LAUNCHER", try tmp.dir.readFileAlloc(a, "bin/tool" ++ platform.exe_suffix, 64));
     const shim_text = try tmp.dir.readFileAlloc(a, "bin/tool.shim", 4096);
     const parsed = try shim.readShim(a, shim_text);
     try testing.expectEqualStrings(tool_src, parsed.path);
@@ -3234,14 +3234,14 @@ test "windows shim pairs: create, own, health, replace, remove" {
     try tmp.dir.deleteFile("bin/tool.shim");
     try testing.expectEqual(H.missing_shim, Store.binHealth(a, s.bin_root, "tool", .windows));
     try testing.expectEqual(H.ok, Store.binHealth(a, s.bin_root, "tool", .linux));
-    try tmp.dir.deleteFile("bin/tool");
+    try tmp.dir.deleteFile("bin/tool" ++ platform.exe_suffix);
     try testing.expectEqual(H.missing_exe, Store.binHealth(a, s.bin_root, "tool", .windows));
 
     // fix: an exe with no shim (a plain link from an older abv0) is replaced.
-    try tmp.dir.writeFile(.{ .sub_path = "bin/tool", .data = "old plain link" });
+    try tmp.dir.writeFile(.{ .sub_path = "bin/tool" ++ platform.exe_suffix, .data = "old plain link" });
     try testing.expectEqual(@as(usize, 1), try s.linkPlansFor(a, pkg, plans[0..1], o, .windows, self_exe));
     try testing.expectEqual(H.ok, Store.binHealth(a, s.bin_root, "tool", .windows));
-    try testing.expectEqualStrings("FAKE ABV0 LAUNCHER", try tmp.dir.readFileAlloc(a, "bin/tool", 64));
+    try testing.expectEqualStrings("FAKE ABV0 LAUNCHER", try tmp.dir.readFileAlloc(a, "bin/tool" ++ platform.exe_suffix, 64));
     // Re-linking an existing pair is fine.
     try testing.expectEqual(@as(usize, 1), try s.linkPlansFor(a, pkg, plans[0..1], o, .windows, self_exe));
 
@@ -3256,12 +3256,13 @@ test "windows shim pairs: create, own, health, replace, remove" {
     try testing.expectEqual(@as(usize, 1), targets.len);
     try testing.expectEqualStrings(tool_src, targets[0]);
 
+    // The launcher exe carries the host's suffix (".exe" on Windows).
     // Removal takes both files; a non-Windows removal only the exe.
     try testing.expect(try Store.removeBinFiles(a, s.bin_root, "tool", .linux));
     try tmp.dir.access("bin/tool.shim", .{});
-    try tmp.dir.writeFile(.{ .sub_path = "bin/tool", .data = "x" });
+    try tmp.dir.writeFile(.{ .sub_path = "bin/tool" ++ platform.exe_suffix, .data = "x" });
     try testing.expect(try Store.removeBinFiles(a, s.bin_root, "tool", .windows));
-    try testing.expectError(error.FileNotFound, tmp.dir.access("bin/tool", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.access("bin/tool" ++ platform.exe_suffix, .{}));
     try testing.expectError(error.FileNotFound, tmp.dir.access("bin/tool.shim", .{}));
     try testing.expect(!(try Store.removeBinFiles(a, s.bin_root, "tool", .windows)));
 }
