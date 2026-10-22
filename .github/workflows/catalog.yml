@@ -55,25 +55,56 @@ jobs:
       - name: Build the tools and abv0
         run: zig build install catalog-tool sign-tool -Doptimize=ReleaseSafe
 
+      - name: Week key for the ETag cache
+        id: week
+        run: echo "week=$(date -u +%G-W%V)" >> "${GITHUB_OUTPUT}"
+
+      - name: Restore the ETag cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/catalog-etag
+          key: catalog-etag-${{ steps.week.outputs.week }}-${{ github.run_id }}
+          restore-keys: |
+            catalog-etag-${{ steps.week.outputs.week }}-
+            catalog-etag-
+
       - name: Build the catalog from upstream releases
         env:
-          # Lifts the API limit from 60 to 5000 requests an hour.
+          # 1,000 requests an hour per repository, shared with the other
+          # workflows; the builder batches its lookups (GraphQL), sends
+          # If-None-Match, and waits out a rate limit for up to 50 minutes. What
+          # it cannot look at keeps its previous entry ("rate limited (carried
+          # forward)"), which is reported apart from real failures.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           INPUT_ONLY: ${{ inputs.only }}
           INPUT_FORCE: ${{ inputs.force }}
         run: |
           set -euo pipefail
+          mkdir -p .cache/catalog-etag
           args=(--sources catalog/sources.txt --manual catalog/manual.json
-                --out packages/index.json --previous packages/index.json)
+                --out packages/index.json --previous packages/index.json
+                --max-wait-min 50 --etag-cache .cache/catalog-etag/etag.json
+                --summary "${RUNNER_TEMP}/catalog-summary.md")
           if [ -n "${INPUT_ONLY:-}" ]; then args+=(--only "${INPUT_ONLY}"); fi
           if [ "${INPUT_FORCE:-false}" = "true" ]; then args+=(--force); fi
           ./zig-out/bin/build-catalog "${args[@]}" | tee "${RUNNER_TEMP}/catalog.log"
           {
-            echo '### Catalog run'
+            if [ -f "${RUNNER_TEMP}/catalog-summary.md" ]; then cat "${RUNNER_TEMP}/catalog-summary.md"; echo; fi
+            echo '#### Builder log (tail)'
             echo '```'
             tail -n 120 "${RUNNER_TEMP}/catalog.log"
             echo '```'
           } >> "${GITHUB_STEP_SUMMARY}"
+          if grep -q '^warning: the GitHub API rate limit stopped' "${RUNNER_TEMP}/catalog.log"; then
+            echo "::warning title=Catalog refresh was rate limited::$(grep -m1 '^warning: the GitHub API rate limit stopped' "${RUNNER_TEMP}/catalog.log")"
+          fi
+
+      - name: Save the ETag cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/catalog-etag
+          key: catalog-etag-${{ steps.week.outputs.week }}-${{ github.run_id }}
 
       - name: Sign
         env:

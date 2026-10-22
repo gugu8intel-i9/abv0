@@ -6,9 +6,13 @@
 //!                 [--only name,...] [--force] [--jobs N] [--curl]
 //!                 [--offline-fixtures dir] [--allow-shrink] [--allow-failures]
 //!                 [--max-download-mb N] [--summary report.md]
+//!                 [--max-wait-min N] [--etag-cache file] [--no-graphql] [--batch N]
 //!
 //! For every source line the tool
-//!   1. asks the GitHub API for the latest (or the pinned) release,
+//!   1. asks the GitHub API for the latest (or the pinned) release. With a token
+//!      this is ONE GraphQL query per `--batch` repositories (about 40), carrying
+//!      the repository record and the release together; without one (or if
+//!      GraphQL fails) it is two REST calls per source,
 //!   2. picks one asset for each of abv0's six platforms with the same scorer
 //!      the `abv0 install gh:` command uses (src/ghrelease.zig),
 //!   3. pins each asset's SHA-256 from GitHub's `digest` field, else from a
@@ -25,7 +29,15 @@
 //! It is incremental: a package whose version equals the one in `--previous`
 //! is copied over untouched, with no download. A source that fails keeps its
 //! previous entry (reported as "stale"), so one flaky upstream never removes a
-//! package from the catalog. The result is deterministic JSON, checked by
+//! package from the catalog.
+//!
+//! API rate limits are part of the design, not an error. Every response's
+//! `x-ratelimit-*` / `retry-after` headers are tracked per bucket (REST,
+//! GraphQL). An empty bucket is waited out when its reset is within
+//! `--max-wait-min` minutes in total (default 20); otherwise the tool stops
+//! calling the API and every source it has not fetched yet keeps its previous
+//! entry, reported as "rate limited (carried forward)" and kept apart from real
+//! failures. REST GETs are conditional (`--etag-cache`): a 304 costs no quota. The result is deterministic JSON, checked by
 //! loading it back through `registry.loadFromJsonFile` before it replaces the
 //! output file. Signing is a separate step (`sign-manifest sign`).
 
@@ -40,6 +52,7 @@ const safepath = deps.safepath;
 const net = deps.net;
 const bindetect = deps.bindetect;
 const ghverify = deps.ghverify;
+const api = @import("catalog_api.zig");
 
 const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -735,6 +748,7 @@ pub fn normalizeBinName(detected: []const u8, repo: []const u8) []const u8 {
 pub const NetError = error{
     NotFound,
     RateLimited,
+    NotModified,
     Forbidden,
     ServerError,
     BadStatus,
@@ -748,6 +762,7 @@ fn netErrorName(e: anyerror) []const u8 {
     return switch (e) {
         error.NotFound => "not found (404)",
         error.RateLimited => "GitHub API rate limit reached",
+        error.NotModified => "unexpected 304",
         error.Forbidden => "forbidden (403)",
         error.ServerError => "server error (5xx)",
         error.NoFixture => "no offline fixture",
@@ -756,6 +771,40 @@ fn netErrorName(e: anyerror) []const u8 {
 }
 
 pub const Mode = enum(u8) { http, curl, fixtures };
+
+const api_origin = "https://api.github.com/";
+const graphql_url = api_origin ++ "graphql";
+
+/// One API round trip. `body` makes it a POST of JSON (GraphQL).
+pub const ApiRequest = struct {
+    url: []const u8,
+    body: ?[]const u8 = null,
+    if_none_match: ?[]const u8 = null,
+};
+
+pub const ApiResponse = struct {
+    status: u16,
+    body: []const u8,
+    info: api.RateInfo = .{},
+};
+
+/// Replaces the network for API calls; tests use it to play GitHub.
+pub const Transport = struct {
+    ctx: ?*anyopaque = null,
+    callFn: *const fn (ctx: ?*anyopaque, a: Allocator, req: ApiRequest) anyerror!ApiResponse,
+};
+
+/// A record read ahead by a GraphQL batch: REST-shaped JSON, or "it is not there".
+const Pre = union(enum) { json: []const u8, missing: []const u8 };
+
+/// Lower-case `owner/repo`, plus `@tag` for a pinned release. GitHub treats
+/// owner and repo case-insensitively; a tag is case-sensitive.
+fn preKey(a: Allocator, owner: []const u8, repo: []const u8, tag: ?[]const u8) ![]u8 {
+    const key = try std.fmt.allocPrint(a, "{s}/{s}{s}{s}", .{ owner, repo, if (tag != null) "@" else "", tag orelse "" });
+    const end = owner.len + 1 + repo.len;
+    _ = std.ascii.lowerString(key[0..end], key[0..end]);
+    return key;
+}
 
 pub const Net = struct {
     gpa: Allocator,
@@ -766,9 +815,27 @@ pub const Net = struct {
     hdr_path: []const u8 = "",
     client: std.http.Client,
     api_calls: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    graphql_calls: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    etag_hits: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
     bytes: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
-    rate_limited: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    seq: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
     switch_mutex: std.Thread.Mutex = .{},
+
+    /// Seconds the whole run may spend waiting for rate limits, shared by both buckets.
+    budget: api.Budget = .{ .left_s = 0 },
+    rest: api.Limiter = .{ .name = "REST" },
+    gql: api.Limiter = .{ .name = "GraphQL" },
+    clock: api.Clock = .{},
+    transport: ?Transport = null,
+    etags: ?*api.EtagCache = null,
+
+    /// Records read ahead by GraphQL; filled once, before any worker starts, and
+    /// only read afterwards.
+    pre_release: std.StringHashMap(Pre),
+    pre_repo: std.StringHashMap(Pre),
+    /// Cleared when a GraphQL schema turns out to have no asset `digest`.
+    graphql_digest: bool = true,
+    graphql_ok: bool = true,
 
     fn currentMode(self: *const Net) Mode {
         return @enumFromInt(self.mode.load(.acquire));
@@ -789,6 +856,8 @@ pub const Net = struct {
             .fixtures_dir = fixtures_dir,
             .tmp_root = tmp_root,
             .client = .{ .allocator = gpa },
+            .pre_release = std.StringHashMap(Pre).init(arena),
+            .pre_repo = std.StringHashMap(Pre).init(arena),
         };
         if (mode != .fixtures) {
             n.client.initDefaultProxies(arena) catch {};
@@ -799,6 +868,16 @@ pub const Net = struct {
             if (token) |t| try f.writer().print("Authorization: Bearer {s}\n", .{t});
         }
         return n;
+    }
+
+    /// Wires the limiters to the shared wait budget. Call once, after the
+    /// `Net` has reached its final address.
+    pub fn link(self: *Net, max_wait_s: u64, quiet: bool) void {
+        self.budget.left_s = max_wait_s;
+        self.rest.budget = &self.budget;
+        self.gql.budget = &self.budget;
+        self.rest.quiet = quiet;
+        self.gql.quiet = quiet;
     }
 
     pub fn deinit(self: *Net) void {
@@ -845,8 +924,10 @@ pub const Net = struct {
 
     // ---- API --------------------------------------------------------------
 
-    /// Body of `GET /repos/{owner}/{repo}/releases/latest` (or `/tags/{tag}`).
-    pub fn fetchRelease(self: *Net, a: Allocator, owner: []const u8, repo: []const u8, tag: ?[]const u8) ![]u8 {
+    /// Body of the release record in REST shape: read ahead by a GraphQL batch
+    /// when there was one, else `GET /repos/{owner}/{repo}/releases/latest` (or
+    /// `/tags/{tag}`).
+    pub fn fetchRelease(self: *Net, a: Allocator, owner: []const u8, repo: []const u8, tag: ?[]const u8) ![]const u8 {
         if (self.currentMode() == .fixtures) {
             if (tag) |t| {
                 const p = try self.fixturePath(a, "{s}__{s}@{s}.release.json", .{ owner, repo, t });
@@ -856,32 +937,227 @@ pub const Net = struct {
             _ = self.api_calls.fetchAdd(1, .monotonic);
             return self.readFixture(a, p);
         }
+        if (self.pre_release.count() != 0) {
+            if (self.pre_release.get(try preKey(a, owner, repo, tag))) |p| switch (p) {
+                .json => |j| return j,
+                .missing => return error.NotFound,
+            };
+        }
         const url = try ghrelease.apiUrl(a, owner, repo, tag);
         return self.apiGet(a, url);
     }
 
-    /// Body of `GET /repos/{owner}/{repo}`.
-    pub fn fetchRepo(self: *Net, a: Allocator, owner: []const u8, repo: []const u8) ![]u8 {
+    /// Body of the repository record in REST shape (GraphQL batch, else `GET /repos/{owner}/{repo}`).
+    pub fn fetchRepo(self: *Net, a: Allocator, owner: []const u8, repo: []const u8) ![]const u8 {
         if (self.currentMode() == .fixtures) {
             const p = try self.fixturePath(a, "{s}__{s}.repo.json", .{ owner, repo });
             _ = self.api_calls.fetchAdd(1, .monotonic);
             return self.readFixture(a, p);
         }
+        if (self.pre_repo.count() != 0) {
+            if (self.pre_repo.get(try preKey(a, owner, repo, null))) |p| switch (p) {
+                .json => |j| return j,
+                .missing => return error.NotFound,
+            };
+        }
         const url = try std.fmt.allocPrint(a, "https://api.github.com/repos/{s}/{s}", .{ owner, repo });
         return self.apiGet(a, url);
     }
 
-    fn apiGet(self: *Net, a: Allocator, url: []const u8) ![]u8 {
-        if (self.rate_limited.load(.acquire)) return error.RateLimited;
-        _ = self.api_calls.fetchAdd(1, .monotonic);
-        return self.withRetry([]u8, a, apiGetOnce, .{url});
+    /// Why a record the GraphQL batch could not find is missing, if it said.
+    pub fn lookupMessage(self: *Net, a: Allocator, owner: []const u8, repo: []const u8, tag: ?[]const u8) ?[]const u8 {
+        const key = preKey(a, owner, repo, tag) catch return null;
+        const p = self.pre_release.get(key) orelse return null;
+        return switch (p) {
+            .missing => |m| m,
+            .json => null,
+        };
     }
 
-    fn apiGetOnce(self: *Net, a: Allocator, url: []const u8) ![]u8 {
+    /// A REST GET. Sends `If-None-Match` when the ETag cache knows the URL; a
+    /// 304 then serves the cached body and costs no quota.
+    fn apiGet(self: *Net, a: Allocator, url: []const u8) ![]const u8 {
+        var cached: ?[]u8 = null;
+        var inm: ?[]const u8 = null;
+        if (self.etags) |c| {
+            if (c.lookup(url)) |item| {
+                if (c.readBody(a, item)) |b| {
+                    cached = b;
+                    inm = item.etag;
+                }
+            }
+        }
+        const resp = try self.apiExchange(a, &self.rest, .{ .url = url, .if_none_match = inm });
+        if (resp.status == 304) {
+            const b = cached orelse return error.NotModified;
+            _ = self.etag_hits.fetchAdd(1, .monotonic);
+            self.etags.?.touch(url);
+            return b;
+        }
+        try statusToError(resp.status);
+        if (self.etags) |c| {
+            if (resp.info.etag) |e| c.store(url, e, resp.body) catch {};
+        }
+        return resp.body;
+    }
+
+    /// One API request with the rate-limit rules applied: wait first if the
+    /// bucket is empty and the reset is near, send, record the headers, and on a
+    /// 403/429 that is a limit wait and send again. Returns whatever the server
+    /// finally said; `error.RateLimited` means no further calls will be made.
+    fn apiExchange(self: *Net, a: Allocator, lim: *api.Limiter, req: ApiRequest) !ApiResponse {
+        var tries: u32 = 0;
+        while (true) {
+            try lim.gate(&self.clock);
+            _ = self.api_calls.fetchAdd(1, .monotonic);
+            if (lim == &self.gql) _ = self.graphql_calls.fetchAdd(1, .monotonic);
+            const resp = try self.withRetry(ApiResponse, a, apiOnce, .{req});
+            lim.observe(resp.info, self.clock.now());
+            if (resp.status == 403 or resp.status == 429) {
+                switch (try lim.limited(resp.status, resp.body, resp.info, &self.clock)) {
+                    .retry => {
+                        tries += 1;
+                        if (tries > 4) return error.RateLimited;
+                        continue;
+                    },
+                    .not_limited => {},
+                }
+            }
+            return resp;
+        }
+    }
+
+    fn apiOnce(self: *Net, a: Allocator, req: ApiRequest) !ApiResponse {
+        if (self.transport) |t| return t.callFn(t.ctx, a, req);
         return switch (self.currentMode()) {
-            .http => self.httpGet(a, url, true, 64 * 1024 * 1024),
-            else => self.curlGet(a, url),
+            .http => self.httpApi(a, req),
+            else => self.curlApi(a, req),
         };
+    }
+
+    // ---- GraphQL batches ----------------------------------------------------
+
+    /// Looks up `reqs` with as few GraphQL queries as possible (`batch` repositories
+    /// each) and keeps the answers for `fetchRelease` / `fetchRepo`. Anything
+    /// that cannot be answered this way (an error, a release with more assets
+    /// than a page holds) is simply left out, and the REST path serves it later.
+    pub fn prefetch(self: *Net, arena: Allocator, reqs: []const api.RepoRequest, batch: usize) void {
+        const step = @max(batch, 1);
+        var i: usize = 0;
+        while (i < reqs.len) : (i += step) {
+            if (!self.graphql_ok or self.gql.isStopped()) return;
+            self.prefetchBatch(arena, reqs[i..@min(reqs.len, i + step)]);
+        }
+    }
+
+    fn prefetchBatch(self: *Net, arena: Allocator, reqs: []const api.RepoRequest) void {
+        var scratch = std.heap.ArenaAllocator.init(self.gpa);
+        defer scratch.deinit();
+        const a = scratch.allocator();
+
+        var rate_retries: u32 = 0;
+        while (true) {
+            const query = api.buildQuery(a, reqs, self.graphql_digest) catch |e| {
+                std.debug.print("note: GraphQL batch not sent ({s}); using REST for {d} repositories\n", .{ @errorName(e), reqs.len });
+                return;
+            };
+            const body = api.buildRequestBody(a, query) catch return;
+            const resp = self.apiExchange(a, &self.gql, .{ .url = graphql_url, .body = body }) catch |e| {
+                if (e != error.RateLimited) std.debug.print("note: GraphQL batch of {d} failed ({s}); using REST for those\n", .{ reqs.len, @errorName(e) });
+                return;
+            };
+            if (resp.status == 401) {
+                std.debug.print("note: GraphQL rejected the token (401); using REST for the rest of the run\n", .{});
+                self.graphql_ok = false;
+                return;
+            }
+            if (resp.status >= 500 or resp.status == 408) return self.splitBatch(arena, reqs, "server error");
+            if (resp.status != 200) {
+                std.debug.print("note: GraphQL answered HTTP {d}; using REST for {d} repositories\n", .{ resp.status, reqs.len });
+                return;
+            }
+            const parsed = api.parseResponse(a, resp.body, reqs) catch return;
+            switch (parsed) {
+                .repos => |repos| return self.storePrefetch(arena, reqs, repos),
+                .batch_error => |be| switch (be.kind) {
+                    .digest_unsupported => {
+                        if (!self.graphql_digest) {
+                            std.debug.print("note: GraphQL error: {s}; using REST for {d} repositories\n", .{ be.message, reqs.len });
+                            return;
+                        }
+                        std.debug.print("note: this GraphQL schema has no asset digest; asking again without it (checksums files or hashing will pin the assets)\n", .{});
+                        self.graphql_digest = false;
+                    },
+                    .rate_limited => {
+                        const r = self.gql.limited(403, "rate limit exceeded", resp.info, &self.clock) catch return;
+                        rate_retries += 1;
+                        if (r != .retry or rate_retries > 3) return;
+                    },
+                    .too_big => return self.splitBatch(arena, reqs, be.message),
+                    .other => {
+                        std.debug.print("note: GraphQL error: {s}; using REST for {d} repositories\n", .{ be.message, reqs.len });
+                        return;
+                    },
+                },
+            }
+        }
+    }
+
+    fn splitBatch(self: *Net, arena: Allocator, reqs: []const api.RepoRequest, why: []const u8) void {
+        if (reqs.len <= 1) {
+            std.debug.print("note: GraphQL could not answer {s}/{s} ({s}); using REST\n", .{ reqs[0].owner, reqs[0].repo, why });
+            return;
+        }
+        const mid = reqs.len / 2;
+        std.debug.print("note: GraphQL batch of {d} failed ({s}); splitting it\n", .{ reqs.len, why });
+        self.prefetchBatch(arena, reqs[0..mid]);
+        self.prefetchBatch(arena, reqs[mid..]);
+    }
+
+    fn storePrefetch(self: *Net, arena: Allocator, reqs: []const api.RepoRequest, repos: []const api.Looked) void {
+        for (reqs, repos) |req, looked| {
+            self.storeOne(arena, req, looked) catch {};
+        }
+    }
+
+    fn putPre(arena: Allocator, map: *std.StringHashMap(Pre), key: []const u8, value: Pre) !void {
+        const k = try arena.dupe(u8, key);
+        const v: Pre = switch (value) {
+            .json => |j| .{ .json = try arena.dupe(u8, j) },
+            .missing => |m| .{ .missing = try arena.dupe(u8, m) },
+        };
+        try map.put(k, v);
+    }
+
+    fn putRel(self: *Net, arena: Allocator, key: []const u8, rel: api.Rel, absent_msg: []const u8) !void {
+        switch (rel) {
+            .json => |j| try putPre(arena, &self.pre_release, key, .{ .json = j }),
+            .absent => try putPre(arena, &self.pre_release, key, .{ .missing = absent_msg }),
+            .truncated => {}, // REST will serve this one
+        }
+    }
+
+    fn storeOne(self: *Net, arena: Allocator, req: api.RepoRequest, looked: api.Looked) !void {
+        const base = try preKey(arena, req.owner, req.repo, null);
+        switch (looked.state) {
+            .failed => return, // REST will have its say
+            .not_found => {
+                try putPre(arena, &self.pre_repo, base, .{ .missing = looked.message });
+                if (req.want_latest) try putPre(arena, &self.pre_release, base, .{ .missing = looked.message });
+                for (req.tags) |t| {
+                    const k = try preKey(arena, req.owner, req.repo, t);
+                    try putPre(arena, &self.pre_release, k, .{ .missing = looked.message });
+                }
+            },
+            .ok => {
+                try putPre(arena, &self.pre_repo, base, .{ .json = looked.repo_json });
+                if (req.want_latest) try self.putRel(arena, base, looked.latest, "no published release (the repository has no latest release)");
+                for (req.tags, looked.tags) |t, rel| {
+                    const k = try preKey(arena, req.owner, req.repo, t);
+                    try self.putRel(arena, k, rel, "no release with this tag");
+                }
+            },
+        }
     }
 
     /// Small text resource (a checksums file). No credentials are sent.
@@ -898,7 +1174,7 @@ pub const Net = struct {
 
     fn fetchTextOnce(self: *Net, a: Allocator, url: []const u8, max_bytes: usize) ![]u8 {
         return switch (self.currentMode()) {
-            .http => self.httpGet(a, url, false, max_bytes),
+            .http => self.httpGet(a, url, max_bytes),
             else => blk: {
                 const body = try self.curlGet(a, url);
                 if (body.len > max_bytes) return error.TooLarge;
@@ -907,23 +1183,17 @@ pub const Net = struct {
         };
     }
 
-    fn statusToError(self: *Net, code: u16, body: []const u8) !void {
+    fn statusToError(code: u16) !void {
         if (code >= 200 and code < 300) return;
         if (code == 404) return error.NotFound;
-        if (code == 403 or code == 429) {
-            if (std.ascii.indexOfIgnoreCase(body, "rate limit") != null) {
-                self.rate_limited.store(true, .release);
-                return error.RateLimited;
-            }
-            return error.Forbidden;
-        }
+        if (code == 403) return error.Forbidden;
         if (code >= 500) return error.ServerError;
         return error.BadStatus;
     }
 
     fn isStatusError(e: anyerror) bool {
         return switch (e) {
-            error.NotFound, error.RateLimited, error.Forbidden, error.BadStatus, error.TooLarge, error.NoFixture, error.UnsafeUrl, error.OutOfMemory => true,
+            error.NotFound, error.RateLimited, error.NotModified, error.Forbidden, error.BadStatus, error.TooLarge, error.NoFixture, error.UnsafeUrl, error.OutOfMemory => true,
             else => false,
         };
     }
@@ -970,31 +1240,92 @@ pub const Net = struct {
 
     // ---- std.http ---------------------------------------------------------
 
-    fn httpGet(self: *Net, a: Allocator, url: []const u8, api: bool, max_bytes: usize) ![]u8 {
+    /// A plain GET of a public file. No credentials are ever sent.
+    fn httpGet(self: *Net, a: Allocator, url: []const u8, max_bytes: usize) ![]u8 {
         var body = std.ArrayList(u8).init(a);
         errdefer body.deinit();
-
-        const api_headers = [_]std.http.Header{
-            .{ .name = "Accept", .value = "application/vnd.github+json" },
-            .{ .name = "X-GitHub-Api-Version", .value = "2022-11-28" },
-        };
-        var bearer: []const u8 = "";
-        if (api) {
-            if (self.token) |t| bearer = try std.fmt.allocPrint(a, "Bearer {s}", .{t});
-        }
-        const auth = [_]std.http.Header{.{ .name = "Authorization", .value = bearer }};
-
         const res = try self.client.fetch(.{
             .location = .{ .url = url },
             .method = .GET,
             .headers = .{ .user_agent = .{ .override = user_agent } },
-            .extra_headers = if (api) &api_headers else &.{},
-            .privileged_headers = if (api and bearer.len != 0) &auth else &.{},
             .response_storage = .{ .dynamic = &body },
             .max_append_size = max_bytes,
         });
-        try self.statusToError(@intFromEnum(res.status), body.items);
+        try statusToError(@intFromEnum(res.status));
         return body.toOwnedSlice();
+    }
+
+    /// An API request over std.http, with the response headers kept.
+    ///
+    /// The token goes out as an ordinary header: this Zig's std.http never
+    /// writes `privileged_headers` at all, so using them would silently send
+    /// the request anonymously (60 requests an hour instead of 1,000+).
+    /// Because an ordinary header would also follow a redirect to another host,
+    /// redirects are not left to std.http: one is followed here only when it
+    /// stays on the API origin.
+    fn httpApi(self: *Net, a: Allocator, req: ApiRequest) !ApiResponse {
+        var url = req.url;
+        var hops: u8 = 0;
+        while (true) {
+            const once = try self.httpApiOnce(a, url, req);
+            const redirect = switch (once.resp.status) {
+                301, 302, 303, 307, 308 => true,
+                else => false,
+            };
+            if (redirect and hops < 3) {
+                if (once.location) |loc| {
+                    // A POST is only repeated by 307/308; others would turn into a GET.
+                    const keeps_method = req.body == null or once.resp.status == 307 or once.resp.status == 308;
+                    if (keeps_method and std.mem.startsWith(u8, loc, api_origin)) {
+                        url = loc;
+                        hops += 1;
+                        continue;
+                    }
+                }
+            }
+            return once.resp;
+        }
+    }
+
+    const HttpOnce = struct { resp: ApiResponse, location: ?[]const u8 };
+
+    fn httpApiOnce(self: *Net, a: Allocator, url: []const u8, req: ApiRequest) !HttpOnce {
+        const uri = try std.Uri.parse(url);
+        var header_buf: [16 * 1024]u8 = undefined;
+
+        var extra = std.ArrayList(std.http.Header).init(a);
+        try extra.append(.{ .name = "Accept", .value = "application/vnd.github+json" });
+        try extra.append(.{ .name = "X-GitHub-Api-Version", .value = "2022-11-28" });
+        if (req.if_none_match) |e| try extra.append(.{ .name = "If-None-Match", .value = e });
+        if (self.token) |t| try extra.append(.{ .name = "Authorization", .value = try std.fmt.allocPrint(a, "Bearer {s}", .{t}) });
+
+        var r = try self.client.open(if (req.body != null) .POST else .GET, uri, .{
+            .server_header_buffer = &header_buf,
+            .redirect_behavior = .unhandled,
+            .headers = .{
+                .user_agent = .{ .override = user_agent },
+                .content_type = if (req.body != null) .{ .override = "application/json" } else .default,
+            },
+            .extra_headers = extra.items,
+        });
+        defer r.deinit();
+        if (req.body) |b| r.transfer_encoding = .{ .content_length = b.len };
+        try r.send();
+        if (req.body) |b| try r.writeAll(b);
+        try r.finish();
+        try r.wait();
+
+        var info = api.RateInfo{};
+        var it = r.response.iterateHeaders();
+        while (it.next()) |h| api.noteHeader(a, &info, h.name, h.value);
+        const location: ?[]const u8 = if (r.response.location) |l| try a.dupe(u8, l) else null;
+        var body = std.ArrayList(u8).init(a);
+        errdefer body.deinit();
+        try r.reader().readAllArrayList(&body, 64 * 1024 * 1024);
+        return .{
+            .resp = .{ .status = @intFromEnum(r.response.status), .body = try body.toOwnedSlice(), .info = info },
+            .location = location,
+        };
     }
 
     fn httpDownload(self: *Net, url: []const u8, dest: []const u8, max_bytes: u64) !Downloaded {
@@ -1009,7 +1340,7 @@ pub const Net = struct {
         try req.send();
         try req.finish();
         try req.wait();
-        try self.statusToError(@intFromEnum(req.response.status), "");
+        try statusToError(@intFromEnum(req.response.status));
 
         const file = try std.fs.cwd().createFile(dest, .{});
         defer file.close();
@@ -1031,30 +1362,69 @@ pub const Net = struct {
     // ---- curl -------------------------------------------------------------
 
     fn curlGet(self: *Net, a: Allocator, url: []const u8) ![]u8 {
-        const hdr_arg = try std.fmt.allocPrint(a, "@{s}", .{self.hdr_path});
+        _ = self;
+        // A plain download of a public file must not carry the API token.
         const argv = [_][]const u8{
-            "curl",              "-q",             "--silent",   "--show-error",
-            "--location",        "--max-redirs",   "5",          "--proto",
-            "=https",            "--proto-redir",  "=https",     "--tlsv1.2",
-            "--connect-timeout", "20",             "--max-time", "120",
-            "--user-agent",      user_agent,       "-H",         hdr_arg,
-            "--write-out",       "\n%{http_code}", url,
+            "curl",              "-q",            "--silent",    "--show-error",
+            "--location",        "--max-redirs",  "5",           "--proto",
+            "=https",            "--proto-redir", "=https",      "--tlsv1.2",
+            "--connect-timeout", "20",            "--max-time",  "120",
+            "--user-agent",      user_agent,      "--write-out", "\n%{http_code}",
+            url,
         };
-        // The credentials header file is only for the API; a plain download of
-        // a public file must not carry the token.
-        const is_api = std.mem.startsWith(u8, url, "https://api.github.com/");
-        const real_argv: []const []const u8 = if (is_api) &argv else (argv[0..18] ++ argv[20..]);
         const res = std.process.Child.run(.{
             .allocator = a,
-            .argv = real_argv,
+            .argv = &argv,
             .max_output_bytes = 64 * 1024 * 1024,
         }) catch return error.CurlFailed;
         if (res.term != .Exited or res.term.Exited != 0) return error.CurlFailed;
         const nl = std.mem.lastIndexOfScalar(u8, res.stdout, '\n') orelse return error.CurlFailed;
         const code = std.fmt.parseInt(u16, std.mem.trim(u8, res.stdout[nl + 1 ..], " \r\n"), 10) catch return error.CurlFailed;
-        const body = res.stdout[0..nl];
-        try self.statusToError(code, body);
-        return body;
+        try statusToError(code);
+        return res.stdout[0..nl];
+    }
+
+    /// An API request through curl. The token and Accept headers come from a
+    /// private file (`-H @file`), never from the command line; the response
+    /// headers are dumped to a file and read back for the rate-limit fields.
+    fn curlApi(self: *Net, a: Allocator, req: ApiRequest) !ApiResponse {
+        const n = self.seq.fetchAdd(1, .monotonic);
+        const dump_path = try std.fmt.allocPrint(a, "{s}{c}resp{d}.hdr", .{ self.tmp_root, std.fs.path.sep, n });
+        defer std.fs.cwd().deleteFile(dump_path) catch {};
+        const body_path = try std.fmt.allocPrint(a, "{s}{c}req{d}.json", .{ self.tmp_root, std.fs.path.sep, n });
+        defer std.fs.cwd().deleteFile(body_path) catch {};
+
+        var argv = std.ArrayList([]const u8).init(a);
+        try argv.appendSlice(&.{
+            "curl",              "-q",            "--silent",   "--show-error",
+            "--location",        "--max-redirs",  "5",          "--proto",
+            "=https",            "--proto-redir", "=https",     "--tlsv1.2",
+            "--connect-timeout", "20",            "--max-time", "120",
+            "--user-agent",      user_agent,      "-D",         dump_path,
+            "-H",
+        });
+        try argv.append(try std.fmt.allocPrint(a, "@{s}", .{self.hdr_path}));
+        if (req.if_none_match) |e| {
+            try argv.append("-H");
+            try argv.append(try std.fmt.allocPrint(a, "If-None-Match: {s}", .{e}));
+        }
+        if (req.body) |b| {
+            try std.fs.cwd().writeFile(.{ .sub_path = body_path, .data = b });
+            try argv.appendSlice(&.{ "-H", "Content-Type: application/json", "--data-binary" });
+            try argv.append(try std.fmt.allocPrint(a, "@{s}", .{body_path}));
+        }
+        try argv.appendSlice(&.{ "--write-out", "\n%{http_code}", req.url });
+
+        const res = std.process.Child.run(.{
+            .allocator = a,
+            .argv = argv.items,
+            .max_output_bytes = 64 * 1024 * 1024,
+        }) catch return error.CurlFailed;
+        if (res.term != .Exited or res.term.Exited != 0) return error.CurlFailed;
+        const nl = std.mem.lastIndexOfScalar(u8, res.stdout, '\n') orelse return error.CurlFailed;
+        const code = std.fmt.parseInt(u16, std.mem.trim(u8, res.stdout[nl + 1 ..], " \r\n"), 10) catch return error.CurlFailed;
+        const dump = std.fs.cwd().readFileAlloc(a, dump_path, 1024 * 1024) catch "";
+        return .{ .status = code, .body = res.stdout[0..nl], .info = api.infoFromHeaderDump(a, dump) };
     }
 
     // ---- downloads --------------------------------------------------------
@@ -1228,9 +1598,25 @@ pub const Options = struct {
     quiet: bool = false,
     /// Markdown report (counts and failures with reasons) for a CI summary page.
     summary_path: ?[]const u8 = null,
+    /// Total seconds the run may spend waiting for API rate limits to reset.
+    /// A longer wait is not taken: the API is left alone and unfetched sources
+    /// keep their previous entries.
+    max_wait_s: u64 = default_max_wait_s,
+    /// ETag cache index (JSON); the bodies sit in `<path>.bodies/`.
+    etag_cache_path: ?[]const u8 = null,
+    /// Look repositories up in GraphQL batches when a token is available.
+    use_graphql: bool = true,
+    /// Repositories per GraphQL query.
+    batch_size: usize = default_batch_size,
+    /// Test hooks: stand in for the network and the clock.
+    transport: ?Transport = null,
+    clock: ?api.Clock = null,
 };
 
-const Status = enum { new, updated, kept, stale, skipped, carried, not_selected };
+const default_max_wait_s: u64 = 20 * 60;
+const default_batch_size: usize = 40;
+
+const Status = enum { new, updated, kept, stale, skipped, carried, limited, not_selected };
 
 const Result = struct {
     status: Status = .skipped,
@@ -1242,7 +1628,18 @@ const Outcome = union(enum) {
     built: Entry,
     reuse,
     fail: []const u8,
+    /// The API rate limit stopped the lookup; not a failure of the source.
+    limited,
 };
+
+/// The outcome of a lookup that failed with `e`: a rate limit is its own
+/// thing, anything else a failure with the reason (and what GitHub said, when
+/// a GraphQL batch already knew).
+fn lookupFailed(ctx: *Ctx, a: Allocator, src: Source, what: []const u8, e: anyerror) Outcome {
+    if (e == error.RateLimited) return .limited;
+    const detail = ctx.net.lookupMessage(a, src.owner, src.repo, src.tag);
+    return failf(a, "{s} lookup failed: {s}{s}{s}", .{ what, netErrorName(e), if (detail != null) ": " else "", detail orelse "" });
+}
 
 fn failf(a: Allocator, comptime fmt: []const u8, args: anytype) Outcome {
     return .{ .fail = std.fmt.allocPrint(a, fmt, args) catch "out of memory" };
@@ -1307,17 +1704,21 @@ const Picked = struct {
     sha: [64]u8,
 };
 
+/// A source pinned with `tag=` whose tag gives the version already in the
+/// catalog needs no lookup at all.
+fn pinnedUnchanged(opts: Options, src: Source, prev: ?Entry) bool {
+    if (opts.force or src.tag == null or prev == null) return false;
+    const v = versionFromTag(src.tag.?) orelse return false;
+    return std.mem.eql(u8, v, prev.?.version);
+}
+
 fn buildEntry(ctx: *Ctx, a: Allocator, src: Source, prev: ?Entry, index: usize) !Outcome {
     const opts = ctx.opts;
 
-    if (!opts.force and src.tag != null and prev != null) {
-        if (versionFromTag(src.tag.?)) |v| {
-            if (std.mem.eql(u8, v, prev.?.version)) return .reuse;
-        }
-    }
+    if (pinnedUnchanged(opts, src, prev)) return .reuse;
 
     const rel_json = ctx.net.fetchRelease(a, src.owner, src.repo, src.tag) catch |e|
-        return failf(a, "release lookup failed: {s}", .{netErrorName(e)});
+        return lookupFailed(ctx, a, src, "release", e);
     const rel = ghrelease.parseRelease(a, rel_json) catch |e|
         return failf(a, "unreadable release data: {s}", .{@errorName(e)});
     const version = versionFromTag(rel.tag) orelse
@@ -1617,7 +2018,7 @@ fn finishEntry(
     plats: []const PlatEntry,
 ) !Outcome {
     const repo_json = ctx.net.fetchRepo(a, src.owner, src.repo) catch |e|
-        return failf(a, "repository lookup failed: {s}", .{netErrorName(e)});
+        return lookupFailed(ctx, a, src, "repository", e);
     const info = parseRepoInfo(a, repo_json, src.owner, src.repo) catch |e|
         return failf(a, "unreadable repository data: {s}", .{@errorName(e)});
 
@@ -1836,6 +2237,47 @@ fn buildApp(
     return finishEntry(ctx, a, src, version, &.{}, apps, try plats.toOwnedSlice());
 }
 
+/// The distinct repositories the run will have to look up, merged: a source on
+/// the latest release asks for `latestRelease`, one with `tag=` for that tag,
+/// and several sources of one repository share a single record. Sources the
+/// run will not touch (not selected by --only, or pinned and unchanged) are
+/// left out, so a fully current catalog costs no lookups for them.
+fn collectLookups(arena: Allocator, ctx: *Ctx) ![]api.RepoRequest {
+    const Acc = struct { owner: []const u8, repo: []const u8, latest: bool, tags: std.ArrayList([]const u8) };
+    var accs = std.ArrayList(Acc).init(arena);
+    var index = std.StringHashMap(usize).init(arena);
+
+    for (ctx.sources) |src| {
+        if (ctx.only) |only| {
+            if (!only.contains(src.name)) continue;
+        }
+        if (pinnedUnchanged(ctx.opts, src, ctx.prev.get(src.name))) continue;
+        const key = try preKey(arena, src.owner, src.repo, null);
+        const slot = try index.getOrPut(key);
+        if (!slot.found_existing) {
+            slot.value_ptr.* = accs.items.len;
+            try accs.append(.{ .owner = src.owner, .repo = src.repo, .latest = false, .tags = std.ArrayList([]const u8).init(arena) });
+        }
+        const acc = &accs.items[slot.value_ptr.*];
+        if (src.tag) |t| {
+            var dup = false;
+            for (acc.tags.items) |x| {
+                if (std.mem.eql(u8, x, t)) dup = true;
+            }
+            if (!dup) try acc.tags.append(t);
+        } else acc.latest = true;
+    }
+
+    var reqs = std.ArrayList(api.RepoRequest).init(arena);
+    for (accs.items) |acc| {
+        const r = api.RepoRequest{ .owner = acc.owner, .repo = acc.repo, .want_latest = acc.latest, .tags = acc.tags.items };
+        // A name the query builder refuses is left to the REST path, which refuses it too.
+        api.validateRequest(arena, r) catch continue;
+        try reqs.append(r);
+    }
+    return reqs.toOwnedSlice();
+}
+
 fn processSource(ctx: *Ctx, a: Allocator, res: Allocator, i: usize) Result {
     const src = ctx.sources[i];
     const prev: ?Entry = ctx.prev.get(src.name);
@@ -1864,6 +2306,11 @@ fn processSource(ctx: *Ctx, a: Allocator, res: Allocator, i: usize) Result {
             const m = res.dupe(u8, msg) catch "failed";
             if (prev) |p| return .{ .status = .stale, .entry = p, .note = m };
             return .{ .status = .skipped, .note = m };
+        },
+        .limited => {
+            // Never dropped because of a rate limit: the previous entry stays.
+            if (prev) |p| return .{ .status = .limited, .entry = p, .note = "rate limited; previous entry carried forward" };
+            return .{ .status = .limited, .note = "rate limited; not in the catalog yet" };
         },
     }
 }
@@ -1900,8 +2347,17 @@ pub const Report = struct {
     carried: usize = 0,
     stale: usize = 0,
     skipped: usize = 0,
+    /// Sources the API rate limit kept from being checked. Those with a
+    /// previous entry are counted in `packages` too (carried forward).
+    limited: usize = 0,
+    /// Of `limited`, the ones that had no previous entry to keep.
+    limited_missing: usize = 0,
     manual: usize = 0,
     api_calls: usize = 0,
+    graphql_calls: usize = 0,
+    etag_hits: usize = 0,
+    rate_waits: usize = 0,
+    rate_waited_s: u64 = 0,
     bytes: u64 = 0,
     changed: bool = false,
 };
@@ -1940,7 +2396,7 @@ fn tempRoot(arena: Allocator) ![]u8 {
     return p;
 }
 
-const status_order = [_]Status{ .new, .updated, .stale, .skipped, .kept };
+const status_order = [_]Status{ .new, .updated, .stale, .skipped, .limited, .kept };
 
 pub fn execute(gpa: Allocator, opts: Options, out: anytype) !Report {
     var timer = try std.time.Timer.start();
@@ -1988,6 +2444,17 @@ pub fn execute(gpa: Allocator, opts: Options, out: anytype) !Report {
     const mode: Mode = if (opts.fixtures_dir != null) .fixtures else if (opts.use_curl) .curl else .http;
     var network = try Net.init(arena, gpa, mode, opts.token, opts.fixtures_dir, tmp_root);
     defer network.deinit();
+    network.link(opts.max_wait_s, opts.quiet);
+    network.transport = opts.transport;
+    if (opts.clock) |c| network.clock = c;
+
+    var etag_cache: api.EtagCache = undefined;
+    if (opts.etag_cache_path) |ep| {
+        if (mode != .fixtures) {
+            etag_cache = try api.EtagCache.load(arena, ep);
+            network.etags = &etag_cache;
+        }
+    }
 
     const results = try arena.alloc(Result, parsed.sources.len);
     @memset(results, .{});
@@ -2007,6 +2474,20 @@ pub fn execute(gpa: Allocator, opts: Options, out: anytype) !Report {
         .tmp_root = tmp_root,
     };
 
+    // One GraphQL query per batch of repositories replaces two REST calls per
+    // source. Only with a token (GraphQL refuses anonymous requests) and a real network.
+    if (opts.use_graphql and opts.token != null and mode != .fixtures) {
+        const reqs = try collectLookups(arena, &ctx);
+        if (reqs.len != 0) {
+            network.prefetch(arena, reqs, opts.batch_size);
+            if (!opts.quiet) try out.print("GraphQL: {d} repositories, {d} queries, {d} release records read ahead\n", .{
+                reqs.len,
+                network.graphql_calls.load(.monotonic),
+                network.pre_release.count(),
+            });
+        }
+    }
+
     if (opts.jobs <= 1 or parsed.sources.len <= 1) {
         for (0..parsed.sources.len) |i| runTask(&ctx, i);
     } else {
@@ -2017,6 +2498,10 @@ pub fn execute(gpa: Allocator, opts: Options, out: anytype) !Report {
         for (0..parsed.sources.len) |i| pool.spawnWg(&wg, runTask, .{ &ctx, i });
         wg.wait();
     }
+
+    if (network.etags) |c| c.save() catch |e| {
+        try out.print("warning: cannot save the ETag cache {s}: {s}\n", .{ opts.etag_cache_path.?, @errorName(e) });
+    };
 
     // ---- assemble ----------------------------------------------------------
     var report = Report{};
@@ -2031,6 +2516,10 @@ pub fn execute(gpa: Allocator, opts: Options, out: anytype) !Report {
             .stale => report.stale += 1,
             .skipped => report.skipped += 1,
             .carried => report.carried += 1,
+            .limited => {
+                report.limited += 1;
+                if (r.entry == null) report.limited_missing += 1;
+            },
             .not_selected => {},
         }
         if (manual.contains(src.name)) continue;
@@ -2062,6 +2551,10 @@ pub fn execute(gpa: Allocator, opts: Options, out: anytype) !Report {
 
     report.packages = entries.items.len;
     report.api_calls = network.api_calls.load(.monotonic);
+    report.graphql_calls = network.graphql_calls.load(.monotonic);
+    report.etag_hits = network.etag_hits.load(.monotonic);
+    report.rate_waits = network.rest.waits + network.gql.waits;
+    report.rate_waited_s = network.rest.waited_s + network.gql.waited_s;
     report.bytes = network.bytes.load(.monotonic);
 
     // Written before the guards, so a run that refuses to publish still says why.
@@ -2079,12 +2572,13 @@ pub fn execute(gpa: Allocator, opts: Options, out: anytype) !Report {
         try out.print("error: no packages were produced; leaving {s} untouched\n", .{opts.out_path});
         return error.EmptyCatalog;
     }
-    // A network outage or an exhausted rate limit fails nearly every source.
-    // The old entries would survive as "stale", but a green run that updated
-    // nothing would hide the problem, so it is an error instead.
+    // A network outage fails nearly every source. The old entries would
+    // survive as "stale", but a green run that updated nothing would hide the
+    // problem, so it is an error instead. A rate limit is not counted here:
+    // those sources are carried forward and reported on their own.
     const attempted = report.new + report.updated + report.kept + report.stale + report.skipped;
     if (!opts.allow_failures and attempted >= 10 and (report.stale + report.skipped) * 2 > attempted) {
-        try out.print("error: {d} of {d} sources failed (network, rate limit?); not writing {s} (use --allow-failures)\n", .{ report.stale + report.skipped, attempted, opts.out_path });
+        try out.print("error: {d} of {d} sources failed (network?); not writing {s} (use --allow-failures)\n", .{ report.stale + report.skipped, attempted, opts.out_path });
         return error.TooManyFailures;
     }
     if (!opts.allow_shrink and prev_loaded.entries.count() >= 10 and entries.items.len * 2 < prev_loaded.entries.count()) {
@@ -2128,18 +2622,26 @@ pub fn execute(gpa: Allocator, opts: Options, out: anytype) !Report {
 
     const secs = @as(f64, @floatFromInt(timer.read())) / 1e9;
     try out.print(
-        "\n{d} packages in {s} ({s}): {d} new, {d} updated, {d} kept, {d} carried, {d} stale, {d} skipped, {d} manual\n" ++
-            "API calls: {d}   downloaded: {d:.1} MB   time: {d:.1}s ({d} jobs)   registry check: 0 rejected\n",
+        "\n{d} packages in {s} ({s}): {d} new, {d} updated, {d} kept, {d} carried, {d} stale, {d} skipped, {d} rate limited, {d} manual\n" ++
+            "API calls: {d} ({d} GraphQL, {d} REST, {d} not modified)   waited for rate limits: {d} s   downloaded: {d:.1} MB   time: {d:.1}s ({d} jobs)   registry check: 0 rejected\n",
         .{
-            report.packages,                                opts.out_path,
-            if (report.changed) "changed" else "unchanged", report.new,
-            report.updated,                                 report.kept,
-            report.carried,                                 report.stale,
-            report.skipped,                                 report.manual,
-            report.api_calls,                               @as(f64, @floatFromInt(report.bytes)) / 1048576.0,
-            secs,                                           if (opts.jobs <= 1 or parsed.sources.len <= 1) 1 else @min(opts.jobs, parsed.sources.len),
+            report.packages,                                                                           opts.out_path,
+            if (report.changed) "changed" else "unchanged",                                            report.new,
+            report.updated,                                                                            report.kept,
+            report.carried,                                                                            report.stale,
+            report.skipped,                                                                            report.limited,
+            report.manual,                                                                             report.api_calls,
+            report.graphql_calls,                                                                      report.api_calls -| report.graphql_calls,
+            report.etag_hits,                                                                          report.rate_waited_s,
+            @as(f64, @floatFromInt(report.bytes)) / 1048576.0,                                         secs,
+            if (opts.jobs <= 1 or parsed.sources.len <= 1) 1 else @min(opts.jobs, parsed.sources.len),
         },
     );
+    if (report.limited != 0) {
+        try out.print("warning: the GitHub API rate limit stopped {d} lookups; {d} of them keep their previous entry (carried forward), {d} are not in the catalog yet. They are retried on the next run.\n", .{
+            report.limited, report.limited - report.limited_missing, report.limited_missing,
+        });
+    }
     return report;
 }
 
@@ -2173,8 +2675,22 @@ fn writeSummaryMarkdown(
     try w.print("| Packages | {d} ({d} GUI apps, {d} manual) |\n", .{ report.packages, apps, report.manual });
     try w.print("| New | {d} |\n| Updated | {d} |\n| Unchanged | {d} |\n", .{ report.new, report.updated, report.kept });
     try w.print("| Stale (failed, previous entry kept) | {d} |\n| Skipped (failed, nothing to keep) | {d} |\n", .{ report.stale, report.skipped });
-    try w.print("| GitHub API calls | {d} |\n| Downloaded | {d:.1} MB |\n", .{ report.api_calls, @as(f64, @floatFromInt(report.bytes)) / 1048576.0 });
+    try w.print("| Rate limited, carried forward (not a failure) | {d} |\n", .{report.limited - report.limited_missing});
+    try w.print("| Rate limited, not in the catalog yet | {d} |\n", .{report.limited_missing});
+    try w.print("| GitHub API calls | {d} ({d} GraphQL, {d} REST, {d} not modified) |\n", .{ report.api_calls, report.graphql_calls, report.api_calls -| report.graphql_calls, report.etag_hits });
+    try w.print("| Waited for rate limits | {d} s in {d} pauses |\n", .{ report.rate_waited_s, report.rate_waits });
+    try w.print("| Downloaded | {d:.1} MB |\n", .{@as(f64, @floatFromInt(report.bytes)) / 1048576.0});
     try w.print("| Time | {d:.1} s with {d} jobs |\n\n", .{ secs, jobs });
+
+    if (report.limited != 0) {
+        try w.print("#### Rate limited ({d})\n\nThe GitHub API rate limit stopped these lookups. This is not a failure of the projects: ", .{report.limited});
+        try w.writeAll("each one keeps its previous catalog entry and is checked again on the next run.\n\n| Package | Source | Status |\n| :--- | :--- | :--- |\n");
+        for (sources, results) |src, r| {
+            if (r.status != .limited) continue;
+            try w.print("| {s} | {s}/{s} | {s} |\n", .{ src.name, src.owner, src.repo, if (r.entry != null) "carried forward" else "not in the catalog yet" });
+        }
+        try w.writeAll("\n");
+    }
 
     if (report.stale + report.skipped == 0) {
         try w.writeAll("No source failed.\n");
@@ -2222,11 +2738,19 @@ const usage =
     \\  --curl                  use curl instead of std.http for all network access
     \\  --offline-fixtures DIR  read <owner>__<repo>.release.json / .repo.json and
     \\                          <owner>__<repo>/<asset> from DIR instead of the network
+    \\  --max-wait-min N        total minutes to wait for GitHub rate limits to reset
+    \\                          (default 20). A longer wait is not taken: API calls stop
+    \\                          and unfetched sources keep their previous entries
+    \\  --etag-cache FILE       remember REST ETags/bodies (JSON index; bodies in
+    \\                          FILE.bodies/) so unchanged records cost no quota
+    \\  --batch N               repositories per GraphQL query (default 40)
+    \\  --no-graphql            use the REST API only, two calls per source
     \\  --max-download-mb N     skip assets larger than this when they must be fetched
     \\  --allow-shrink          allow the catalog to lose more than half its packages
     \\  --allow-failures        write the catalog even when most sources failed
     \\
-    \\Reads GITHUB_TOKEN from the environment to raise the API rate limit.
+    \\Reads GITHUB_TOKEN from the environment: it raises the REST limit and enables
+    \\the batched GraphQL lookups, which need a token.
     \\SOURCE_DATE_EPOCH, if set, replaces the clock used for updated_at.
     \\
 ;
@@ -2249,7 +2773,7 @@ pub fn main() !void {
     var i: usize = 1;
     while (i < argv.len) : (i += 1) {
         const arg = argv[i];
-        const value_opts = [_][]const u8{ "--sources", "--out", "--previous", "--manual", "--only", "--offline-fixtures", "--jobs", "--max-download-mb", "--summary" };
+        const value_opts = [_][]const u8{ "--sources", "--out", "--previous", "--manual", "--only", "--offline-fixtures", "--jobs", "--max-download-mb", "--summary", "--max-wait-min", "--etag-cache", "--batch" };
         var needs_value = false;
         for (value_opts) |o| {
             if (std.mem.eql(u8, arg, o)) needs_value = true;
@@ -2283,6 +2807,16 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, arg, "--max-download-mb")) {
             const mb = std.fmt.parseInt(u64, value, 10) catch die("--max-download-mb wants a number", .{});
             opts.max_download_bytes = mb * 1024 * 1024;
+        } else if (std.mem.eql(u8, arg, "--max-wait-min")) {
+            const min = std.fmt.parseInt(u64, value, 10) catch die("--max-wait-min wants a number of minutes", .{});
+            opts.max_wait_s = min *| 60;
+        } else if (std.mem.eql(u8, arg, "--etag-cache")) {
+            opts.etag_cache_path = value;
+        } else if (std.mem.eql(u8, arg, "--batch")) {
+            opts.batch_size = std.fmt.parseInt(usize, value, 10) catch die("--batch wants a number", .{});
+            if (opts.batch_size == 0) opts.batch_size = 1;
+        } else if (std.mem.eql(u8, arg, "--no-graphql")) {
+            opts.use_graphql = false;
         } else if (std.mem.eql(u8, arg, "--curl")) {
             opts.use_curl = true;
         } else if (std.mem.eql(u8, arg, "--force")) {
@@ -2329,6 +2863,11 @@ pub fn main() !void {
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;
+
+test {
+    // The unit tests of the pure API helpers live in their own file.
+    _ = api;
+}
 
 test "sources: comments, quotes, overrides and bad lines" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
@@ -3175,6 +3714,508 @@ test "an app source: bundle name read from a zip, dmg taken from app=, dmg witho
     // Only qux, which has no previous entry and fails again, is fetched.
     try testing.expectEqual(@as(u64, nested.items.len), second.bytes);
     try testing.expect(!second.changed);
+}
+
+// ---- GraphQL batches, rate limits and ETags against a fake GitHub ----------
+
+const Script = *const fn (f: *FakeApi, a: Allocator, req: ApiRequest) anyerror!ApiResponse;
+
+/// Plays api.github.com and the clock: counts what was asked, answers from a
+/// per-test script, and "sleeps" by moving its own time forward.
+const FakeApi = struct {
+    script: Script,
+    mutex: std.Thread.Mutex = .{},
+    now: i64 = 1_800_000_000,
+    slept: u64 = 0,
+    sleeps: usize = 0,
+    calls: usize = 0,
+    gql: usize = 0,
+    rest: usize = 0,
+    inm_seen: usize = 0,
+
+    fn transport(self: *FakeApi) Transport {
+        return .{ .ctx = self, .callFn = callImpl };
+    }
+
+    fn clock(self: *FakeApi) api.Clock {
+        return .{ .ctx = self, .nowFn = nowImpl, .sleepFn = sleepImpl };
+    }
+
+    fn callImpl(ctx: ?*anyopaque, a: Allocator, req: ApiRequest) anyerror!ApiResponse {
+        const self: *FakeApi = @ptrCast(@alignCast(ctx.?));
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.calls += 1;
+        if (req.body != null) self.gql += 1 else self.rest += 1;
+        if (req.if_none_match != null) self.inm_seen += 1;
+        return self.script(self, a, req);
+    }
+
+    fn nowImpl(ctx: ?*anyopaque) i64 {
+        const self: *FakeApi = @ptrCast(@alignCast(ctx.?));
+        return self.now;
+    }
+
+    fn sleepImpl(ctx: ?*anyopaque, secs: u64) void {
+        const self: *FakeApi = @ptrCast(@alignCast(ctx.?));
+        self.now += @intCast(secs);
+        self.slept += secs;
+        self.sleeps += 1;
+    }
+};
+
+/// The names of the repositories a GraphQL request asks for, in order.
+fn queryRepoNames(a: Allocator, req: ApiRequest) ![]const []const u8 {
+    const root = try std.json.parseFromSliceLeaky(std.json.Value, a, req.body.?, .{});
+    const q = root.object.get("query").?.string;
+    var names = std.ArrayList([]const u8).init(a);
+    var pos: usize = 0;
+    while (std.mem.indexOfPos(u8, q, pos, ",name:\"")) |i| {
+        const start = i + ",name:\"".len;
+        const end = std.mem.indexOfScalarPos(u8, q, start, '"').?;
+        try names.append(q[start..end]);
+        pos = end;
+    }
+    return names.toOwnedSlice();
+}
+
+fn hexDigest(a: Allocator, data: []const u8) ![]u8 {
+    const h = hexOf(data);
+    return std.fmt.allocPrint(a, "sha256:{s}", .{h});
+}
+
+/// A GraphQL release object with one raw Linux asset and one raw macOS asset.
+fn gqlRelease(a: Allocator, owner: []const u8, repo: []const u8, tag: []const u8, with_digest: bool) ![]u8 {
+    const d1 = try hexDigest(a, repo);
+    const d2 = try hexDigest(a, tag);
+    const dig1 = if (with_digest) try std.fmt.allocPrint(a, ",\"digest\":\"{s}\"", .{d1}) else "";
+    const dig2 = if (with_digest) try std.fmt.allocPrint(a, ",\"digest\":\"{s}\"", .{d2}) else "";
+    return std.fmt.allocPrint(a,
+        \\{{"tagName":"{s}","releaseAssets":{{"pageInfo":{{"hasNextPage":false}},"nodes":[
+        \\ {{"name":"{s}-linux-amd64","downloadUrl":"https://github.com/{s}/{s}/releases/download/{s}/{s}-linux-amd64","size":10{s}}},
+        \\ {{"name":"{s}-darwin-arm64","downloadUrl":"https://github.com/{s}/{s}/releases/download/{s}/{s}-darwin-arm64","size":11{s}}}
+        \\]}}}}
+    , .{ tag, repo, owner, repo, tag, repo, dig1, repo, owner, repo, tag, repo, dig2 });
+}
+
+fn scriptCatalog(f: *FakeApi, a: Allocator, req: ApiRequest) anyerror!ApiResponse {
+    if (req.body == null) return .{ .status = 404, .body = "{\"message\":\"Not Found\"}" };
+    const q = (try std.json.parseFromSliceLeaky(std.json.Value, a, req.body.?, .{})).object.get("query").?.string;
+    // This stand-in knows the digest field.
+    try testing.expect(std.mem.indexOf(u8, q, " digest}") != null);
+    const names = try queryRepoNames(a, req);
+
+    var data = std.ArrayList(u8).init(a);
+    var errs = std.ArrayList(u8).init(a);
+    const w = data.writer();
+    for (names, 0..) |n, i| {
+        if (i != 0) try w.writeAll(",");
+        if (std.mem.eql(u8, n, "gone")) {
+            try w.print("\"r{d}\":null", .{i});
+            try errs.writer().print("{s}{{\"type\":\"NOT_FOUND\",\"path\":[\"r{d}\"],\"message\":\"Could not resolve to a Repository with the name 'acme/gone'.\"}}", .{ if (errs.items.len != 0) "," else "", i });
+        } else if (std.mem.eql(u8, n, "norel")) {
+            try w.print("\"r{d}\":{{\"description\":\"No releases\",\"homepageUrl\":null,\"url\":\"https://github.com/acme/norel\",\"licenseInfo\":null,\"latestRelease\":null}}", .{i});
+        } else if (std.mem.eql(u8, n, "beta")) {
+            try w.print("\"r{d}\":{{\"description\":\"B   tool\",\"homepageUrl\":\"https://beta.example\",\"url\":\"https://github.com/acme/beta\",\"licenseInfo\":{{\"spdxId\":\"Apache-2.0\"}},\"t0\":{s}}}", .{ i, try gqlRelease(a, "acme", "beta", "v2.0.0", true) });
+        } else {
+            try w.print("\"r{d}\":{{\"description\":\"Fast  tool\",\"homepageUrl\":\"\",\"url\":\"https://github.com/acme/{s}\",\"licenseInfo\":{{\"spdxId\":\"MIT\"}},\"latestRelease\":{s}}}", .{ i, n, try gqlRelease(a, "acme", n, "v1.0.0", true) });
+        }
+    }
+    const body = try std.fmt.allocPrint(a, "{{\"data\":{{{s}}},\"errors\":[{s}]}}", .{ data.items, errs.items });
+    return .{ .status = 200, .body = body, .info = .{ .remaining = 990, .reset = f.now + 3000 } };
+}
+
+test "GraphQL: one query serves many sources; a missing repo only fails itself" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    var env = try TestEnv.init(a);
+    defer env.tmp.cleanup();
+    try writeTestFile(env.tmp.dir, "sources.txt",
+        \\alpha acme/alpha
+        \\alpha-b acme/Alpha
+        \\beta acme/beta tag=v2.0.0
+        \\gone acme/gone
+        \\norel acme/norel
+    );
+
+    var fake = FakeApi{ .script = scriptCatalog };
+    var sink = std.ArrayList(u8).init(a);
+    const opts = Options{
+        .sources_path = env.sources,
+        .out_path = env.out,
+        .token = "test-token",
+        .transport = fake.transport(),
+        .clock = fake.clock(),
+        .jobs = 1,
+        .now_epoch = 1781740800,
+        .quiet = true,
+        .allow_failures = true,
+    };
+    const r = try execute(testing.allocator, opts, sink.writer());
+
+    // Five sources, four repositories, ONE API call, and no REST at all.
+    try testing.expectEqual(@as(usize, 1), fake.calls);
+    try testing.expectEqual(@as(usize, 1), fake.gql);
+    try testing.expectEqual(@as(usize, 0), fake.rest);
+    try testing.expectEqual(@as(usize, 1), r.api_calls);
+    try testing.expectEqual(@as(usize, 1), r.graphql_calls);
+    try testing.expectEqual(@as(usize, 3), r.new);
+    try testing.expectEqual(@as(usize, 2), r.skipped);
+    try testing.expectEqual(@as(usize, 0), r.limited);
+    try testing.expect(std.mem.indexOf(u8, sink.items, "Could not resolve to a Repository with the name 'acme/gone'") != null);
+    try testing.expect(std.mem.indexOf(u8, sink.items, "no published release") != null);
+
+    var diags = registry.LoadDiagnostics{};
+    var reg = try registry.loadFromJsonFile(testing.allocator, env.out, &diags);
+    defer reg.deinit();
+    try testing.expectEqual(@as(usize, 0), diags.rejected_packages);
+    try testing.expectEqual(@as(usize, 3), reg.count());
+
+    const alpha = reg.get("alpha").?;
+    try testing.expectEqualStrings("1.0.0", alpha.version);
+    try testing.expectEqualStrings("Fast tool", alpha.description);
+    try testing.expectEqualStrings("MIT", alpha.license);
+    try testing.expectEqualStrings("https://github.com/acme/alpha", alpha.homepage);
+    try testing.expectEqual(@as(usize, 2), alpha.platforms.len);
+    // The digest GraphQL reported is the pinned hash; nothing was downloaded.
+    const want = hexOf("alpha");
+    try testing.expectEqualStrings(&want, alpha.platform("x86_64-linux").?.sha256);
+    try testing.expectEqual(@as(u64, 0), r.bytes);
+    // The pinned source got its tag from release(tagName:), and the repository record's own fields.
+    const beta = reg.get("beta").?;
+    try testing.expectEqualStrings("2.0.0", beta.version);
+    try testing.expectEqualStrings("B tool", beta.description);
+    try testing.expectEqualStrings("Apache-2.0", beta.license);
+    try testing.expectEqualStrings("https://beta.example", beta.homepage);
+    try testing.expect(reg.get("alpha-b") != null);
+}
+
+fn scriptAlwaysLimited(f: *FakeApi, _: Allocator, _: ApiRequest) anyerror!ApiResponse {
+    return .{
+        .status = 403,
+        .body = "{\"message\":\"API rate limit exceeded for installation ID 123456.\"}",
+        .info = .{ .remaining = 0, .reset = f.now + 7200 },
+    };
+}
+
+fn sampleEntry(name: []const u8, version: []const u8) Entry {
+    const plats = [_]PlatEntry{.{
+        .tag = "x86_64-linux",
+        .url = "https://example.com/dl",
+        .sha256 = "1" ** 64,
+        .archive_type = "raw",
+        .bin_path = "tool",
+    }};
+    return .{ .name = name, .version = version, .description = "old", .bin = &.{"tool"}, .plats = &plats };
+}
+
+test "rate limited: stop at once when the reset is too far, carry every entry forward" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    var env = try TestEnv.init(a);
+    defer env.tmp.cleanup();
+    try writeTestFile(env.tmp.dir, "sources.txt",
+        \\alpha acme/alpha
+        \\beta acme/beta
+        \\fresh acme/fresh
+        \\gamma acme/gamma
+    );
+    // The previous catalog has three of the four; "fresh" was never built.
+    const prev_text = try renderIndex(a, &.{ sampleEntry("alpha", "0.9.0"), sampleEntry("beta", "0.5.0"), sampleEntry("gamma", "2.0.0") }, "2026-01-02T03:04:05Z");
+    try writeTestFile(env.tmp.dir, "prev.json", prev_text);
+    const prev_path = try std.fs.path.join(a, &.{ env.root, "prev.json" });
+    const summary = try std.fs.path.join(a, &.{ env.root, "summary.md" });
+
+    var fake = FakeApi{ .script = scriptAlwaysLimited };
+    var sink = std.ArrayList(u8).init(a);
+    const opts = Options{
+        .sources_path = env.sources,
+        .out_path = env.out,
+        .previous_path = prev_path,
+        .summary_path = summary,
+        .token = "test-token",
+        .transport = fake.transport(),
+        .clock = fake.clock(),
+        .max_wait_s = 20 * 60, // the window resets in two hours: too long
+        .jobs = 1,
+        .now_epoch = 1781740800,
+        .quiet = true,
+    };
+    // No --allow-failures: a rate limit must not trip the "most sources failed" guard.
+    const r = try execute(testing.allocator, opts, sink.writer());
+
+    // One GraphQL attempt and one REST attempt (separate buckets), then nothing.
+    try testing.expectEqual(@as(usize, 2), fake.calls);
+    try testing.expectEqual(@as(u64, 0), fake.slept);
+    try testing.expectEqual(@as(usize, 4), r.limited);
+    try testing.expectEqual(@as(usize, 1), r.limited_missing);
+    try testing.expectEqual(@as(usize, 0), r.stale);
+    try testing.expectEqual(@as(usize, 0), r.skipped);
+    // Nothing dropped: all three previous entries are in the output, untouched.
+    try testing.expectEqual(@as(usize, 3), r.packages);
+    const out_text = try std.fs.cwd().readFileAlloc(a, env.out, 1 << 20);
+    const loaded = try loadEntries(a, out_text);
+    try testing.expectEqualStrings("0.9.0", loaded.entries.get("alpha").?.version);
+    try testing.expectEqualStrings("0.5.0", loaded.entries.get("beta").?.version);
+    try testing.expectEqualStrings("2.0.0", loaded.entries.get("gamma").?.version);
+    try testing.expect(loaded.entries.get("fresh") == null);
+
+    try testing.expect(std.mem.indexOf(u8, sink.items, "rate limited") != null);
+    const md = try std.fs.cwd().readFileAlloc(a, summary, 1 << 20);
+    try testing.expect(std.mem.indexOf(u8, md, "#### Rate limited (4)") != null);
+    try testing.expect(std.mem.indexOf(u8, md, "| alpha | acme/alpha | carried forward |") != null);
+    try testing.expect(std.mem.indexOf(u8, md, "| fresh | acme/fresh | not in the catalog yet |") != null);
+    // It is not reported as a failure.
+    try testing.expect(std.mem.indexOf(u8, md, "No source failed.") != null);
+    try testing.expect(std.mem.indexOf(u8, md, "#### Failures") == null);
+}
+
+fn scriptLimitedOnce(f: *FakeApi, a: Allocator, req: ApiRequest) anyerror!ApiResponse {
+    if (f.calls == 1) {
+        return .{
+            .status = 403,
+            .body = "{\"message\":\"API rate limit exceeded\"}",
+            .info = .{ .remaining = 0, .reset = f.now + 30 },
+        };
+    }
+    return scriptCatalog(f, a, req);
+}
+
+test "rate limited: waits for a reset that fits the budget, then carries on" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    var env = try TestEnv.init(a);
+    defer env.tmp.cleanup();
+    try writeTestFile(env.tmp.dir, "sources.txt", "alpha acme/alpha\n");
+
+    var fake = FakeApi{ .script = scriptLimitedOnce };
+    var sink = std.ArrayList(u8).init(a);
+    const opts = Options{
+        .sources_path = env.sources,
+        .out_path = env.out,
+        .token = "test-token",
+        .transport = fake.transport(),
+        .clock = fake.clock(),
+        .max_wait_s = 600,
+        .jobs = 1,
+        .now_epoch = 1781740800,
+        .quiet = true,
+    };
+    const r = try execute(testing.allocator, opts, sink.writer());
+    try testing.expectEqual(@as(usize, 2), fake.calls); // the refused call and the repeat
+    try testing.expectEqual(@as(u64, 32), fake.slept); // 30 s to the reset + 2 s slack
+    try testing.expectEqual(@as(u64, 32), r.rate_waited_s);
+    try testing.expectEqual(@as(usize, 1), r.new);
+    try testing.expectEqual(@as(usize, 0), r.limited);
+}
+
+fn scriptSecondary(f: *FakeApi, a: Allocator, req: ApiRequest) anyerror!ApiResponse {
+    // A secondary limit: plenty of quota left, but "retry-after" says slow down.
+    if (f.calls == 1) return secondaryLimit(f);
+    return scriptCatalog(f, a, req);
+}
+
+fn secondaryLimit(f: *FakeApi) ApiResponse {
+    return .{
+        .status = 403,
+        .body = "{\"message\":\"You have exceeded a secondary rate limit.\"}",
+        .info = .{ .remaining = 800, .reset = f.now + 2000, .retry_after = 45 },
+    };
+}
+
+fn scriptSecondaryAlways(f: *FakeApi, _: Allocator, _: ApiRequest) anyerror!ApiResponse {
+    return secondaryLimit(f);
+}
+
+test "rate limited: a secondary limit's retry-after is honoured, and refused when over budget" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    var env = try TestEnv.init(a);
+    defer env.tmp.cleanup();
+    try writeTestFile(env.tmp.dir, "sources.txt", "alpha acme/alpha\n");
+    var sink = std.ArrayList(u8).init(a);
+
+    var fake = FakeApi{ .script = scriptSecondary };
+    var opts = Options{
+        .sources_path = env.sources,
+        .out_path = env.out,
+        .token = "test-token",
+        .transport = fake.transport(),
+        .clock = fake.clock(),
+        .max_wait_s = 600,
+        .jobs = 1,
+        .now_epoch = 1781740800,
+        .quiet = true,
+    };
+    const r = try execute(testing.allocator, opts, sink.writer());
+    try testing.expectEqual(@as(u64, 47), fake.slept);
+    try testing.expectEqual(@as(usize, 1), r.new);
+
+    // The same pause does not fit a 30 s budget: stop, and keep going without the API.
+    var fake2 = FakeApi{ .script = scriptSecondaryAlways };
+    opts.transport = fake2.transport();
+    opts.clock = fake2.clock();
+    opts.max_wait_s = 30;
+    opts.out_path = try std.fs.path.join(a, &.{ env.root, "second.json" });
+    try testing.expectError(error.EmptyCatalog, execute(testing.allocator, opts, sink.writer()));
+    try testing.expectEqual(@as(u64, 0), fake2.slept);
+}
+
+/// REST stand-in: a release and a repository record with ETags; answers 304
+/// when the ETag it handed out comes back.
+fn scriptRest(f: *FakeApi, a: Allocator, req: ApiRequest) anyerror!ApiResponse {
+    const is_release = std.mem.endsWith(u8, req.url, "/releases/latest");
+    const etag: []const u8 = if (is_release) "\"rel-1\"" else "\"repo-1\"";
+    if (req.if_none_match) |inm| {
+        if (std.mem.eql(u8, inm, etag)) return .{ .status = 304, .body = "", .info = .{ .remaining = 55 } };
+    }
+    const owned_etag = try a.dupe(u8, etag);
+    const info = api.RateInfo{ .remaining = 58, .reset = f.now + 3000, .etag = owned_etag };
+    if (is_release) {
+        const rel = try gqlRelease(a, "acme", "alpha", "v1.0.0", true);
+        // Same content in REST dress.
+        const root = try std.json.parseFromSliceLeaky(std.json.Value, a, rel, .{});
+        var body = std.ArrayList(u8).init(a);
+        const w = body.writer();
+        try w.print("{{\"tag_name\":\"{s}\",\"assets\":[", .{root.object.get("tagName").?.string});
+        for (root.object.get("releaseAssets").?.object.get("nodes").?.array.items, 0..) |n, i| {
+            if (i != 0) try w.writeAll(",");
+            try w.print("{{\"name\":\"{s}\",\"browser_download_url\":\"{s}\",\"size\":{d},\"digest\":\"{s}\"}}", .{
+                n.object.get("name").?.string,
+                n.object.get("downloadUrl").?.string,
+                n.object.get("size").?.integer,
+                n.object.get("digest").?.string,
+            });
+        }
+        try w.writeAll("]}");
+        return .{ .status = 200, .body = body.items, .info = info };
+    }
+    return .{ .status = 200, .body = widget_repo_json, .info = info };
+}
+
+test "REST without a token: ETag cache turns the second run's lookups into 304s" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    var env = try TestEnv.init(a);
+    defer env.tmp.cleanup();
+    try writeTestFile(env.tmp.dir, "sources.txt", "alpha acme/alpha\n");
+    const etags = try std.fs.path.join(a, &.{ env.root, "etags", "cache.json" });
+    var sink = std.ArrayList(u8).init(a);
+
+    var fake = FakeApi{ .script = scriptRest };
+    var opts = Options{
+        .sources_path = env.sources,
+        .out_path = env.out,
+        .etag_cache_path = etags,
+        .transport = fake.transport(),
+        .clock = fake.clock(),
+        .jobs = 1,
+        .now_epoch = 1781740800,
+        .quiet = true,
+    };
+    // No token: GraphQL is not used, the REST path is: a release and a repository call.
+    const first = try execute(testing.allocator, opts, sink.writer());
+    try testing.expectEqual(@as(usize, 2), fake.rest);
+    try testing.expectEqual(@as(usize, 0), fake.gql);
+    try testing.expectEqual(@as(usize, 0), first.etag_hits);
+    try testing.expectEqual(@as(usize, 1), first.new);
+    try std.fs.cwd().access(etags, .{});
+
+    // Second run, fresh state: the cache answers both calls with 304.
+    opts.out_path = try std.fs.path.join(a, &.{ env.root, "again.json" });
+    const second = try execute(testing.allocator, opts, sink.writer());
+    try testing.expectEqual(@as(usize, 4), fake.rest);
+    try testing.expectEqual(@as(usize, 2), fake.inm_seen);
+    try testing.expectEqual(@as(usize, 2), second.etag_hits);
+    try testing.expectEqual(@as(usize, 1), second.new);
+    const one = try std.fs.cwd().readFileAlloc(a, env.out, 1 << 20);
+    const two = try std.fs.cwd().readFileAlloc(a, opts.out_path, 1 << 20);
+    try testing.expectEqualStrings(one, two);
+}
+
+var prefetch_digest_seen: usize = 0;
+
+/// First answer: the schema has no `digest`. Then a 502 for the whole batch, then good answers.
+fn scriptPrefetch(f: *FakeApi, a: Allocator, req: ApiRequest) anyerror!ApiResponse {
+    if (req.body == null) {
+        // REST fallback for the repository whose assets did not fit one page.
+        try testing.expect(std.mem.indexOf(u8, req.url, "/repos/acme/big/releases/latest") != null);
+        return .{ .status = 200, .body = "{\"tag_name\":\"v9\",\"assets\":[]}" };
+    }
+    const q = (try std.json.parseFromSliceLeaky(std.json.Value, a, req.body.?, .{})).object.get("query").?.string;
+    if (std.mem.indexOf(u8, q, " digest}") != null) {
+        prefetch_digest_seen += 1;
+        return .{ .status = 200, .body = "{\"errors\":[{\"path\":[\"fragment R\"],\"message\":\"Field 'digest' doesn't exist on type 'ReleaseAsset'\"}]}" };
+    }
+    const names = try queryRepoNames(a, req);
+    if (names.len == 5) return .{ .status = 502, .body = "<html>Bad Gateway</html>" };
+
+    var data = std.ArrayList(u8).init(a);
+    const w = data.writer();
+    for (names, 0..) |n, i| {
+        if (i != 0) try w.writeAll(",");
+        const big = std.mem.eql(u8, n, "big");
+        try w.print("\"r{d}\":{{\"description\":\"repo {s}\",\"homepageUrl\":null,\"url\":\"https://github.com/acme/{s}\",\"licenseInfo\":null,\"latestRelease\":{{\"tagName\":\"v1\",\"releaseAssets\":{{\"pageInfo\":{{\"hasNextPage\":{s}}},\"nodes\":[]}}}}}}", .{ i, n, n, if (big) "true" else "false" });
+    }
+    _ = f;
+    return .{ .status = 200, .body = try std.fmt.allocPrint(a, "{{\"data\":{{{s}}}}}", .{data.items}) };
+}
+
+test "prefetch: asks again without digest, splits a failing batch, leaves oversized releases to REST" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(a, ".");
+
+    var net_ = try Net.init(a, testing.allocator, .http, "test-token", null, root);
+    defer net_.deinit();
+    net_.link(0, true);
+    var fake = FakeApi{ .script = scriptPrefetch };
+    net_.transport = fake.transport();
+    net_.clock = fake.clock();
+    prefetch_digest_seen = 0;
+
+    const reqs = [_]api.RepoRequest{
+        .{ .owner = "acme", .repo = "a" },
+        .{ .owner = "acme", .repo = "b" },
+        .{ .owner = "acme", .repo = "c" },
+        .{ .owner = "acme", .repo = "d" },
+        .{ .owner = "Acme", .repo = "big" },
+    };
+    net_.prefetch(a, &reqs, 40);
+
+    // digest attempt, retry without it (502), then the two halves.
+    try testing.expectEqual(@as(usize, 1), prefetch_digest_seen);
+    try testing.expect(!net_.graphql_digest);
+    try testing.expectEqual(@as(usize, 4), fake.gql);
+    try testing.expectEqual(@as(usize, 0), fake.rest);
+
+    // Every repository record arrived; lookups are case-insensitive on owner/repo.
+    for ([_][]const u8{ "a", "b", "c", "d", "big" }) |n| {
+        const body = try net_.fetchRepo(a, "acme", n);
+        const want = try std.fmt.allocPrint(a, "repo {s}", .{n});
+        try testing.expect(std.mem.indexOf(u8, body, want) != null);
+    }
+    try testing.expectEqual(@as(usize, 0), fake.rest);
+    const rel = try net_.fetchRelease(a, "acme", "a", null);
+    try testing.expect(std.mem.indexOf(u8, rel, "\"tag_name\":\"v1\"") != null);
+    // The one with too many assets goes to REST, once.
+    const big = try net_.fetchRelease(a, "acme", "big", null);
+    try testing.expect(std.mem.indexOf(u8, big, "\"v9\"") != null);
+    try testing.expectEqual(@as(usize, 1), fake.rest);
 }
 
 // ---- the real catalog/sources.txt -------------------------------------------

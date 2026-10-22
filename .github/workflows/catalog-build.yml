@@ -7,7 +7,17 @@ name: Catalog build
 # and signs it (see catalog.yml and catalog/README.md).
 #
 # Needs no secrets. GITHUB_TOKEN raises the API limit to 1,000 requests an hour
-# per repository and lets the run push its one branch.
+# per repository (shared by every workflow of the repository) and lets the run
+# push its one branch.
+#
+# API use is kept small on purpose: the builder looks projects up in GraphQL
+# batches of 40 (about 10 requests for the whole catalog instead of two per
+# project), sends If-None-Match for the REST calls it still makes (an ETag cache
+# kept with actions/cache; a 304 costs no quota), and waits for the rate limit to
+# reset when that takes at most 50 minutes. If the limit cannot be waited out,
+# the sources it has not looked at keep their previous entries: they are reported
+# as "rate limited (carried forward)", not as failures, and the run still ends
+# green with a complete catalog.
 
 on:
   workflow_dispatch:
@@ -23,6 +33,7 @@ on:
     paths:
       - "catalog/**"
       - "tools/build-catalog.zig"
+      - "tools/catalog_api.zig"
       - ".github/workflows/catalog-build.yml"
 
 permissions:
@@ -42,7 +53,8 @@ jobs:
   build:
     name: Build, validate and publish unsigned
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # Room for a 50 minute rate-limit wait plus the downloads and validation.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -68,6 +80,21 @@ jobs:
           fi
           echo "PREVIOUS=${prev}" >> "${GITHUB_ENV}"
 
+      - name: Week key for the ETag cache
+        id: week
+        run: echo "week=$(date -u +%G-W%V)" >> "${GITHUB_OUTPUT}"
+
+      - name: Restore the ETag cache
+        # REST lookups send If-None-Match from this cache; a 304 is free. One
+        # cache per ISO week keeps it from growing without bound.
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/catalog-etag
+          key: catalog-etag-${{ steps.week.outputs.week }}-${{ github.run_id }}
+          restore-keys: |
+            catalog-etag-${{ steps.week.outputs.week }}-
+            catalog-etag-
+
       - name: Build the full catalog from upstream releases
         id: build
         env:
@@ -76,16 +103,28 @@ jobs:
         run: |
           set -euo pipefail
           out="${RUNNER_TEMP}/catalog-out"
-          mkdir -p "${out}"
+          mkdir -p "${out}" .cache/catalog-etag
           args=(--sources catalog/sources.txt --manual catalog/manual.json
                 --out "${out}/index.json" --previous "${PREVIOUS}"
                 --jobs "${CATALOG_JOBS}" --allow-failures
+                --max-wait-min 50 --etag-cache .cache/catalog-etag/etag.json
                 --summary "${RUNNER_TEMP}/build-summary.md")
           if [ "${INPUT_FORCE:-false}" = "true" ]; then args+=(--force); fi
           start="$(date +%s)"
           ./zig-out/bin/build-catalog "${args[@]}" 2>&1 | tee "${RUNNER_TEMP}/build.log"
           echo "wall clock: $(( $(date +%s) - start )) s"
           echo "OUT=${out}/index.json" >> "${GITHUB_ENV}"
+          # A rate limit is not a failure, but a maintainer should see it.
+          if grep -q '^warning: the GitHub API rate limit stopped' "${RUNNER_TEMP}/build.log"; then
+            echo "::warning title=Catalog build was rate limited::$(grep -m1 '^warning: the GitHub API rate limit stopped' "${RUNNER_TEMP}/build.log")"
+          fi
+
+      - name: Save the ETag cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/catalog-etag
+          key: catalog-etag-${{ steps.week.outputs.week }}-${{ github.run_id }}
 
       - name: Validate with abv0
         run: |

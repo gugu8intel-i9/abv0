@@ -146,6 +146,25 @@ The builder's options, from its usage text:
 | `--max-download-mb N` | Skip assets larger than this when they must be fetched |
 | `--allow-shrink` | Allow the catalog to lose more than half its packages |
 | `--allow-failures` | Write the catalog even when most sources failed |
+| `--max-wait-min N` | Total minutes the run may wait for the API rate limit to reset (default 20; the workflows pass 50). A longer wait is not taken: API calls stop and every source not yet looked at keeps its previous entry |
+| `--etag-cache FILE` | Keep REST ETags (JSON index; bodies in `FILE.bodies/`) and send `If-None-Match`; a `304` costs no quota. The workflows keep it with `actions/cache`, one cache per week |
+| `--batch N` | Repositories per GraphQL query (default 40) |
+| `--no-graphql` | Use the REST API only (two calls per source) |
+
+### API use and rate limits
+
+With a token, the builder reads the repository record and the release of up to 40 projects
+in **one GraphQL query** (`description`, `homepageUrl`, `licenseInfo`, `latestRelease` with
+its assets and their `digest`). The full catalog of about 380 sources therefore needs about
+10 API requests, not about 760. Without a token (GraphQL needs one), or for a repository
+GraphQL could not answer (a release with more than 100 assets, a transient error), it falls
+back to the REST API.
+
+Every response's `x-ratelimit-*` and `retry-after` headers are tracked per bucket (REST,
+GraphQL). When one is empty the run waits for the reset if that fits in `--max-wait-min`;
+otherwise it stops calling the API. Sources it never looked at keep their previous catalog
+entry and are reported as **rate limited (carried forward)**, apart from real failures, and the
+run still finishes normally. They are checked again on the next run.
 
 `--offline-fixtures catalog/fixtures` builds the committed fixtures without any network
 access. Only the projects that have fixtures can be built that way.
