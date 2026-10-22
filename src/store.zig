@@ -16,6 +16,7 @@ const stream = @import("stream.zig");
 const ghrelease = @import("ghrelease.zig");
 const ghverify = @import("ghverify.zig");
 const bindetect = @import("bindetect.zig");
+const shim = @import("shim.zig");
 
 pub const Package = registry.Package;
 
@@ -802,6 +803,142 @@ pub const Store = struct {
     /// the ownership file. Refuses the whole set if any destination belongs to
     /// someone else, so a refusal leaves the bin directory untouched.
     fn linkPlans(self: *Store, a: std.mem.Allocator, pkg: Package, plans: []const LinkPlan, opts: InstallOptions) !usize {
+        return self.linkPlansFor(a, pkg, plans, opts, builtin.os.tag, null);
+    }
+
+    /// How an executable reaches the bin directory.
+    pub const LinkMethod = enum {
+        /// Windows: `<bin>\<name>.exe` is a copy/hard link of abv0.exe and
+        /// `<bin>\<name>.shim` names the real executable in the store, so the
+        /// loader searches the store directory (not bin) for DLLs.
+        shim,
+        /// Symlink / hard link / clonefile, as before.
+        link,
+        /// Windows script (.cmd/.bat/.ps1): cannot be launched through a shim
+        /// and a copy named `.exe` would not run, so it is not linked.
+        skip_script,
+    };
+
+    /// Pure decision: how to link `bin_path` (the executable inside the
+    /// store) on `os`. Only Windows uses shims.
+    pub fn linkMethodFor(os: std.Target.Os.Tag, bin_path: []const u8) LinkMethod {
+        if (os != .windows) return .link;
+        var ext: []const u8 = "";
+        var i = bin_path.len;
+        while (i > 0) {
+            i -= 1;
+            const c = bin_path[i];
+            if (c == '/' or c == '\\') break;
+            if (c == '.') {
+                ext = bin_path[i..];
+                break;
+            }
+        }
+        for ([_][]const u8{ ".cmd", ".bat", ".ps1" }) |script| {
+            if (std.ascii.eqlIgnoreCase(ext, script)) return .skip_script;
+        }
+        return .shim;
+    }
+
+    /// Create the launcher pair for one planned bin. The caller has already
+    /// established that this package may take the name (owner, legacy or
+    /// --force), so a leftover plain link or foreign exe is replaced.
+    fn installShimPair(a: std.mem.Allocator, p: LinkPlan, self_exe: ?[]const u8) !void {
+        const bin_dir = std.fs.path.dirname(p.dst) orelse ".";
+        // A shim target must be absolute; a relative store root is resolved.
+        var resolved: ?[]u8 = null;
+        defer if (resolved) |r| a.free(r);
+        const target: []const u8 = if (shim.isAbsoluteTarget(p.src)) p.src else blk: {
+            resolved = try std.fs.cwd().realpathAlloc(a, p.src);
+            break :blk resolved.?;
+        };
+        shim.writeShimWithSelf(a, bin_dir, p.bin, target, &.{}, self_exe) catch |e| switch (e) {
+            error.WouldOverwriteNonShim => {
+                // Typically a plain hard link left by an older abv0.
+                _ = removeBinFiles(a, bin_dir, p.bin, .windows) catch false;
+                try shim.writeShimWithSelf(a, bin_dir, p.bin, target, &.{}, self_exe);
+            },
+            else => return e,
+        };
+    }
+
+    /// Delete the files that make up bin `name` in `bin_dir`. In shim mode
+    /// that is the launcher exe and its `.shim`; otherwise only the exe/link.
+    /// Returns whether anything was deleted. The `.shim` is kept when the
+    /// launcher exe cannot be removed (it is running), so the pair stays
+    /// consistent.
+    fn removeBinFiles(a: std.mem.Allocator, bin_dir: []const u8, name: []const u8, os: std.Target.Os.Tag) !bool {
+        var removed = false;
+        const exe_name = try std.fmt.allocPrint(a, "{s}{s}", .{ name, platform.exe_suffix });
+        defer a.free(exe_name);
+        const exe_path = try std.fs.path.join(a, &.{ bin_dir, exe_name });
+        defer a.free(exe_path);
+        var exe_gone = false;
+        if (std.fs.cwd().deleteFile(exe_path)) |_| {
+            removed = true;
+            exe_gone = true;
+        } else |e| {
+            exe_gone = e == error.FileNotFound;
+        }
+        if (os == .windows and exe_gone) {
+            const shim_name = try std.fmt.allocPrint(a, "{s}{s}", .{ name, shim.shim_suffix });
+            defer a.free(shim_name);
+            const shim_path = try std.fs.path.join(a, &.{ bin_dir, shim_name });
+            defer a.free(shim_path);
+            if (std.fs.cwd().deleteFile(shim_path)) |_| {
+                removed = true;
+            } else |_| {}
+        }
+        return removed;
+    }
+
+    pub const BinHealth = enum { ok, missing_exe, missing_shim, bad_shim, missing_target };
+
+    /// State of installed bin `name`. Off Windows this is just "does the link
+    /// resolve"; on Windows the launcher pair must exist and its target too.
+    fn binHealth(a: std.mem.Allocator, bin_dir: []const u8, name: []const u8, os: std.Target.Os.Tag) BinHealth {
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const aa = arena.allocator();
+        const exe_name = std.fmt.allocPrint(aa, "{s}{s}", .{ name, platform.exe_suffix }) catch return .missing_exe;
+        const exe_path = std.fs.path.join(aa, &.{ bin_dir, exe_name }) catch return .missing_exe;
+        std.fs.cwd().access(exe_path, .{}) catch return .missing_exe;
+        if (os != .windows) return .ok;
+
+        const shim_name = std.fmt.allocPrint(aa, "{s}{s}", .{ name, shim.shim_suffix }) catch return .bad_shim;
+        const shim_path = std.fs.path.join(aa, &.{ bin_dir, shim_name }) catch return .bad_shim;
+        const s = shim.readShimFile(aa, shim_path) catch |e| return if (e == error.FileNotFound) .missing_shim else .bad_shim;
+        if (!platform.pathExists(s.path)) return .missing_target;
+        return .ok;
+    }
+
+    /// Absolute store targets of every `.shim` in the bin directory: the
+    /// shim-world counterpart of "where do the bin symlinks point", for code
+    /// that must not delete a store directory a launcher still uses.
+    pub fn binShimTargets(self: *const Store, a: std.mem.Allocator) ![][]const u8 {
+        var out = std.ArrayList([]const u8).init(a);
+        var dir = std.fs.cwd().openDir(self.bin_root, .{ .iterate = true }) catch return out.toOwnedSlice();
+        defer dir.close();
+        var it = dir.iterate();
+        while (try it.next()) |entry| {
+            if (entry.kind != .file) continue;
+            if (!std.mem.endsWith(u8, entry.name, shim.shim_suffix)) continue;
+            const path = try std.fs.path.join(a, &.{ self.bin_root, entry.name });
+            const s = shim.readShimFile(a, path) catch continue;
+            try out.append(s.path);
+        }
+        return out.toOwnedSlice();
+    }
+
+    fn linkPlansFor(
+        self: *Store,
+        a: std.mem.Allocator,
+        pkg: Package,
+        plans: []const LinkPlan,
+        opts: InstallOptions,
+        os: std.Target.Os.Tag,
+        self_exe: ?[]const u8,
+    ) !usize {
         if (plans.len == 0) return 0;
 
         var guard = try Guard.acquire(a, self.locks_root, owners_lock);
@@ -813,6 +950,7 @@ pub const Store = struct {
         // Anything already sitting at a destination must be a link this same
         // package made earlier. Otherwise it belongs to someone else.
         for (plans) |p| {
+            if (linkMethodFor(os, p.src) == .skip_script) continue;
             if (!platform.pathExists(p.dst)) continue;
             if (ownerOf(owners.recs.items, "bin", p.bin)) |owner| {
                 if (std.mem.eql(u8, owner, pkg.name)) continue;
@@ -830,16 +968,33 @@ pub const Store = struct {
 
         var linked: usize = 0;
         for (plans) |p| {
+            const method = linkMethodFor(os, p.src);
+            if (method == .skip_script) {
+                term.err("{s}warning{s}: {s}: '{s}' is a script (.cmd/.bat/.ps1); scripts cannot be linked on Windows, skipping\n", .{ term.yellow, term.reset, pkg.name, p.bin });
+                continue;
+            }
             platform.setExecutable(p.src); // was a `chmod +x` subprocess per binary
             dropOwner(&owners.recs, "bin", p.bin);
-            const kind = platform.fastLink(p.src, p.dst) catch |e| {
-                term.err("{s}warning{s}: could not link {s}: {s}\n", .{ term.yellow, term.reset, p.bin, @errorName(e) });
-                continue;
+            const label: []const u8 = switch (method) {
+                .shim => blk: {
+                    installShimPair(a, p, self_exe) catch |e| {
+                        term.err("{s}warning{s}: could not link {s}: {s}\n", .{ term.yellow, term.reset, p.bin, @errorName(e) });
+                        continue;
+                    };
+                    break :blk "launcher shim";
+                },
+                else => blk: {
+                    const kind = platform.fastLink(p.src, p.dst) catch |e| {
+                        term.err("{s}warning{s}: could not link {s}: {s}\n", .{ term.yellow, term.reset, p.bin, @errorName(e) });
+                        continue;
+                    };
+                    break :blk kind.label();
+                },
             };
             try owners.recs.append(.{ .kind = "bin", .name = p.bin, .pkg = pkg.name });
             linked += 1;
             if (!opts.quiet) {
-                term.print("  {s}link{s}     {s} {s}({s}){s}\n", .{ term.green, term.reset, p.bin, term.dim, kind.label(), term.reset });
+                term.print("  {s}link{s}     {s} {s}({s}){s}\n", .{ term.green, term.reset, p.bin, term.dim, label, term.reset });
             }
         }
         try self.writeOwners(a, owners.recs.items);
@@ -1142,12 +1297,9 @@ pub const Store = struct {
                     continue;
                 }
                 if (std.mem.eql(u8, r.kind, "bin") and safepath.isValidId(r.name)) {
-                    const dst_name = try std.fmt.allocPrint(a, "{s}{s}", .{ r.name, platform.exe_suffix });
-                    defer a.free(dst_name);
-                    const p = try std.fs.path.join(a, &.{ self.bin_root, dst_name });
-                    defer a.free(p);
-                    if (std.fs.cwd().deleteFile(p)) |_| {
-                        removed = true;
+                    // On Windows this removes the launcher exe and its .shim.
+                    if (removeBinFiles(a, self.bin_root, r.name, builtin.os.tag)) |gone| {
+                        if (gone) removed = true;
                     } else |_| {}
                 } else if (std.mem.eql(u8, r.kind, "app") and isSafeAppName(r.name)) {
                     const p = try std.fs.path.join(a, &.{ self.apps_root, r.name });
@@ -1380,14 +1532,16 @@ pub const Store = struct {
             if (!self.isInstalled(pkg, platform_name)) continue;
 
             for (pkg.bin) |bin_name| {
-                const dst_name = try std.fmt.allocPrint(a, "{s}{s}", .{ bin_name, platform.exe_suffix });
-                defer a.free(dst_name);
-                const p = try std.fs.path.join(a, &.{ self.bin_root, dst_name });
-                defer a.free(p);
-                std.fs.cwd().access(p, .{}) catch {
-                    h.broken_links += 1;
-                    term.print("  {s}broken{s} {s} -> {s}\n", .{ term.red, term.reset, pkg.name, bin_name });
+                const health = binHealth(a, self.bin_root, bin_name, builtin.os.tag);
+                if (health == .ok) continue;
+                h.broken_links += 1;
+                const why: []const u8 = switch (health) {
+                    .ok, .missing_exe => "",
+                    .missing_shim => " (no launcher shim; run `abv0 fix`)",
+                    .bad_shim => " (unreadable launcher shim; run `abv0 fix`)",
+                    .missing_target => " (shim target is missing; run `abv0 fix`)",
                 };
+                term.print("  {s}broken{s} {s} -> {s}{s}\n", .{ term.red, term.reset, pkg.name, bin_name, why });
             }
         }
         if (h.broken_links == 0) term.print("  {s}ok{s}   no broken links\n", .{ term.green, term.reset });
@@ -1415,13 +1569,7 @@ pub const Store = struct {
 
             var needs_relink = false;
             for (pkg.bin) |bin_name| {
-                const dst_name = try std.fmt.allocPrint(a, "{s}{s}", .{ bin_name, platform.exe_suffix });
-                defer a.free(dst_name);
-                const p = try std.fs.path.join(a, &.{ self.bin_root, dst_name });
-                defer a.free(p);
-                std.fs.cwd().access(p, .{}) catch {
-                    needs_relink = true;
-                };
+                if (binHealth(a, self.bin_root, bin_name, builtin.os.tag) != .ok) needs_relink = true;
             }
             if (!needs_relink) continue;
 
@@ -1818,6 +1966,16 @@ pub const Store = struct {
                 const dst = try std.fs.path.join(a, &.{ sandbox_bin, fname });
                 defer a.free(dst);
                 _ = platform.fastLink(src, dst) catch continue;
+                if (comptime platform.is_windows) {
+                    // A launcher exe is useless without the .shim beside it.
+                    const sname = try std.fmt.allocPrint(a, "{s}{s}", .{ b, shim.shim_suffix });
+                    defer a.free(sname);
+                    const ssrc = try std.fs.path.join(a, &.{ self.bin_root, sname });
+                    defer a.free(ssrc);
+                    const sdst = try std.fs.path.join(a, &.{ sandbox_bin, sname });
+                    defer a.free(sdst);
+                    _ = platform.fastLink(ssrc, sdst) catch {};
+                }
             }
         }
 
@@ -3014,4 +3172,97 @@ test "tags become store directory names" {
         try testing.expectEqualStrings("tool", parsed.name);
         try testing.expectEqualStrings(version, parsed.version);
     }
+}
+
+test "linkMethodFor: shims only on Windows, scripts are skipped there" {
+    const win = std.Target.Os.Tag.windows;
+    try testing.expectEqual(Store.LinkMethod.shim, Store.linkMethodFor(win, "C:\\s\\rg.exe"));
+    try testing.expectEqual(Store.LinkMethod.shim, Store.linkMethodFor(win, "C:\\s\\tool"));
+    try testing.expectEqual(Store.LinkMethod.shim, Store.linkMethodFor(win, "C:\\s.cmd\\tool"));
+    try testing.expectEqual(Store.LinkMethod.skip_script, Store.linkMethodFor(win, "C:\\s\\npm.cmd"));
+    try testing.expectEqual(Store.LinkMethod.skip_script, Store.linkMethodFor(win, "C:/s/run.BAT"));
+    try testing.expectEqual(Store.LinkMethod.skip_script, Store.linkMethodFor(win, "x.ps1"));
+    for ([_]std.Target.Os.Tag{ .linux, .macos, .freebsd }) |os| {
+        try testing.expectEqual(Store.LinkMethod.link, Store.linkMethodFor(os, "/s/rg"));
+        try testing.expectEqual(Store.LinkMethod.link, Store.linkMethodFor(os, "/s/run.cmd"));
+    }
+}
+
+test "windows shim pairs: create, own, health, replace, remove" {
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var s = try testStore(&tmp);
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try tmp.dir.writeFile(.{ .sub_path = "fake-abv0", .data = "FAKE ABV0 LAUNCHER" });
+    const self_exe = try tmp.dir.realpathAlloc(a, "fake-abv0");
+
+    try tmp.dir.makePath("store/tool@1.0@x86_64-windows");
+    try tmp.dir.writeFile(.{ .sub_path = "store/tool@1.0@x86_64-windows/tool", .data = "real tool" });
+    try tmp.dir.writeFile(.{ .sub_path = "store/tool@1.0@x86_64-windows/helper.cmd", .data = "@echo off" });
+    const pkg_dir = try std.fs.path.join(a, &.{ s.store_root, "tool@1.0@x86_64-windows" });
+    const tool_src = try std.fs.path.join(a, &.{ pkg_dir, "tool" });
+    const cmd_src = try std.fs.path.join(a, &.{ pkg_dir, "helper.cmd" });
+    const plans = [_]Store.LinkPlan{
+        .{ .bin = "tool", .src = tool_src, .dst = try std.fs.path.join(a, &.{ s.bin_root, "tool" }) },
+        .{ .bin = "helper", .src = cmd_src, .dst = try std.fs.path.join(a, &.{ s.bin_root, "helper" }) },
+    };
+    const bins = [_][]const u8{ "tool", "helper" };
+    const pkg = Package{ .name = "tool", .version = "1.0", .bin = &bins };
+    const o: InstallOptions = .{ .quiet = true };
+
+    // The script is skipped; the program gets a launcher pair.
+    try testing.expectEqual(@as(usize, 1), try s.linkPlansFor(a, pkg, &plans, o, .windows, self_exe));
+    try testing.expectError(error.FileNotFound, tmp.dir.access("bin/helper", .{}));
+    try testing.expectEqualStrings("FAKE ABV0 LAUNCHER", try tmp.dir.readFileAlloc(a, "bin/tool", 64));
+    const shim_text = try tmp.dir.readFileAlloc(a, "bin/tool.shim", 4096);
+    const parsed = try shim.readShim(a, shim_text);
+    try testing.expectEqualStrings(tool_src, parsed.path);
+    try testing.expectEqualStrings("tool", (try s.binOwnerOf(a, "tool")).?);
+    try testing.expect((try s.binOwnerOf(a, "helper")) == null);
+
+    // Health of the pair.
+    const H = Store.BinHealth;
+    try testing.expectEqual(H.ok, Store.binHealth(a, s.bin_root, "tool", .windows));
+    try tmp.dir.deleteFile("store/tool@1.0@x86_64-windows/tool");
+    try testing.expectEqual(H.missing_target, Store.binHealth(a, s.bin_root, "tool", .windows));
+    try tmp.dir.writeFile(.{ .sub_path = "store/tool@1.0@x86_64-windows/tool", .data = "real tool" });
+    try tmp.dir.writeFile(.{ .sub_path = "bin/tool.shim", .data = "garbage" });
+    try testing.expectEqual(H.bad_shim, Store.binHealth(a, s.bin_root, "tool", .windows));
+    try tmp.dir.deleteFile("bin/tool.shim");
+    try testing.expectEqual(H.missing_shim, Store.binHealth(a, s.bin_root, "tool", .windows));
+    try testing.expectEqual(H.ok, Store.binHealth(a, s.bin_root, "tool", .linux));
+    try tmp.dir.deleteFile("bin/tool");
+    try testing.expectEqual(H.missing_exe, Store.binHealth(a, s.bin_root, "tool", .windows));
+
+    // fix: an exe with no shim (a plain link from an older abv0) is replaced.
+    try tmp.dir.writeFile(.{ .sub_path = "bin/tool", .data = "old plain link" });
+    try testing.expectEqual(@as(usize, 1), try s.linkPlansFor(a, pkg, plans[0..1], o, .windows, self_exe));
+    try testing.expectEqual(H.ok, Store.binHealth(a, s.bin_root, "tool", .windows));
+    try testing.expectEqualStrings("FAKE ABV0 LAUNCHER", try tmp.dir.readFileAlloc(a, "bin/tool", 64));
+    // Re-linking an existing pair is fine.
+    try testing.expectEqual(@as(usize, 1), try s.linkPlansFor(a, pkg, plans[0..1], o, .windows, self_exe));
+
+    // Another package may not take the pair; --force may.
+    const squatter = Package{ .name = "other", .version = "1", .bin = &bins };
+    try testing.expectError(StoreError.BinaryConflict, s.linkPlansFor(a, squatter, plans[0..1], o, .windows, self_exe));
+    try testing.expectEqual(@as(usize, 1), try s.linkPlansFor(a, squatter, plans[0..1], .{ .quiet = true, .force = true }, .windows, self_exe));
+    try testing.expectEqualStrings("other", (try s.binOwnerOf(a, "tool")).?);
+
+    // Shim targets are discoverable for prune-style callers.
+    const targets = try s.binShimTargets(a);
+    try testing.expectEqual(@as(usize, 1), targets.len);
+    try testing.expectEqualStrings(tool_src, targets[0]);
+
+    // Removal takes both files; a non-Windows removal only the exe.
+    try testing.expect(try Store.removeBinFiles(a, s.bin_root, "tool", .linux));
+    try tmp.dir.access("bin/tool.shim", .{});
+    try tmp.dir.writeFile(.{ .sub_path = "bin/tool", .data = "x" });
+    try testing.expect(try Store.removeBinFiles(a, s.bin_root, "tool", .windows));
+    try testing.expectError(error.FileNotFound, tmp.dir.access("bin/tool", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.access("bin/tool.shim", .{}));
+    try testing.expect(!(try Store.removeBinFiles(a, s.bin_root, "tool", .windows)));
 }

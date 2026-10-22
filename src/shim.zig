@@ -275,6 +275,26 @@ pub fn writeShim(
     target_abs: []const u8,
     args: []const []const u8,
 ) !void {
+    return writeShimWithSelf(a, bin_dir, name, target_abs, args, null);
+}
+
+/// `writeShim` with the file that becomes the launcher exe made explicit.
+/// `self_exe` null means this process's own executable (the only value the
+/// program itself uses); tests pass a stand-in file.
+///
+/// Self-update note: `abv0 self-update` replaces abv0.exe, but every existing
+/// `<name>.exe` launcher stays a hard link/copy of the OLD abv0.exe. That is
+/// fine: a launcher only reads its `.shim` file and starts the target, and the
+/// `.shim` format is stable. Launchers pick up the new binary the next time
+/// they are rewritten (reinstall or `abv0 fix`).
+pub fn writeShimWithSelf(
+    a: std.mem.Allocator,
+    bin_dir: []const u8,
+    name: []const u8,
+    target_abs: []const u8,
+    args: []const []const u8,
+    self_exe: ?[]const u8,
+) !void {
     if (!isValidShimName(name)) return error.InvalidShimName;
     if (!isAbsoluteTarget(target_abs)) return error.InvalidShimTarget;
 
@@ -305,7 +325,7 @@ pub fn writeShim(
 
     // Link first, shim second: a shim file without its exe is harmless, but an
     // exe without a shim would be a bare copy of abv0 under another name.
-    try linkSelf(a, dir, exe_name, exe_exists);
+    try linkSelf(a, dir, exe_name, exe_exists, self_exe);
 
     var af = try dir.atomicFile(shim_name, .{});
     defer af.deinit();
@@ -321,9 +341,9 @@ fn fileExists(dir: std.fs.Dir, name: []const u8) bool {
 /// Hard-link (or copy) this process's executable to `dir/exe_name`. A hard
 /// link is not a symlink: the loader must see the link's own path as the image
 /// path, so a symlink would be resolved straight back to abv0.
-fn linkSelf(a: std.mem.Allocator, dir: std.fs.Dir, exe_name: []const u8, replace: bool) !void {
+fn linkSelf(a: std.mem.Allocator, dir: std.fs.Dir, exe_name: []const u8, replace: bool, self_exe: ?[]const u8) !void {
     var self_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-    const self_path = try std.fs.selfExePath(&self_buf);
+    const self_path = self_exe orelse try std.fs.selfExePath(&self_buf);
 
     const tmp_name = try std.fmt.allocPrint(a, "{s}.new{d}", .{ exe_name, platform.processId() });
     defer a.free(tmp_name);
@@ -357,6 +377,12 @@ fn hardLinkOrCopy(src: []const u8, dst: []const u8) !void {
         try std.fs.cwd().copyFile(src, std.fs.cwd(), dst, .{});
         return;
     };
+}
+
+/// Read and parse the `.shim` file at `path`. Memory comes from `a`.
+pub fn readShimFile(a: std.mem.Allocator, path: []const u8) !Shim {
+    const bytes = try std.fs.cwd().readFileAlloc(a, path, max_shim_bytes + 1);
+    return readShim(a, bytes);
 }
 
 // ---------------------------------------------------------------------------

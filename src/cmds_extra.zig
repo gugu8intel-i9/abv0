@@ -27,6 +27,7 @@ const safepath = @import("safepath.zig");
 const term = @import("term.zig");
 const net = @import("net.zig");
 const sign = @import("sign.zig");
+const shim = @import("shim.zig");
 
 const testing = std.testing;
 
@@ -593,6 +594,18 @@ pub fn cmdWhich(
     const link_path = try std.fs.path.join(aa, &.{ st.bin_root, file_name });
 
     term.print("{s}link{s}     {s}\n", .{ term.dim, term.reset, link_path });
+
+    // A launcher shim (Windows): `<bin>.shim` names the real executable.
+    const shim_path = try std.fmt.allocPrint(aa, "{s}{c}{s}{s}", .{ st.bin_root, std.fs.path.sep, bin, shim.shim_suffix });
+    if (shim.readShimFile(aa, shim_path)) |s| {
+        term.print("{s}store{s}    {s}\n", .{ term.dim, term.reset, s.path });
+        if (!platform.pathExists(s.path)) {
+            term.print("{s}warning{s}  the shim target is missing; run `abv0 fix`\n", .{ term.yellow, term.reset });
+        }
+        term.print("{s}package{s}  {s}\n", .{ term.dim, term.reset, owner });
+        return 0;
+    } else |_| {}
+
     var buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
     if (std.fs.cwd().readLink(link_path, &buf)) |target| {
         const abs = if (std.fs.path.isAbsolute(target))
