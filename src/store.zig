@@ -3206,8 +3206,9 @@ test "windows shim pairs: create, own, health, replace, remove" {
     const tool_src = try std.fs.path.join(a, &.{ pkg_dir, "tool" });
     const cmd_src = try std.fs.path.join(a, &.{ pkg_dir, "helper.cmd" });
     const plans = [_]Store.LinkPlan{
-        .{ .bin = "tool", .src = tool_src, .dst = try std.fs.path.join(a, &.{ s.bin_root, "tool" }) },
-        .{ .bin = "helper", .src = cmd_src, .dst = try std.fs.path.join(a, &.{ s.bin_root, "helper" }) },
+        // As linkBinaries builds them: the destination carries the host's suffix.
+        .{ .bin = "tool", .src = tool_src, .dst = try std.fs.path.join(a, &.{ s.bin_root, "tool" ++ platform.exe_suffix }) },
+        .{ .bin = "helper", .src = cmd_src, .dst = try std.fs.path.join(a, &.{ s.bin_root, "helper" ++ platform.exe_suffix }) },
     };
     const bins = [_][]const u8{ "tool", "helper" };
     const pkg = Package{ .name = "tool", .version = "1.0", .bin = &bins };
@@ -3215,7 +3216,7 @@ test "windows shim pairs: create, own, health, replace, remove" {
 
     // The script is skipped; the program gets a launcher pair.
     try testing.expectEqual(@as(usize, 1), try s.linkPlansFor(a, pkg, &plans, o, .windows, self_exe));
-    try testing.expectError(error.FileNotFound, tmp.dir.access("bin/helper", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.access("bin/helper" ++ platform.exe_suffix, .{}));
     try testing.expectEqualStrings("FAKE ABV0 LAUNCHER", try tmp.dir.readFileAlloc(a, "bin/tool" ++ platform.exe_suffix, 64));
     const shim_text = try tmp.dir.readFileAlloc(a, "bin/tool.shim", 4096);
     const parsed = try shim.readShim(a, shim_text);
