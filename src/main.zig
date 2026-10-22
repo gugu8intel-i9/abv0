@@ -1555,11 +1555,9 @@ fn cmdDoctorJson(a: std.mem.Allocator, st: *const store.Store, reg: *const regis
     for (reg.packages) |pkg| {
         if (!st.isInstalled(pkg, platform_name)) continue;
         for (pkg.bin) |bin_name| {
-            const dst_name = try std.fmt.allocPrint(a, "{s}{s}", .{ bin_name, platform.exe_suffix });
-            defer a.free(dst_name);
-            const p = try std.fs.path.join(a, &.{ st.bin_root, dst_name });
-            defer a.free(p);
-            std.fs.cwd().access(p, .{}) catch {
+            // Same check as `doctor`: on Windows this also catches a launcher
+            // shim whose target is gone.
+            if (store.Store.binHealth(a, st.bin_root, bin_name, builtin.os.tag) != .ok) {
                 if (broken > 0) try w.writeAll(",");
                 try w.writeAll("{\"package\":");
                 try writeJsonString(w, pkg.name);
@@ -1567,7 +1565,7 @@ fn cmdDoctorJson(a: std.mem.Allocator, st: *const store.Store, reg: *const regis
                 try writeJsonString(w, bin_name);
                 try w.writeAll("}");
                 broken += 1;
-            };
+            }
         }
     }
 

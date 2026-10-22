@@ -896,7 +896,7 @@ pub const Store = struct {
 
     /// State of installed bin `name`. Off Windows this is just "does the link
     /// resolve"; on Windows the launcher pair must exist and its target too.
-    fn binHealth(a: std.mem.Allocator, bin_dir: []const u8, name: []const u8, os: std.Target.Os.Tag) BinHealth {
+    pub fn binHealth(a: std.mem.Allocator, bin_dir: []const u8, name: []const u8, os: std.Target.Os.Tag) BinHealth {
         var arena = std.heap.ArenaAllocator.init(a);
         defer arena.deinit();
         const aa = arena.allocator();

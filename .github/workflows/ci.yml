@@ -66,7 +66,7 @@ jobs:
           - ubuntu-latest          # x86_64 Linux
           - ubuntu-24.04-arm       # aarch64 Linux
           - macos-latest           # arm64 macOS
-          - macos-13               # x86_64 macOS
+          - macos-15-intel         # x86_64 macOS
           - windows-latest         # x86_64 Windows (Git Bash for bash steps)
     runs-on: ${{ matrix.os }}
     permissions:

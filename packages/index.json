@@ -1,6 +1,6 @@
 {
   "registry_version": 1,
-  "updated_at": "2026-10-22T00:00:00Z",
+  "updated_at": "2026-10-22T09:00:00Z",
   "packages": {
     "jq": {
       "name": "jq",
@@ -30,6 +30,18 @@
           "sha256": "5942c9b0934e510ee61eb3e30273f1b3fe2590df93933a93d7c58b81d19c8ff5",
           "archive_type": "raw",
           "bin_path": "jq"
+        },
+        "aarch64-linux": {
+          "url": "https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-arm64",
+          "sha256": "4dd2d8a0661df0b22f1bb9a1f9830f06b6f3b8f7d91211a1ef5d7c4f06a8b4a5",
+          "archive_type": "raw",
+          "bin_path": "jq"
+        },
+        "x86_64-windows": {
+          "url": "https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-windows-amd64.exe",
+          "sha256": "7451fbbf37feffb9bf262bd97c54f0da558c63f0748e64152dd87b0a07b6d6ab",
+          "archive_type": "raw",
+          "bin_path": "jq.exe"
         }
       }
     },
@@ -61,6 +73,18 @@
           "sha256": "f84757b07f425fe5cf11d87df6644691c644a5cd2348a2c670894272999d3ba7",
           "archive_type": "tar.gz",
           "bin_path": "ripgrep-14.1.0-x86_64-unknown-linux-musl/rg"
+        },
+        "aarch64-linux": {
+          "url": "https://github.com/BurntSushi/ripgrep/releases/download/14.1.0/ripgrep-14.1.0-aarch64-unknown-linux-gnu.tar.gz",
+          "sha256": "c8c210b99844fbf16b7a36d1c963e8351bca5ff2dd7c788f5fba4ac18ba8c60d",
+          "archive_type": "tar.gz",
+          "bin_path": "ripgrep-14.1.0-aarch64-unknown-linux-gnu/rg"
+        },
+        "x86_64-windows": {
+          "url": "https://github.com/BurntSushi/ripgrep/releases/download/14.1.0/ripgrep-14.1.0-x86_64-pc-windows-msvc.zip",
+          "sha256": "fe4f75edfaa50f0d4fecbf47696b7629f3449c9c2c5a4da828753139e5a2e203",
+          "archive_type": "zip",
+          "bin_path": "ripgrep-14.1.0-x86_64-pc-windows-msvc/rg.exe"
         }
       }
     },

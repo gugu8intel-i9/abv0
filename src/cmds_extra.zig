@@ -252,8 +252,9 @@ fn olderThan(path: []const u8, ns: i128) bool {
 /// Absolute targets of every symlink in the bin directory. A store directory
 /// that a bin link still points at is kept, or the link would dangle.
 fn linkTargets(a: std.mem.Allocator, st: *const store.Store) ![][]const u8 {
+    // On Windows bins are launcher shims; their .shim files name the targets.
+    if (platform.is_windows) return st.binShimTargets(a);
     var out = std.ArrayList([]const u8).init(a);
-    if (platform.is_windows) return out.toOwnedSlice();
 
     var dir = std.fs.cwd().openDir(st.bin_root, .{ .iterate = true }) catch return out.toOwnedSlice();
     defer dir.close();
