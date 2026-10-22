@@ -51,6 +51,19 @@
 - **Registry contents.** `threat-sample` (a malware-pattern script) and the `git` and
   `wget` entries (mock shell scripts that would shadow the real tools) are removed from
   the public registry. See the migration notes.
+- **Zip entry names are checked before extraction.** Every entry name is read from the
+  central directory before the first write. A name that is not a plain relative path, or
+  that contains `:` or a backslash, refuses the whole archive (`UnsafeArchiveMember`). This
+  closes a Windows escape through drive-absolute, drive-relative, UNC and alternate-data-stream
+  names. Finding 27 in [SECURITY.md](SECURITY.md).
+- **A manifest on disk is verified before it is trusted.** abv0 records the SHA-256 of each
+  manifest it accepts in `registry/index.json.sha256`. A file on disk is used only if its
+  hash matches. Finding 28.
+- **API headers stay with the original host.** The built-in client sends the GitHub API
+  headers, including the optional token, only to the host of the original request. A
+  redirect to another host does not receive them.
+- **Known issue.** When a request falls back to curl, its headers, including a GitHub token,
+  are passed on curl's command line. Finding 29 in SECURITY.md is open.
 
 ### Performance
 
@@ -100,6 +113,25 @@
   build and a smoke test that verifies `packages/index.json` against `keys/manifest.pub`.
   macOS and Windows run unit tests.
 - **`zig build sign-tool`** installs the `sign-manifest` CLI (`keygen`, `sign`, `verify`).
+- **`zig build catalog-tool`** installs the `build-catalog` CLI.
+- **GitHub installs.** `abv0 install gh:owner/repo[@tag]` (or `owner/repo`) installs a
+  project's own release, with no recipe. The asset is checked against GitHub's sha256
+  digest or the release's checksum file. An asset with neither is refused unless
+  `--allow-unverified` is given. `list`, `outdated`, `upgrade` and `uninstall` work for these
+  installs. `GITHUB_TOKEN` or `GH_TOKEN` is optional.
+- **Built-in HTTPS client.** Downloads and API requests use `std.http` with TLS 1.3 and
+  reuse connections within a run. curl runs only after a transport failure, and a host that
+  fails is remembered for 24 hours. `ABV0_DOWNLOADER=builtin|curl|auto` forces either.
+- **7z extraction** in process, for Windows packages: LZMA, LZMA2, BCJ and Copy. PPMd,
+  BZip2, Deflate, BCJ2, Delta and AES are refused.
+- **Self-building signed catalog.** `tools/build-catalog.zig` turns `catalog/sources.txt`
+  into `packages/index.json` from upstream GitHub releases, for six platforms. A daily
+  workflow signs the result. See [catalog/README.md](catalog/README.md).
+- **Install scripts** `install.sh` and `install.ps1` download `packages/index.json.sig` with
+  the index and install it first.
+- **Launcher module** (`src/shim.zig`). When `abv0.exe` runs under another name with a
+  `<name>.shim` file beside it, it runs that target from the target's own directory, so DLL
+  lookup works. Installs do not write shim files yet.
 
 ### Changed
 
@@ -112,7 +144,20 @@
 - Output from code under test goes to stderr in test builds. This fixes a deadlock in
   `zig build test`.
 - `abv0 help` lists every command, the new flags and the exit codes.
-- The test suite has 151 `test` blocks across `src/*.zig`.
+- An unknown bare name is no longer searched on GitHub. abv0 prints the `gh:owner/repo`
+  spelling to use instead.
+- Removed the experimental Homebrew-bottle and Scoop backends before release. The
+  `bundle` command still reads and writes Brewfile-format files.
+- The test suite has 255 `test` blocks across `src/*.zig` and `tools/*.zig`.
+
+### Fixed
+
+- Tarballs whose members start with `./`, as `tar -C dir .` writes them, installed nothing.
+  The leading `./` is now dropped before the safety checks.
+- On Windows the MSVC build is preferred over the MinGW build when both are published.
+- bat 0.24.0 in the catalog: the x86_64-macos checksum did not match the published file, and
+  the aarch64-macos entry pointed at the x86_64 build. The checksum is corrected, and the
+  aarch64-macos entry is dropped until a native build exists.
 
 ## Migration notes
 
@@ -135,6 +180,11 @@
   `mock-gui`. These names no longer resolve from the registry.
 - **`ABV0_ALLOW_UNVERIFIED`** still bypasses the checksum check in `install.sh`.
   If no SHA-256 tool is found, the installer now fails unless that variable is set.
+- **The first run re-checks the manifest on disk.** Before this change there is no
+  `registry/index.json.sha256`. A manifest already in the registry directory is checked
+  against `index.json.sig` when that file is beside it, and is downloaded again otherwise.
+- **`--allow-unsigned-manifest` records no hash.** A later run without the flag does not
+  trust that manifest. It is checked again, as in the first bullet above.
 
 ## 2.0.0
 

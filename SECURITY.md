@@ -16,16 +16,19 @@ hostile:
    signed, and only a manifest whose signature verifies is used (finding 17).
 2. **Downloaded archives.** Member names, symlink targets, sizes and content are all
    attacker-controlled if the manifest or the upstream host is compromised.
+3. **GitHub release assets**, for `gh:` installs and for catalog sources. They are handled
+   as downloaded archives. Their checksums come from GitHub or from the same release, not
+   from the maintainer's signing key, except where the hash is in the signed catalog.
 
-Everything derived from those two inputs is validated before it reaches the
-filesystem or a `exec` call.
+Everything derived from those inputs is validated before it reaches the filesystem or a
+`exec` call.
 
 ---
 
 ## Findings
 
-Findings 1 to 13 were fixed in 2.0.0. Findings 14 to 27 are in the Unreleased section of
-[CHANGELOG.md](CHANGELOG.md).
+Findings 1 to 13 were fixed in 2.0.0. Findings 14 to 26 are in the Unreleased section of
+[CHANGELOG.md](CHANGELOG.md). Findings 27 onward are in this file.
 
 The audit covered the whole tree. Severities are the author's assessment for a user
 running `abv0 install` against a compromised or malicious manifest.
@@ -362,14 +365,63 @@ requested name is unknown.
 `ABV0_ALLOW_UNVERIFIED=1` is set. Only directories this run creates under the default
 `~/.abv0` are made `0700`. `install.ps1` allows TLS 1.3 when the runtime supports it.
 
+### 27. Zip entries with drive, UNC or stream names could be written outside the store — high
+
+`std.zip.extract` rejects only a leading `/` and `..` components. A member named with
+forward slashes and a drive letter, such as
+`C:/Users/x/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup/x.cmd`, passed
+that check. On Windows, creating a file at a drive-absolute path ignores the destination
+directory, so the file was written outside the store. Drive-relative names (`C:x`), UNC
+names (`//server/share/x`) and NTFS alternate data streams (`a.exe:evil`) passed the same
+check.
+
+**Fixed.** `checkZipEntries` reads every entry name from the central directory before the
+first write, at the same offset `std.zip.extract` reads it from. If any name is not a safe
+relative path, or contains `:` or a backslash, the whole archive is refused with
+`error.UnsafeArchiveMember`. `std.zip` cannot skip one member, so refusing the archive is
+the only safe option. Tar members whose names contain `:` are skipped on Windows. Tests
+build small stored zips in memory and check that unsafe names are refused with nothing
+written, including when a safe member comes before the unsafe one.
+
+### 28. A manifest already on disk was trusted without a check — high
+
+A registry index that was already present was used without any check. A manifest placed
+there by the installer, or by anything else that could write to the registry directory,
+was never verified. The signature and replay checks from finding 17 ran only when abv0
+downloaded the manifest itself.
+
+**Fixed.** abv0 records the SHA-256 of the manifest it accepted in
+`<registry>/index.json.sha256`, written atomically after the signature and replay checks
+pass. A manifest on disk is trusted only if its hash matches that record. Otherwise, if
+`index.json.sig` sits beside it, the signature and replay checks run as they do for a
+download, and the hash is recorded on success. If there is no signature, or the check
+fails, the manifest is downloaded again through the verified path. Nothing is deleted
+first. The decision is the pure function `trustState`, and it has tests. `abv0 update`
+also records the hash. The installers now download `index.json.sig` with the index.
+
+### 29. Open: a GitHub token can appear on the curl command line — medium
+
+**Status: open, not fixed.**
+
+When `GITHUB_TOKEN` or `GH_TOKEN` is set, API requests for `gh:` installs send an
+`Authorization: Bearer` header. The built-in client sends that header only to the host of
+the original request. When a request falls back to curl, `buildCurlArgv` passes each
+header as a `--header` argument. The token then appears on curl's command line, which can be
+read from the process list while curl runs.
+
+Until this is fixed, `ABV0_DOWNLOADER=builtin` keeps the request away from curl, so the token
+is not on a command line. The cost is that a transport failure is then reported rather than
+retried through curl. A fix would keep the header out of argv, for example by passing it to
+curl through its configuration input.
+
 ## Hardening summary
 
 | Area | Control |
 | :--- | :--- |
-| Transport | HTTPS only, no protocol downgrade on redirect, `--fail`, `-q` so `~/.curlrc` is ignored, bounded timeouts and retries, 2 GiB download cap, userinfo URLs rejected |
-| Integrity | SHA-256 enforced by default; unverifiable installs require an explicit flag; streamed bytes are published only after the digest matches |
-| Signing | Ed25519 detached signature on the manifest, checked before it is read; `updated_at` replay check; `release/SHA256SUMS.sig` checked by `self-update` |
-| Extraction | Member-name validation, every existing parent checked on disk, symlink targets may not walk through links, no absolute or `..` paths, no drive letters or UNC, 4 GiB and 200,000 member caps, setuid, setgid and sticky bits cleared |
+| Transport | Built-in HTTPS client (`std.http`, TLS 1.3, connections reused within a run). curl is a fallback for transport failures only, under the same HTTPS-only policy: `https` on every redirect hop, `-q` so `~/.curlrc` is ignored, `--fail`, bounded timeouts and retries, 2 GiB download cap, userinfo URLs rejected. A host that fails is remembered for 24 hours. In the built-in client, API headers go only to the original host; see finding 29 for the curl fallback. |
+| Integrity | SHA-256 enforced by default; `gh:` installs are checked against GitHub's digest or the release's checksum file; an asset with neither is refused unless explicitly allowed; streamed bytes are published only after the digest matches |
+| Signing | Ed25519 detached signature on the manifest, checked before it is read; a manifest on disk is trusted only if its SHA-256 matches the recorded one; `updated_at` replay check; `release/SHA256SUMS.sig` checked by `self-update` |
+| Extraction | Member-name validation, every existing parent checked on disk, symlink targets may not walk through links, no absolute or `..` paths, no drive letters or UNC, zip names checked before the first write, 7z names and CRCs checked, 4 GiB and 200,000 member caps, setuid, setgid and sticky bits cleared |
 | Ownership | Bin links and app bundles recorded with their owning package; conflicts refused unless `--force`; reserved names refused; exact name match on uninstall; app bundles must end in `.app` |
 | Manifest | Per-record validation, invalid records dropped, duplicate and reserved names rejected, no panics on malformed input |
 | Concurrency | Real advisory file locks, atomic temp-file-plus-rename publishes, WAL with fsync and torn-tail recovery, install-first upgrades |
@@ -377,6 +429,7 @@ requested name is unknown.
 | Binary index | Magic, version, size and every offset bounds-checked before dereference; `u32` overflow fails; cache keyed by SHA-256 |
 | Output | Manifest-derived text printed with control bytes replaced; JSON through the standard encoder |
 | Releases | Stripped release builds, published `SHA256SUMS`, installer verifies before publishing |
+| Catalog | Self-building: `packages/index.json` is generated from `catalog/sources.txt` and upstream releases; refuses to write when most sources fail or the catalog would lose more than half its packages; output must load with zero rejected packages; signed daily with `ABV0_MANIFEST_KEY` and checked before it is committed |
 
 ## Non-goals
 
@@ -387,3 +440,9 @@ pinned in the manifest, and the manifest is signed with Ed25519 against `keys/ma
 The root of trust is therefore the maintainer's signing key. If that key is stolen, an
 attacker can sign a manifest that points at malicious archives with matching hashes. The
 secret key must stay out of git and off shared machines.
+
+For catalog packages, the expected SHA-256 is part of the signed `packages/index.json`, so
+it is covered by the signature. A direct `gh:` install is not in that index. Its expected
+hash is GitHub's digest for the asset, or a checksum file in the same release, and the
+maintainer's key covers neither. Trust in a direct `gh:` install therefore rests on the
+upstream project and on GitHub.
