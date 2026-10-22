@@ -2799,4 +2799,8 @@ comptime {
     _ = @import("store.zig");
     _ = @import("cmds_extra.zig");
     _ = @import("stream.zig");
+    _ = @import("ghrelease.zig");
+    _ = @import("relocate.zig");
+    _ = @import("scoop.zig");
+    _ = @import("shim.zig");
 }
