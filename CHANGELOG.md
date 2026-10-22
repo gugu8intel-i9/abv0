@@ -4,6 +4,11 @@
 
 ### Security
 
+- **Maintainer signing key.** The development key is replaced by the maintainer's key
+  (`keys/manifest.pub`). The catalog and `release/SHA256SUMS` are re-signed with it, and
+  the release binaries are rebuilt to trust it. Catalogs signed with the old key are
+  refused.
+
 - **Signed manifest.** The registry `index.json` is verified against a detached
   Ed25519 signature (`<url>.sig`) using the public key compiled in from
   `keys/manifest.pub`. A missing or invalid signature is refused. Findings 17 onward in
@@ -187,7 +192,7 @@
 ### Changed
 
 - **Full catalog.** `packages/index.json` now carries the 373 packages built from
-  `catalog/sources.txt` (signed with the development key).
+  `catalog/sources.txt` (signed with the maintainer key).
 - **Programs are symlinked on Linux and macOS**, so tools that find their own files
   next to the executable (cmake's `cpack`, `ctest`) work. Windows keeps launchers.
 - **Program detection** takes only `bin/` programs when a package has a `bin/`
