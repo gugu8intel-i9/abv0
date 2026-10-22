@@ -634,6 +634,12 @@ fn memoryLocked() *FallbackMemory {
 
 /// Which downloader to use for a request to `host`.
 pub fn chooseRoute(host: []const u8) Route {
+    awaitPrewarm();
+    return routeNow(host);
+}
+
+/// `chooseRoute` without waiting for a prewarm (the prewarm itself uses it).
+fn routeNow(host: []const u8) Route {
     const mode = downloaderMode();
     if (mode != .auto) return decideRoute(mode, false, false);
     if (runTripped()) return .curl;
@@ -681,10 +687,17 @@ pub const github_hosts = [_][]const u8{
 pub fn prewarm(hosts: []const []const u8) void {
     if (downloaderMode() == .curl) return;
     for (hosts) |h| {
-        if (h.len == 0 or chooseRoute(h) == .curl) continue;
+        if (h.len == 0 or h.len > 64 or routeNow(h) == .curl) continue;
+        if (prewarm_count == max_prewarm_hosts) return;
+        const slot = prewarm_count;
+        @memcpy(prewarm_hosts[slot][0..h.len], h);
+        prewarm_host_len[slot] = h.len;
+        prewarm_count += 1;
         const owned = std.heap.page_allocator.dupe(u8, h) catch return;
-        const t = std.Thread.spawn(.{}, prewarmOne, .{owned}) catch {
+        _ = prewarm_pending.fetchAdd(1, .acq_rel);
+        const t = std.Thread.spawn(.{}, prewarmOne, .{ owned, slot }) catch {
             std.heap.page_allocator.free(owned);
+            prewarmFinished(slot);
             continue;
         };
         t.detach();
@@ -696,10 +709,61 @@ pub fn prewarmGithub() void {
     prewarm(&github_hosts);
 }
 
-fn prewarmOne(host: []u8) void {
+/// Prewarm handshakes still in flight. A network that resets or stalls the
+/// built-in client's TLS (some proxies do) would otherwise make every download
+/// of the run try it first and pay the failure each time. Instead the first
+/// route decision waits briefly, once per run, for the prewarm's verdict; a
+/// handshake that has not finished by then counts as a transport failure, so
+/// the run (and the next 24 h, via the fallback memory) goes straight to curl.
+/// On a healthy network the handshakes finish well inside the wait.
+var prewarm_pending = std.atomic.Value(u32).init(0);
+var prewarm_done: std.Thread.ResetEvent = .{};
+var prewarm_waited = std.atomic.Value(bool).init(false);
+const prewarm_wait_ns: u64 = 3 * std.time.ns_per_s;
+
+const max_prewarm_hosts = 8;
+var prewarm_hosts: [max_prewarm_hosts][64]u8 = undefined;
+var prewarm_host_len: [max_prewarm_hosts]usize = [_]usize{0} ** max_prewarm_hosts;
+var prewarm_host_done: [max_prewarm_hosts]std.atomic.Value(bool) = [_]std.atomic.Value(bool){std.atomic.Value(bool).init(false)} ** max_prewarm_hosts;
+var prewarm_count: usize = 0;
+
+fn prewarmFinished(slot: usize) void {
+    prewarm_host_done[slot].store(true, .release);
+    if (prewarm_pending.fetchSub(1, .acq_rel) == 1) prewarm_done.set();
+}
+
+/// Called before choosing a route. Only the first caller waits; later ones
+/// see the recorded verdict.
+fn awaitPrewarm() void {
+    if (prewarm_pending.load(.acquire) == 0) return;
+    if (prewarm_waited.swap(true, .acq_rel)) return;
+    prewarm_done.timedWait(prewarm_wait_ns) catch {
+        for (0..prewarm_count) |i| {
+            if (!prewarm_host_done[i].load(.acquire)) {
+                reportBuiltinFailure(prewarm_hosts[i][0..prewarm_host_len[i]], error.HandshakeTimeout);
+            }
+        }
+    };
+}
+
+fn prewarmOne(host: []u8, slot: usize) void {
     defer std.heap.page_allocator.free(host);
-    const client = http.shared() catch return;
-    client.warm(host);
+    defer prewarmFinished(slot);
+    const client = http.shared() catch |e| {
+        if (http.isTransportError(e)) reportBuiltinFailure(host, e);
+        return;
+    };
+    // A finished handshake is not proof the path works: some proxies accept
+    // the connection and reset it only once a request goes through. One real
+    // request (any HTTP status will do) proves it, and leaves a warm,
+    // verified connection in the pool for the first download.
+    var url_buf: [80]u8 = undefined;
+    const url = std.fmt.bufPrint(&url_buf, "https://{s}/", .{host}) catch return;
+    const s = client.open(std.heap.page_allocator, url, .{ .max_redirects = 0, .max_time_s = 10 }) catch |e| {
+        if (http.isTransportError(e)) reportBuiltinFailure(host, e);
+        return;
+    };
+    s.close();
 }
 
 pub fn retryDelay(attempt: u32) void {

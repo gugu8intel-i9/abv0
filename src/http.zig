@@ -540,13 +540,13 @@ pub const Client = struct {
     /// first real request skips the TCP and TLS handshakes. Best effort: a
     /// failure here is ignored, because the real request will meet it again
     /// and handle it properly.
-    pub fn warm(self: *Client, host: []const u8) void {
+    pub fn warm(self: *Client, host: []const u8) !void {
         if (host.len == 0 or host.len > 253) return;
         for (host) |c| {
             if (c <= 0x20 or c == 0x7f or c == '/' or c == '@' or c == '\\' or c == '?' or c == '#') return;
         }
         const c = self.clientFor(host);
-        const conn = c.connect(host, 443, .tls) catch return;
+        const conn = try c.connect(host, 443, .tls);
         c.connection_pool.release(c.allocator, conn);
     }
 
