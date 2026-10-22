@@ -68,6 +68,11 @@
 
 ### Performance
 
+- **`--registry` manifests use the binary index too.** It is cached per manifest
+  path and used only when built from the same bytes. The signature check reads
+  `updated_at` with a token scan instead of building a JSON tree. With the full
+  373-package catalog, `search`, `info` and `list` take about 5 ms.
+
 - **Progressive parallel downloads.** A download of 8 MiB or more from a server that
   supports byte ranges is fetched over up to 8 connections. The first GET is the probe, with
   no HEAD round trip: once its response head says the body is big and ranges work, the other
@@ -180,6 +185,14 @@
   and `which` shows the target. Linux and macOS keep plain links.
 
 ### Changed
+
+- **Full catalog.** `packages/index.json` now carries the 373 packages built from
+  `catalog/sources.txt` (signed with the development key).
+- **Programs are symlinked on Linux and macOS**, so tools that find their own files
+  next to the executable (cmake's `cpack`, `ctest`) work. Windows keeps launchers.
+- **Program detection** takes only `bin/` programs when a package has a `bin/`
+  directory, skips `share/` and `include/` and build templates, and, when several
+  files share a program's name, picks the one beside the main program.
 
 - `search` prints `no packages match` and exits 0 when nothing matches.
 - `upgrade` exits 1 when every requested name is unknown.

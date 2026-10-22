@@ -827,18 +827,52 @@ fn validUpdatedAt(s: []const u8) bool {
 /// Top-level `updated_at` of a manifest's bytes. The returned slice aliases
 /// `a`'s allocation for the parse, so the caller keeps `a` alive while using it.
 fn manifestUpdatedAt(a: std.mem.Allocator, bytes: []const u8) manifest_error![]const u8 {
-    const root = std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{}) catch return error.MissingUpdatedAt;
-    const obj = switch (root) {
-        .object => |o| o,
-        else => return error.MissingUpdatedAt,
-    };
-    const v = obj.get("updated_at") orelse return error.MissingUpdatedAt;
-    const s = switch (v) {
-        .string => |str| str,
-        else => return error.MissingUpdatedAt,
-    };
+    // A token scan of the top level: building a full JSON tree of a catalog
+    // with hundreds of packages, only to read one field, cost several ms a run.
+    const s = topLevelString(a, bytes, "updated_at") catch return error.MissingUpdatedAt;
     if (!validUpdatedAt(s)) return error.InvalidUpdatedAt;
     return s;
+}
+
+/// The string value of `key` in the top-level JSON object `bytes`, skipping
+/// every other value unparsed and stopping at the first match (the catalog
+/// writes `updated_at` before `packages`). Only the part before the match is
+/// checked as JSON; callers pass bytes whose signature already verified, and
+/// the full parse happens when the registry itself is loaded.
+fn topLevelString(a: std.mem.Allocator, bytes: []const u8, key: []const u8) ![]const u8 {
+    var sc = std.json.Scanner.initCompleteInput(a, bytes);
+    defer sc.deinit();
+    if (try sc.next() != .object_begin) return error.NotAnObject;
+    while (true) {
+        const name = switch (try sc.nextAlloc(a, .alloc_if_needed)) {
+            .object_end => return error.MissingField,
+            .string, .allocated_string => |n| n,
+            else => return error.SyntaxError,
+        };
+        if (!std.mem.eql(u8, name, key)) {
+            try sc.skipValue();
+            continue;
+        }
+        return switch (try sc.nextAlloc(a, .alloc_always)) {
+            .allocated_string => |v| v,
+            else => error.NotAString,
+        };
+    }
+}
+
+test "topLevelString reads one top-level field" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const doc =
+        \\{"packages":{"x":{"updated_at":"nested"}},"updated_at":"2026-01-02T03:04:05Z","n":[1,{"a":2}]}
+    ;
+    try std.testing.expectEqualStrings("2026-01-02T03:04:05Z", try topLevelString(a, doc, "updated_at"));
+    try std.testing.expectEqualStrings("a\"b", try topLevelString(a, "{\"k\":\"a\\\"b\"}", "k"));
+    try std.testing.expectError(error.MissingField, topLevelString(a, "{\"p\":{\"k\":\"v\"}}", "k"));
+    try std.testing.expectError(error.NotAString, topLevelString(a, "{\"k\":1}", "k"));
+    try std.testing.expect(std.meta.isError(topLevelString(a, "{\"j\":\"v\"", "k")));
+    try std.testing.expect(std.meta.isError(topLevelString(a, "[1]", "k")));
 }
 
 /// Verify a staged manifest against its staged signature. Returns the
@@ -1119,9 +1153,10 @@ fn loadRegistry(a: std.mem.Allocator, st: *const store.Store, allow_unsigned: bo
 
 /// `--registry <path>`: an explicit local manifest. It is signature-checked
 /// against `<path>.sig` like any other. It does not touch the installed
-/// registry or its replay state, and it skips the binary index cache so it
-/// cannot be confused with the installed one.
-fn loadExplicitRegistry(base: std.mem.Allocator, path: []const u8, allow_unsigned: bool) !registry.Registry {
+/// registry or its replay state. Its binary index lives in a file of its own
+/// (named after the manifest's path), and like the installed one is used only
+/// when it was built from exactly these bytes.
+fn loadExplicitRegistry(base: std.mem.Allocator, st: *const store.Store, path: []const u8, allow_unsigned: bool) !registry.Registry {
     var scratch = std.heap.ArenaAllocator.init(base);
     defer scratch.deinit();
     const a = scratch.allocator();
@@ -1133,10 +1168,26 @@ fn loadExplicitRegistry(base: std.mem.Allocator, path: []const u8, allow_unsigne
         return e;
     };
     // The loaded registry outlives the scratch arena, so it uses `base`.
+    if (explicitIndexPath(a, st, path)) |idx| {
+        if (abvindex.loadCached(base, path, idx)) |reg| return reg else |_| {}
+    } else |_| {}
     return registry.loadFromJsonFile(base, path, null) catch |e| {
         term.err("{s}error{s}: could not load registry '{s}': {s}\n", .{ term.red, term.reset, path, explain(e) });
         return e;
     };
+}
+
+/// `<registry dir>/explicit-<hash of the manifest's real path>.abv`, with the
+/// directory created. Distinct from `index.abv`, and one per manifest so two
+/// checkouts do not keep rebuilding each other's index.
+fn explicitIndexPath(a: std.mem.Allocator, st: *const store.Store, path: []const u8) ![]u8 {
+    const real = try std.fs.cwd().realpathAlloc(a, path);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(real, &digest, .{});
+    const hex = std.fmt.bytesToHex(digest[0..8], .lower);
+    try std.fs.cwd().makePath(st.registry_root);
+    const name = try std.fmt.allocPrint(a, "explicit-{s}.abv", .{&hex});
+    return std.fs.path.join(a, &.{ st.registry_root, name });
 }
 
 // ---------------------------------------------------------------------------
@@ -1857,7 +1908,7 @@ fn run(base: std.mem.Allocator, a: std.mem.Allocator) !u8 {
     if (installsPackages(cmd) and !output.dry_run) net.prewarmGithub();
 
     var reg = if (args.registry_path) |p|
-        try loadExplicitRegistry(base, p, args.allow_unsigned_manifest)
+        try loadExplicitRegistry(base, &st, p, args.allow_unsigned_manifest)
     else
         try loadRegistry(base, &st, args.allow_unsigned_manifest);
     defer reg.deinit();
