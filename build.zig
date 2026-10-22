@@ -136,6 +136,32 @@ pub fn build(b: *std.Build) void {
     const install_sign_tool = b.addInstallArtifact(sign_tool, .{});
     b.step("sign-tool", "Install the sign-manifest CLI (keygen, sign, verify)").dependOn(&install_sign_tool.step);
 
+    // ---- self-building catalog tool ----------------------------------------
+    // Turns catalog/sources.txt into packages/index.json by reading each
+    // project's GitHub releases. It reuses abv0's own asset picker, archive
+    // extractor and registry validator through one module (see catalog_deps.zig
+    // for why they cannot be imported file by file).
+    const catalog_deps = b.createModule(.{ .root_source_file = b.path("catalog_deps.zig") });
+    // The src/ files reached through it may read the embedded manifest key.
+    catalog_deps.addImport("build_options", build_options_mod);
+    const catalog_tool = b.addExecutable(.{
+        .name = "build-catalog",
+        .root_source_file = b.path("tools/build-catalog.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    catalog_tool.root_module.addImport("catalog_deps", catalog_deps);
+    const install_catalog_tool = b.addInstallArtifact(catalog_tool, .{});
+    b.step("catalog-tool", "Install the build-catalog CLI (sources.txt -> index.json)").dependOn(&install_catalog_tool.step);
+
+    const catalog_tests = b.addTest(.{
+        .root_source_file = b.path("tools/build-catalog.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    catalog_tests.root_module.addImport("catalog_deps", catalog_deps);
+    test_step.dependOn(&b.addRunArtifact(catalog_tests).step);
+
     // ---- compile check for every supported platform ------------------------
     // Catches Windows-only and macOS-only compile errors without needing those
     // machines. `std.posix.getenv`, `std.fs.File.Mode` and `std.posix.mmap` all
@@ -150,6 +176,15 @@ pub fn build(b: *std.Build) void {
         });
         chk.root_module.addImport("build_options", build_options_mod);
         check_step.dependOn(&chk.step);
+
+        const chk_catalog = b.addExecutable(.{
+            .name = b.fmt("check-catalog-{s}", .{rt.name}),
+            .root_source_file = b.path("tools/build-catalog.zig"),
+            .target = b.resolveTargetQuery(rt.query),
+            .optimize = .Debug,
+        });
+        chk_catalog.root_module.addImport("catalog_deps", catalog_deps);
+        check_step.dependOn(&chk_catalog.step);
     }
 
     // ---- release artifacts -------------------------------------------------

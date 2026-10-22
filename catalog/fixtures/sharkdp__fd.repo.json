@@ -1,0 +1,11 @@
+{
+ "full_name": "sharkdp/fd",
+ "html_url": "https://github.com/sharkdp/fd",
+ "description": "A simple, fast and user-friendly alternative to 'find'",
+ "homepage": null,
+ "license": {
+  "key": "apache-2.0",
+  "name": "Apache License 2.0",
+  "spdx_id": "Apache-2.0"
+ }
+}
