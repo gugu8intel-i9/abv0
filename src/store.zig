@@ -41,6 +41,8 @@ pub const InstallOptions = struct {
 
 pub const StoreError = error{
     UnsupportedPlatform,
+    /// The package installed, but none of its programs could be linked.
+    NothingLinked,
     DownloadFailed,
     UnpackFailed,
     InvalidPackageIdentifier,
@@ -67,6 +69,7 @@ pub const StoreError = error{
 pub fn alreadyDiagnosed(e: anyerror) bool {
     return switch (e) {
         StoreError.UnsupportedPlatform,
+        StoreError.NothingLinked,
         StoreError.DownloadFailed,
         StoreError.UnpackFailed,
         StoreError.ChecksumMismatch,
@@ -376,11 +379,15 @@ pub const Store = struct {
 
         try w.append(.complete);
 
-        if (!opts.quiet and linked == 0 and pkg.bin.len > 0) {
+        // An install that put none of its programs on PATH did not work, even
+        // though the files are in the store. Say so and fail, rather than
+        // reporting success.
+        if (linked == 0 and pkg.bin.len > 0) {
             term.err(
-                "{s}warning{s}: no executables from '{s}' were found in the unpacked archive\n",
-                .{ term.yellow, term.reset, pkg.name },
+                "{s}error{s}: none of {s}'s programs could be linked into {s} (see the messages above)\n",
+                .{ term.red, term.reset, pkg.name, self.bin_root },
             );
+            return StoreError.NothingLinked;
         }
     }
 
@@ -2322,7 +2329,11 @@ pub const Store = struct {
         const linked = try self.linkPlans(a, pkg, plans.items, opts);
         try w.append(.complete);
         if (linked == 0) {
-            term.err("{s}warning{s}: no executables from '{s}' could be linked\n", .{ term.yellow, term.reset, pkg.name });
+            term.err(
+                "{s}error{s}: none of {s}'s programs could be linked into {s} (see the messages above)\n",
+                .{ term.red, term.reset, pkg.name, self.bin_root },
+            );
+            return StoreError.NothingLinked;
         }
         return pkg;
     }

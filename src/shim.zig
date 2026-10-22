@@ -345,25 +345,35 @@ fn linkSelf(a: std.mem.Allocator, dir: std.fs.Dir, exe_name: []const u8, replace
     var self_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
     const self_path = self_exe orelse try std.fs.selfExePath(&self_buf);
 
-    const tmp_name = try std.fmt.allocPrint(a, "{s}.new{d}", .{ exe_name, platform.processId() });
-    defer a.free(tmp_name);
-    dir.deleteFile(tmp_name) catch {};
-
     // Resolve the directory so the link is created relative to it.
     var dir_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
     const dir_path = try dir.realpath(".", &dir_buf);
+
+    // A new launcher is linked straight to its final name. Windows refuses
+    // to rename a hard link of an image that is running (abv0 itself, right
+    // now), so the link-to-temp-then-rename dance only works for copies.
+    if (!replace) {
+        const final_path = try std.fs.path.join(a, &.{ dir_path, exe_name });
+        defer a.free(final_path);
+        try hardLinkOrCopy(self_path, final_path);
+        return;
+    }
+
+    // Replacing: copy to a temporary name, then rename over the old one, so
+    // the launcher is never missing. A copy is not a mapped image, so the
+    // rename is allowed.
+    const tmp_name = try std.fmt.allocPrint(a, "{s}.new{d}", .{ exe_name, platform.processId() });
+    defer a.free(tmp_name);
+    dir.deleteFile(tmp_name) catch {};
     const tmp_path = try std.fs.path.join(a, &.{ dir_path, tmp_name });
     defer a.free(tmp_path);
 
-    try hardLinkOrCopy(self_path, tmp_path);
-    errdefer dir.deleteFile(tmp_name) catch {};
-
-    dir.rename(tmp_name, exe_name) catch |e| {
+    try std.fs.cwd().copyFile(self_path, std.fs.cwd(), tmp_path, .{});
+    dir.rename(tmp_name, exe_name) catch {
         dir.deleteFile(tmp_name) catch {};
         // A running shim cannot be replaced on Windows. The existing exe is a
-        // link to an older abv0, which behaves identically, so keep it.
-        if (replace) return;
-        return e;
+        // copy of an older abv0, which reads the same .shim files, so keep it.
+        return;
     };
 }
 
