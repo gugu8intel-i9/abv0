@@ -382,12 +382,14 @@ pub fn cmdCleanup(
     try collectOldVersions(aa, st, &plan);
     try collectStaleTmp(aa, st, &plan);
 
-    const cache_path = try std.fs.path.join(aa, &.{ st.root, "cache" });
-    if (platform.pathExists(cache_path)) {
-        try plan.append(.{ .label = "download cache", .path = cache_path, .bytes = treeSize(aa, cache_path) });
-    }
+    // The download cache and the shared-file store are trimmed by their own
+    // code (cas.zig). A dry run counts what is orphaned right now; the real
+    // run prunes after the old versions above are gone, so it also frees the
+    // shared files only those versions used.
+    const cache_now = st.pruneCache(aa, true);
+    const cas_now = st.pruneCas(aa, true);
 
-    if (plan.items.len == 0) {
+    if (plan.items.len == 0 and cache_now.files == 0 and cas_now.files == 0) {
         term.print("nothing to clean\n", .{});
         return 0;
     }
@@ -411,6 +413,18 @@ pub fn cmdCleanup(
         reclaimed += v.bytes;
         term.print("removed {s}: {s} ({s})\n", .{ v.label, v.path, size });
     }
+
+    const cache_done = if (dry_run) cache_now else st.pruneCache(aa, false);
+    const cas_done = if (dry_run) cas_now else st.pruneCas(aa, false);
+    const verb: []const u8 = if (dry_run) "would remove" else "removed";
+    if (cache_done.files > 0) {
+        term.print("{s} download cache: {d} stale entries ({s})\n", .{ verb, cache_done.files, formatBytes(&size_buf, cache_done.bytes) });
+    }
+    if (cas_done.files > 0) {
+        term.print("{s} shared files: {d} unused ({s})\n", .{ verb, cas_done.files, formatBytes(&size_buf, cas_done.bytes) });
+    }
+    total += cache_done.bytes + cas_done.bytes;
+    reclaimed += cache_done.bytes + cas_done.bytes;
 
     if (dry_run) {
         term.print("would reclaim {s}\n", .{formatBytes(&size_buf, total)});

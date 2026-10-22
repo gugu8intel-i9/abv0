@@ -17,6 +17,7 @@ const ghrelease = @import("ghrelease.zig");
 const ghverify = @import("ghverify.zig");
 const bindetect = @import("bindetect.zig");
 const shim = @import("shim.zig");
+const cas = @import("cas.zig");
 
 pub const Package = registry.Package;
 
@@ -420,9 +421,36 @@ pub const Store = struct {
             info.bin_path
         else if (pkg.primaryBin()) |b| b else pkg.name;
 
+        // ---- download cache ----
+        // A payload with a pinned digest that is already in the cache (and
+        // still hashes to it) needs no network at all.
+        const cfg = cas.Config.current();
+        var want_hex_buf: [64]u8 = undefined;
+        const want_hex: ?[]const u8 = if (cfg.cache and info.checksumIsPinned() and cas.isHex64(info.sha256))
+            std.ascii.lowerString(&want_hex_buf, info.sha256)
+        else
+            null;
+        const raw_payload = (archive.Kind.fromString(info.archive_type) orelse archive.Kind.fromFilename(info.url)) == archive.Kind.raw;
+        var hit: ?cas.Hit = null;
+        if (want_hex) |h| {
+            hit = cas.lookup(a, self.root, h);
+            if (hit) |found| {
+                // A raw payload is renamed and chmodded below, so it gets its own copy.
+                cas.materialize(found.path, archive_path, raw_payload) catch {
+                    hit = null;
+                };
+            }
+        }
+
         // ---- fetch ----
         try w.append(.fetch);
-        if (!opts.quiet) term.print("  {s}fetch{s}    {s} {s}\n", .{ term.cyan, term.reset, pkg.name, pkg.version });
+        if (!opts.quiet) {
+            if (hit != null) {
+                term.print("  {s}cache{s}    {s} {s}\n", .{ term.cyan, term.reset, pkg.name, pkg.version });
+            } else {
+                term.print("  {s}fetch{s}    {s} {s}\n", .{ term.cyan, term.reset, pkg.name, pkg.version });
+            }
+        }
 
         // Fast path: hash, decode and unpack while the bytes arrive. Nothing is
         // published until the digest is checked below, so a failed stream
@@ -430,7 +458,19 @@ pub const Store = struct {
         // mismatch falls through to the curl path, which reports it properly.
         var streamed: ?stream.Result = null;
         var payload: ?Digest = null;
-        if (!opts.no_stream and !opts.micro_split) {
+
+        // A streaming install never holds the payload as a file; the sink
+        // collects the bytes as they arrive so they can be cached once the
+        // digest has been checked (see cas.zig, "Streaming tee").
+        var sink: ?cas.Sink = null;
+        defer if (sink) |*s| s.deinit();
+        if (hit == null and want_hex != null and !opts.no_stream and !opts.micro_split and opts.session != null) {
+            sink = cas.Sink.open(a, self.root, cfg) catch null;
+        }
+        if (sink) |*s| cas.tee = s;
+        defer cas.tee = null;
+
+        if (hit == null and !opts.no_stream and !opts.micro_split) {
             if (opts.session) |session| {
                 if (session.streamingEnabled()) {
                     if (archive.Kind.fromString(info.archive_type) orelse archive.Kind.fromFilename(info.url)) |declared| {
@@ -451,9 +491,18 @@ pub const Store = struct {
             }
         }
 
+        cas.tee = null;
+
         var sum: [32]u8 = undefined;
         if (streamed) |res| {
             sum = res.digest;
+        } else if (hit) |found| {
+            // Already verified against the pinned digest by the lookup; only
+            // the leading bytes are needed, for the unpack's type sniff.
+            sum = found.digest;
+            var d = Digest.init();
+            d.update(found.head[0..found.head_len]);
+            payload = d;
         } else {
             // The payload is read once after it lands, for its digest and its
             // leading bytes. A micro-split download already has both from the
@@ -461,6 +510,12 @@ pub const Store = struct {
             var fetched: ?Digest = null;
             if (opts.micro_split) {
                 fetched = self.microSplitDownload(a, info.url, archive_path, tmp_dir) catch null;
+            }
+            if (comptime builtin.is_test) {
+                if (test_downloader) |fake| {
+                    fake(a, info.url, archive_path) catch return StoreError.DownloadFailed;
+                    fetched = try digestFile(archive_path);
+                }
             }
             var p = fetched orelse blk: {
                 net.download(a, info.url, archive_path, .{}) catch |e| {
@@ -490,6 +545,19 @@ pub const Store = struct {
 
         try self.verifyChecksum(pkg, info, &digest_hex, opts);
         if (!opts.quiet) term.print("  {s}verify{s}   {s}\n", .{ term.green, term.reset, digest_hex[0..16] });
+
+        // ---- keep ----
+        // Verified against the manifest: keep the payload for next time.
+        // Best effort; the cache never makes an install fail.
+        if (want_hex) |h| {
+            if (hit == null and std.mem.eql(u8, &digest_hex, h)) {
+                if (streamed != null) {
+                    if (sink) |*s| s.promote(h) catch {};
+                } else if (payload != null) {
+                    cas.insertFile(a, self.root, cfg, h, archive_path, raw_payload) catch {};
+                }
+            }
+        }
 
         // ---- unpack ----
         try w.append(.unpack);
@@ -523,8 +591,21 @@ pub const Store = struct {
             try f.writeAll(note);
         }
 
+        // Identical files are shared with what is already installed.
+        if (cfg.dedupe) {
+            if (cas.dedupeTree(a, self.root, tmp_dir)) |ds| {
+                if (ds.shared > 0 and !opts.quiet) {
+                    term.print("  {s}dedupe{s}   {d} files shared with earlier installs ({d} KiB)\n", .{ term.dim, term.reset, ds.shared, ds.bytes / 1024 });
+                }
+            } else |_| {}
+        }
+
         try publishTree(a, tmp_dir, pkg_dir);
     }
+
+    /// Test seam: when set, replaces the network download in `fetchAndUnpack`.
+    var test_downloader: if (builtin.is_test) ?*const fn (std.mem.Allocator, []const u8, []const u8) anyerror!void else void =
+        if (builtin.is_test) null else {};
 
     /// File in a store directory that says where a `gh:` install came from.
     pub const source_file = ".abv0-source";
@@ -980,7 +1061,7 @@ pub const Store = struct {
                 term.err("{s}warning{s}: {s}: '{s}' is a script (.cmd/.bat/.ps1); scripts cannot be linked on Windows, skipping\n", .{ term.yellow, term.reset, pkg.name, p.bin });
                 continue;
             }
-            platform.setExecutable(p.src); // was a `chmod +x` subprocess per binary
+            cas.setExecutable(p.src); // was a `chmod +x` subprocess per binary
             dropOwner(&owners.recs, "bin", p.bin);
             const label: []const u8 = switch (method) {
                 .shim => blk: {
@@ -1380,7 +1461,32 @@ pub const Store = struct {
         defer a.free(legacy);
         if (std.fs.cwd().deleteTree(legacy)) |_| reclaimed += 1 else |_| {}
 
+        // Deduped files that no installed tree uses any more.
+        reclaimed += @intCast(cas.pruneCas(a, self.root, false).files);
+
         return reclaimed;
+    }
+
+    /// Size of the download cache (`<root>/cache`).
+    pub fn cacheStats(self: *const Store, a: std.mem.Allocator) cas.Stats {
+        return cas.cacheStats(a, self.root);
+    }
+
+    /// Size of the shared-file store (`<root>/cas`) and how much of it only
+    /// the store itself still references.
+    pub fn casStats(self: *const Store, a: std.mem.Allocator) cas.CasStats {
+        return cas.casStats(a, self.root);
+    }
+
+    /// Trim the download cache: entries unused for 30 days, then the least
+    /// recently used until it fits `ABV0_CACHE_MAX`. `dry_run` only counts.
+    pub fn pruneCache(self: *const Store, a: std.mem.Allocator, dry_run: bool) cas.Prune {
+        return cas.pruneCache(a, self.root, cas.Config.current(), dry_run);
+    }
+
+    /// Remove shared files that no installed tree links to. `dry_run` only counts.
+    pub fn pruneCas(self: *const Store, a: std.mem.Allocator, dry_run: bool) cas.Prune {
+        return cas.pruneCas(a, self.root, dry_run);
     }
 
     /// Whether an ephemeral sandbox is safe to delete. Names are
@@ -1438,6 +1544,7 @@ pub const Store = struct {
         std.fs.cwd().deleteTree(self.store_root) catch {};
         std.fs.cwd().deleteTree(self.shells_root) catch {};
         std.fs.cwd().deleteTree(self.locks_root) catch {};
+        _ = cas.pruneCas(a, self.root, false); // nothing links to the shared files now
 
         for ([_][]const u8{ self.store_root, self.bin_root, self.shells_root, self.locks_root }) |d| {
             platform.makeSecureDir(d) catch {};
@@ -2659,6 +2766,12 @@ pub const Store = struct {
 
 const testing = std.testing;
 
+test {
+    // main.zig lists every module that carries tests; cas.zig is reached only
+    // through here.
+    _ = @import("cas.zig");
+}
+
 test "storeDirName rejects hostile identifiers" {
     const a = testing.allocator;
 
@@ -3343,4 +3456,237 @@ test "windows shim pairs: create, own, health, replace, remove" {
     try testing.expectError(error.FileNotFound, tmp.dir.access("bin/tool" ++ platform.exe_suffix, .{}));
     try testing.expectError(error.FileNotFound, tmp.dir.access("bin/tool.shim", .{}));
     try testing.expect(!(try Store.removeBinFiles(a, s.bin_root, "tool", .windows)));
+}
+
+// ---------------------------------------------------------------------------
+// Download cache and dedupe, through fetchAndUnpack
+// ---------------------------------------------------------------------------
+
+var fake_calls: usize = 0;
+var fake_payload: []const u8 = "";
+
+fn fakeDownload(a: std.mem.Allocator, url: []const u8, dest: []const u8) anyerror!void {
+    _ = a;
+    _ = url;
+    fake_calls += 1;
+    const f = try std.fs.cwd().createFile(dest, .{ .mode = platform.mode_bin });
+    defer f.close();
+    try f.writeAll(fake_payload);
+}
+
+/// A raw (single binary) package whose payload is `fake_payload`.
+const CacheFixture = struct {
+    hex: [64]u8,
+    plats: [1]registry.PlatformInfo,
+    bins: [1][]const u8,
+
+    fn init(payload: []const u8) CacheFixture {
+        var d: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(payload, &d, .{});
+        var f: CacheFixture = undefined;
+        _ = std.fmt.bufPrint(&f.hex, "{s}", .{std.fmt.fmtSliceHexLower(&d)}) catch unreachable;
+        fake_calls = 0;
+        fake_payload = payload;
+        return f;
+    }
+
+    fn pkg(self: *CacheFixture) Package {
+        self.plats = .{.{
+            .name = "x86_64-linux",
+            .url = "https://example.invalid/tool",
+            .sha256 = &self.hex,
+            .archive_type = "raw",
+        }};
+        self.bins = .{"tool"};
+        return .{ .name = "tool", .version = "1.0", .bin = &self.bins, .platforms = &self.plats };
+    }
+};
+
+fn installRaw(s: *Store, a: std.mem.Allocator, p: Package) ![]const u8 {
+    const pkg_dir = try s.pkgStorePath(a, p, "x86_64-linux");
+    var w = try wal.Wal.init(a, s.store_root, p.name);
+    defer w.deinit();
+    try s.fetchAndUnpack(a, p, p.platforms[0], pkg_dir, .{ .quiet = true }, &w);
+    try w.append(.complete);
+    return pkg_dir;
+}
+
+test "a verified download is cached and the next install never downloads" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var s = try testStore(&tmp);
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const payload = "#!/bin/sh\necho hi\n" ++ "x" ** 6000;
+    var fx = CacheFixture.init(payload);
+    const pkg = fx.pkg();
+    Store.test_downloader = &fakeDownload;
+    defer Store.test_downloader = null;
+    cas.config_override = .{};
+    defer cas.config_override = null;
+
+    const pkg_dir = try installRaw(&s, a, pkg);
+    try testing.expectEqual(@as(usize, 1), fake_calls);
+    try testing.expectEqual(@as(u64, 1), s.cacheStats(a).entries);
+
+    // Uninstalled and installed again: served from the cache, no download.
+    try std.fs.cwd().deleteTree(pkg_dir);
+    _ = try installRaw(&s, a, pkg);
+    try testing.expectEqual(@as(usize, 1), fake_calls);
+
+    const bin_path = try std.fs.path.join(a, &.{ pkg_dir, "tool" });
+    const installed = try std.fs.cwd().readFileAlloc(a, bin_path, 1 << 20);
+    try testing.expectEqualStrings(payload, installed);
+    const st = try std.fs.cwd().statFile(bin_path);
+    try testing.expect(@as(u32, @intCast(st.mode)) & 0o100 != 0);
+
+    // The raw payload was copied, so making the program executable left the
+    // cached file as it was: still 0600, still the original bytes.
+    const rel = try std.fmt.allocPrint(a, "cache/sha256/{s}/{s}", .{ fx.hex[0..2], fx.hex });
+    const cached = try tmp.dir.readFileAlloc(a, rel, 1 << 20);
+    try testing.expectEqualStrings(payload, cached);
+    const cst = try tmp.dir.statFile(rel);
+    try testing.expectEqual(@as(u32, 0o600), @as(u32, @intCast(cst.mode)) & 0o777);
+}
+
+test "a corrupt cached payload is detected and downloaded again" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var s = try testStore(&tmp);
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const payload = "#!/bin/sh\necho good\n" ++ "y" ** 6000;
+    var fx = CacheFixture.init(payload);
+    const pkg = fx.pkg();
+    Store.test_downloader = &fakeDownload;
+    defer Store.test_downloader = null;
+    cas.config_override = .{};
+    defer cas.config_override = null;
+
+    const pkg_dir = try installRaw(&s, a, pkg);
+    try testing.expectEqual(@as(usize, 1), fake_calls);
+
+    const rel = try std.fmt.allocPrint(a, "cache/sha256/{s}/{s}", .{ fx.hex[0..2], fx.hex });
+    {
+        const f = try tmp.dir.openFile(rel, .{ .mode = .read_write });
+        defer f.close();
+        try f.writeAll("TAMPERED");
+    }
+    try std.fs.cwd().deleteTree(pkg_dir);
+    _ = try installRaw(&s, a, pkg);
+
+    // The bad entry was not used: the payload came from the network again,
+    // installed intact, and the cache holds a good copy once more.
+    try testing.expectEqual(@as(usize, 2), fake_calls);
+    const bin_path = try std.fs.path.join(a, &.{ pkg_dir, "tool" });
+    const installed = try std.fs.cwd().readFileAlloc(a, bin_path, 1 << 20);
+    try testing.expectEqualStrings(payload, installed);
+    const cached = try tmp.dir.readFileAlloc(a, rel, 1 << 20);
+    try testing.expectEqualStrings(payload, cached);
+
+    // And it is used again.
+    try std.fs.cwd().deleteTree(pkg_dir);
+    _ = try installRaw(&s, a, pkg);
+    try testing.expectEqual(@as(usize, 2), fake_calls);
+}
+
+test "ABV0_NO_CACHE: nothing is kept and every install downloads" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var s = try testStore(&tmp);
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const payload = "#!/bin/sh\necho off\n" ++ "z" ** 6000;
+    var fx = CacheFixture.init(payload);
+    const pkg = fx.pkg();
+    Store.test_downloader = &fakeDownload;
+    defer Store.test_downloader = null;
+    cas.config_override = .{ .cache = false, .dedupe = false };
+    defer cas.config_override = null;
+
+    const pkg_dir = try installRaw(&s, a, pkg);
+    try std.fs.cwd().deleteTree(pkg_dir);
+    _ = try installRaw(&s, a, pkg);
+    try testing.expectEqual(@as(usize, 2), fake_calls);
+    try testing.expectError(error.FileNotFound, tmp.dir.access("cache", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.access("cas", .{}));
+}
+
+test "an unpinned payload is never cached" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var s = try testStore(&tmp);
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var fx = CacheFixture.init("#!/bin/sh\necho unpinned\n" ++ "u" ** 6000);
+    var pkg = fx.pkg();
+    var plats = fx.plats;
+    plats[0].sha256 = registry.sha256_skip;
+    pkg.platforms = &plats;
+    Store.test_downloader = &fakeDownload;
+    defer Store.test_downloader = null;
+    cas.config_override = .{};
+    defer cas.config_override = null;
+
+    const pkg_dir = try s.pkgStorePath(a, pkg, "x86_64-linux");
+    var w = try wal.Wal.init(a, s.store_root, pkg.name);
+    defer w.deinit();
+    try s.fetchAndUnpack(a, pkg, plats[0], pkg_dir, .{ .quiet = true, .allow_unverified = true }, &w);
+    try testing.expectEqual(@as(u64, 0), s.cacheStats(a).entries);
+}
+
+test "reinstalling and upgrading share unchanged files through the CAS" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var s = try testStore(&tmp);
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const payload = "#!/bin/sh\necho same\n" ++ "s" ** 6000;
+    var fx = CacheFixture.init(payload);
+    const pkg = fx.pkg();
+    Store.test_downloader = &fakeDownload;
+    defer Store.test_downloader = null;
+    cas.config_override = .{};
+    defer cas.config_override = null;
+
+    const dir1 = try installRaw(&s, a, pkg);
+    const bin1 = try std.fs.path.join(a, &.{ dir1, "tool" });
+    const ino1 = (try std.fs.cwd().statFile(bin1)).inode;
+    try testing.expectEqual(@as(u64, 1), s.casStats(a).files);
+
+    // A second version with the same program: one inode, one CAS file.
+    var pkg2 = pkg;
+    pkg2.version = "2.0";
+    const dir2 = try installRaw(&s, a, pkg2);
+    const bin2 = try std.fs.path.join(a, &.{ dir2, "tool" });
+    try testing.expectEqual(ino1, (try std.fs.cwd().statFile(bin2)).inode);
+    try testing.expectEqual(@as(u64, 1), s.casStats(a).files);
+
+    // Both versions removed: the file is held by the CAS alone and gc takes it.
+    try std.fs.cwd().deleteTree(dir1);
+    try std.fs.cwd().deleteTree(dir2);
+    try testing.expectEqual(@as(u64, 1), s.casStats(a).orphans);
+    try testing.expectEqual(@as(u64, 1), s.pruneCas(a, true).files);
+    _ = try s.gc(a);
+    try testing.expectEqual(@as(u64, 0), s.casStats(a).files);
 }

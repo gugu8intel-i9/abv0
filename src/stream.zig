@@ -20,6 +20,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const archive = @import("archive.zig");
+const cas = @import("cas.zig");
 const http = @import("http.zig");
 const net = @import("net.zig");
 const platform = @import("platform.zig");
@@ -99,6 +100,8 @@ pub fn HashingReader(comptime R: type) type {
             if (n > self.limit - self.bytes) return error.DownloadTooLarge;
             self.bytes += n;
             self.hasher.update(buf[0..n]);
+            // Lets the installer cache the payload (no-op unless it asked).
+            cas.teeWrite(buf[0..n]);
             term.addBytes(self.progress, n);
             return n;
         }
@@ -487,4 +490,33 @@ test "unpackStream keeps a raw payload whole and executable" {
     const got = try tmp.dir.readFileAlloc(testing.allocator, "rg", 1 << 20);
     defer testing.allocator.free(got);
     try testing.expectEqualSlices(u8, data, got);
+}
+
+test "a tee sink set by the installer receives every streamed byte once" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const data = "\x7fELF-not-really" ** 5000;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(root);
+    try tmp.dir.makePath("out");
+    var out = try tmp.dir.openDir("out", .{});
+    defer out.close();
+
+    var sink = try cas.Sink.open(testing.allocator, root, .{});
+    defer sink.deinit();
+    cas.tee = &sink;
+    defer cas.tee = null;
+
+    var fbs = std.io.fixedBufferStream(@as([]const u8, data));
+    const res = try unpackStream(testing.allocator, fbs.reader(), .raw, "rg", out, null);
+    var hex: [64]u8 = undefined;
+    _ = try std.fmt.bufPrint(&hex, "{s}", .{std.fmt.fmtSliceHexLower(&res.digest)});
+
+    // The head that was peeked and replayed is not teed twice: the sink's own
+    // hash equals the stream's, or promote would refuse.
+    try sink.promote(&hex);
+    const hit = cas.lookup(testing.allocator, root, &hex) orelse return error.TestExpectedHit;
+    defer testing.allocator.free(hit.path);
+    try testing.expectEqual(@as(u64, data.len), hit.size);
 }

@@ -93,7 +93,7 @@ abv0 outdated                      # installed packages with a newer version
 abv0 upgrade                       # upgrade every outdated package
 abv0 pin jq                        # hold jq at its installed version
 abv0 which rg                      # which package owns the rg command
-abv0 cleanup --dry-run             # old versions and stale temp files
+abv0 cleanup --dry-run             # old versions, stale temp files, stale cache
 abv0 doctor                        # PATH, permissions and link problems
 ```
 
@@ -218,6 +218,9 @@ fetches and stores the macOS build without linking it into your `PATH`.
 | `ABV0_BIN_DIR` | Bin directory for links, replacing `<root>/bin` |
 | `ABV0_REGISTRY_DIR` | Registry directory, replacing `<root>/registry` |
 | `ABV0_REGISTRY_URL` | Manifest URL, for a mirror. Must be `https`. The manifest is still signature-checked. |
+| `ABV0_NO_CACHE` | `1` stops abv0 keeping and reusing verified downloads in `<root>/cache` |
+| `ABV0_CACHE_MAX` | Size cap of the download cache, such as `512M` or `4G` (default `2G`); least recently used entries go first |
+| `ABV0_NO_DEDUPE` | `1` stops abv0 hard-linking identical files between installs through `<root>/cas` |
 | `ABV0_DOWNLOADER` | `builtin`, `curl` or `auto` (the default). `builtin` never uses curl; `curl` never uses the built-in client. |
 | `GITHUB_TOKEN`, `GH_TOKEN` | Optional GitHub token for API requests. `GITHUB_TOKEN` is read first. |
 | `NO_COLOR` | Disables colour, as `--no-color` does |
@@ -342,6 +345,8 @@ measured.
   registry/index.json.sha256              SHA-256 of the manifest abv0 last accepted
   registry/index.abv                      compiled binary index (mmap'ed)
   registry/last-updated-at                newest manifest updated_at accepted
+  cache/sha256/<xx>/<sha256>              verified downloads, 0600, LRU-capped (ABV0_CACHE_MAX)
+  cas/files/<sha256>[.<mode>]             files shared between installs by hard link
   net-fallback                            hosts the built-in HTTPS client failed on (24 h)
   state/pins                              pinned packages
   apps/                                   app bundles

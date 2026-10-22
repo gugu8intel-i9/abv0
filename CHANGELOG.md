@@ -72,6 +72,16 @@
   are hashed, decompressed and unpacked in one pass into a private staging directory.
   Nothing is published until the digest matches. Ten rounds installing ripgrep, bat and
   jq: median 346 ms streamed against 404 ms downloading to a file first.
+- **Download cache.** A payload whose SHA-256 matched the manifest is kept in
+  `<root>/cache/sha256/<xx>/<hex>` (0600, LRU-capped at 2 GiB, `ABV0_CACHE_MAX`). A later
+  install of the same payload skips the network, so it also works offline; the cached bytes
+  are hashed again on every use and a corrupt entry is dropped and downloaded afresh.
+  Installing jq and ripgrep: about 290 ms cold, about 90 ms from the cache.
+  `ABV0_NO_CACHE=1` turns it off.
+- **File dedupe.** Files of 4 KiB or more in a newly unpacked package are hard linked
+  through `<root>/cas/files/<sha256>` (one name per permission mode), so an upgrade or
+  reinstall shares every unchanged file with what is already installed. `abv0 gc` and
+  `abv0 cleanup` remove shared files nothing else links to. `ABV0_NO_DEDUPE=1` turns it off.
 - **Dependency-ordered parallel installs.** `install`, `upgrade` and `bundle install`
   plan with `resolveOrder`, run packages in waves by dependency depth, and skip a
   package whose dependency failed.
