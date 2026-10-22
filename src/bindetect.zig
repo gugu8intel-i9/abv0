@@ -10,7 +10,11 @@
 //!     `.dylib`, `.dll`, `.a`, `.o`, ...) and, where the header says so, by
 //!     ELF/Mach-O file type.
 //!   * Anything under a directory called docs, man, completions, contrib,
-//!     examples, test and the like: those hold samples, not the tool.
+//!     examples, test, share, include and the like: those hold samples and
+//!     data, not the tool.
+//!   * Templates (`.in`, `.tmpl`, `.template`, `.sample`), by name.
+//!   * Everything outside a `bin/` directory, when the package has one: a
+//!     package laid out that way says which files are its programs.
 //!   * Symlinks. They are never followed, so an archive cannot make abv0 link
 //!     a file from outside the package, and never descended into either.
 //!
@@ -136,7 +140,18 @@ const skip_dirs = [_][]const u8{
     "doc",          "docs",           "documentation",   "man",     "completion", "completions",
     "autocomplete", "autocompletion", "autocompletions", "contrib", "example",    "examples",
     "test",         "tests",          "testdata",        "samples", "sample",     ".git",
+    "share",        "include",
 };
+
+const template_exts = [_][]const u8{ ".in", ".tmpl", ".template", ".sample" };
+
+/// Inputs to a build or install step, not programs (`Header.sh.in`).
+fn isTemplateName(name: []const u8) bool {
+    for (template_exts) |ext| {
+        if (std.ascii.endsWithIgnoreCase(name, ext)) return true;
+    }
+    return false;
+}
 
 /// Directories that hold documentation, samples or tests rather than the tool.
 /// `man1`..`man9` count as `man`.
@@ -204,7 +219,7 @@ const Walk = struct {
     }
 
     fn consider(self: *Walk, dir: std.fs.Dir, prefix: []const u8, file_name: []const u8) !void {
-        if (isLibraryName(file_name)) return;
+        if (isLibraryName(file_name) or isTemplateName(file_name)) return;
         const name = linkName(file_name);
         if (!safepath.isValidId(name)) return;
 
@@ -251,7 +266,8 @@ fn byDepthThenPath(_: void, x: Bin, y: Bin) bool {
 
 /// Executables inside an unpacked package, shallowest first. Paths and names
 /// are allocated from `a`, which should be an arena: nothing is freed
-/// individually. When two files would link under the same name, only the
+/// individually. When any program sits in a `bin/` directory, only those are
+/// returned. When two files would link under the same name, only the
 /// shallowest is kept. Returns at most 256 entries and visits at most 50,000.
 pub fn findExecutables(a: std.mem.Allocator, root: std.fs.Dir, os: std.Target.Os.Tag) ![]Bin {
     var root_dir = try root.openDir(".", .{ .iterate = true, .no_follow = true });
@@ -260,7 +276,17 @@ pub fn findExecutables(a: std.mem.Allocator, root: std.fs.Dir, os: std.Target.Os
     var w = Walk{ .a = a, .os = os, .found = std.ArrayList(Bin).init(a) };
     try w.visit(root_dir, "", 0);
 
-    const all = w.found.items;
+    var all = w.found.items;
+    // A package with a bin/ directory has named its programs; helpers that
+    // sit elsewhere (libexec, scripts next to data) are not for the PATH.
+    var kept: usize = 0;
+    for (all) |b| {
+        if (inBinDir(b.path) == 0) {
+            all[kept] = b;
+            kept += 1;
+        }
+    }
+    if (kept > 0) all = all[0..kept];
     std.mem.sort(Bin, all, {}, byDepthThenPath);
 
     var seen = std.StringHashMap(void).init(a);
@@ -428,6 +454,7 @@ test "library and directory names are recognised" {
     try testing.expect(isSkippedDir("contrib"));
     try testing.expect(isSkippedDir("autocomplete"));
     try testing.expect(isSkippedDir("examples"));
+    try testing.expect(isSkippedDir("share"));
     try testing.expect(!isSkippedDir("bin"));
     try testing.expect(!isSkippedDir("manager"));
     try testing.expect(!isSkippedDir("testing-tools"));
@@ -449,8 +476,8 @@ test "findExecutables picks programs and skips everything else" {
     const dylib = machoBytes(6);
     const obj = elfBytes(1);
 
-    try put(tmp.dir, "tool-1.0/bin/tool", &elf, 0o755);
-    try put(tmp.dir, "tool-1.0/bin/tool-helper", "#!/bin/sh\nexec tool\n", 0o755);
+    try put(tmp.dir, "tool-1.0/app/tool", &elf, 0o755);
+    try put(tmp.dir, "tool-1.0/app/tool-helper", "#!/bin/sh\nexec tool\n", 0o755);
     try put(tmp.dir, "tool-1.0/mac/maccy", &macho, 0o644);
     try put(tmp.dir, "tool-1.0/win/winny.exe", "MZ\x90\x00\x03\x00\x00\x00", 0o644);
     try put(tmp.dir, "tool-1.0/scripts/run.sh", "#!/bin/sh\necho\n", 0o755);
@@ -478,22 +505,62 @@ test "findExecutables picks programs and skips everything else" {
     try put(outside.dir, "dir/inner", &elf, 0o755);
     const evil = try outside.dir.realpathAlloc(a, "evil");
     const evil_dir = try outside.dir.realpathAlloc(a, "dir");
-    try tmp.dir.symLink(evil, "tool-1.0/bin/sneaky", .{});
+    try tmp.dir.symLink(evil, "tool-1.0/app/sneaky", .{});
     try tmp.dir.symLink(evil_dir, "tool-1.0/linkdir", .{ .is_directory = true });
-    try tmp.dir.symLink("tool", "tool-1.0/bin/alias", .{});
+    try tmp.dir.symLink("tool", "tool-1.0/app/alias", .{});
 
     const bins = try findExecutables(a, tmp.dir, .linux);
     try testing.expectEqual(@as(usize, 5), bins.len);
-    try testing.expect(hasPath(bins, "tool-1.0/bin/tool"));
-    try testing.expect(hasPath(bins, "tool-1.0/bin/tool-helper"));
+    try testing.expect(hasPath(bins, "tool-1.0/app/tool"));
+    try testing.expect(hasPath(bins, "tool-1.0/app/tool-helper"));
     try testing.expect(hasPath(bins, "tool-1.0/mac/maccy"));
     try testing.expect(hasPath(bins, "tool-1.0/win/winny.exe"));
     try testing.expect(hasPath(bins, "tool-1.0/scripts/run.sh"));
 
     for (bins) |b| {
         if (std.mem.eql(u8, b.path, "tool-1.0/win/winny.exe")) try testing.expectEqualStrings("winny", b.name);
-        if (std.mem.eql(u8, b.path, "tool-1.0/bin/tool")) try testing.expectEqualStrings("tool", b.name);
+        if (std.mem.eql(u8, b.path, "tool-1.0/app/tool")) try testing.expectEqualStrings("tool", b.name);
     }
+}
+
+test "findExecutables takes only bin/ programs when there are any" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    const elf = elfBytes(2);
+    try put(tmp.dir, "cmake-3/bin/cmake", &elf, 0o755);
+    try put(tmp.dir, "cmake-3/bin/ctest", &elf, 0o755);
+    try put(tmp.dir, "cmake-3/libexec/helper", &elf, 0o755);
+    try put(tmp.dir, "cmake-3/run-me.sh", "#!/bin/sh\n", 0o755);
+    try put(tmp.dir, "cmake-3/share/cmake/RunTestCase.sh", "#!/bin/sh\n", 0o755);
+    try put(tmp.dir, "cmake-3/bin/Header.sh.in", "#!/bin/sh\n", 0o755);
+
+    const bins = try findExecutables(a, tmp.dir, .linux);
+    try testing.expectEqual(@as(usize, 2), bins.len);
+    try testing.expect(hasPath(bins, "cmake-3/bin/cmake"));
+    try testing.expect(hasPath(bins, "cmake-3/bin/ctest"));
+}
+
+test "findExecutables skips templates and share/ without a bin/ directory" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    const elf = elfBytes(2);
+    try put(tmp.dir, "tool", &elf, 0o755);
+    try put(tmp.dir, "setup.sh.in", "#!/bin/sh\n", 0o755);
+    try put(tmp.dir, "share/data/x", &elf, 0o755);
+
+    const bins = try findExecutables(a, tmp.dir, .linux);
+    try testing.expectEqual(@as(usize, 1), bins.len);
+    try testing.expectEqualStrings("tool", bins[0].path);
 }
 
 test "findExecutables keeps the shallowest file for a repeated name" {

@@ -34,6 +34,7 @@ on:
       - "catalog/**"
       - "tools/build-catalog.zig"
       - "tools/catalog_api.zig"
+      - "src/bindetect.zig"
       - ".github/workflows/catalog-build.yml"
 
 permissions:

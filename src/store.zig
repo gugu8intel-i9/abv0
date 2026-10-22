@@ -1082,7 +1082,7 @@ pub const Store = struct {
                     break :blk "launcher shim";
                 },
                 else => blk: {
-                    const kind = platform.fastLink(p.src, p.dst) catch |e| {
+                    const kind = platform.linkProgram(p.src, p.dst) catch |e| {
                         term.err("{s}warning{s}: could not link {s}: {s}\n", .{ term.yellow, term.reset, p.bin, @errorName(e) });
                         continue;
                     };
