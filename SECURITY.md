@@ -257,10 +257,10 @@ manifest's `updated_at` may not be older than the last one accepted, which is st
 `<registry dir>/last-updated-at`. The current directory's manifest is no longer loaded.
 `--registry <path>` loads a manifest that must have a verifying `<path>.sig`.
 `--allow-unsigned-manifest` skips both checks, prints a warning, and is for testing only.
-The root of trust is now the maintainer's signing key. The key committed in
-`keys/manifest.pub` is a development placeholder and must be replaced before a real
-release is signed with it. `release/SHA256SUMS.sig` is checked by `self-update` in the
-same way.
+The root of trust is the maintainer's signing key, whose public half is
+`keys/manifest.pub`; the secret half is held by the maintainer and the
+`ABV0_MANIFEST_KEY` repository secret only. `release/SHA256SUMS.sig` is checked by
+`self-update` in the same way.
 
 ### 18. Uninstall deleted app bundles by name — high
 

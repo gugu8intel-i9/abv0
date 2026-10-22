@@ -485,8 +485,9 @@ zig-out/bin/sign-manifest verify keys/manifest.pub packages/index.json
 - Keep the secret key out of git. Only the public key is committed.
 - Commit `keys/manifest.pub`, `packages/index.json` and `packages/index.json.sig` together.
   Every change to the manifest needs a new signature.
-- The public key in the repository is a development placeholder. Replace it with the
-  maintainer's key before a real release, then rebuild the binaries.
+- `keys/manifest.pub` is the maintainer's key. If it is ever replaced, re-sign the
+  manifest and the release checksums with the new secret key, update the
+  `ABV0_MANIFEST_KEY` repository secret, and rebuild the binaries.
 - Releases also need `release/SHA256SUMS.sig`, a signature over `release/SHA256SUMS`
   made the same way (`sign-manifest sign <secret-key> release/SHA256SUMS`). `abv0
   self-update` refuses a release whose checksums do not verify.

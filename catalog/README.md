@@ -251,5 +251,5 @@ Do this once, before the first release.
    the new signatures. `-Dmanifest-pubkey=<hex>` embeds a key at build time instead of the
    file.
 
-The public key committed in this repository is a development placeholder. Replace it with
-the maintainer's key before a real release, as described above.
+The public key committed in this repository is the maintainer's key. Its secret half is
+the `ABV0_MANIFEST_KEY` repository secret.
