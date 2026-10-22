@@ -1,6 +1,6 @@
 {
   "registry_version": 1,
-  "updated_at": "2026-10-22T09:00:00Z",
+  "updated_at": "2026-10-22T10:00:00Z",
   "packages": {
     "jq": {
       "name": "jq",
@@ -90,7 +90,7 @@
     },
     "bat": {
       "name": "bat",
-      "version": "0.24.0",
+      "version": "0.25.0",
       "description": "A cat(1) clone with wings (syntax highlighting and Git integration)",
       "homepage": "https://github.com/sharkdp/bat",
       "license": "MIT/Apache-2.0",
@@ -99,17 +99,35 @@
       ],
       "app_bundles": [],
       "platforms": {
-        "x86_64-macos": {
-          "url": "https://github.com/sharkdp/bat/releases/download/v0.24.0/bat-v0.24.0-x86_64-apple-darwin.tar.gz",
-          "sha256": "7032e4a4ea3c3b54e5a4d11db13859ddf75c3edd895e37fb02ddb7777afcc819",
-          "archive_type": "tar.gz",
-          "bin_path": "bat-v0.24.0-x86_64-apple-darwin/bat"
-        },
         "x86_64-linux": {
-          "url": "https://github.com/sharkdp/bat/releases/download/v0.24.0/bat-v0.24.0-x86_64-unknown-linux-musl.tar.gz",
-          "sha256": "d39a21e3da57fe6a3e07184b3c1dc245f8dba379af569d3668b6dcdfe75e3052",
+          "url": "https://github.com/sharkdp/bat/releases/download/v0.25.0/bat-v0.25.0-x86_64-unknown-linux-musl.tar.gz",
+          "sha256": "93f47d76abe328c402ef712e9ac92aa6d5bc84d5adcbcaf0bbc5665e5275a941",
           "archive_type": "tar.gz",
-          "bin_path": "bat-v0.24.0-x86_64-unknown-linux-musl/bat"
+          "bin_path": "bat-v0.25.0-x86_64-unknown-linux-musl/bat"
+        },
+        "aarch64-linux": {
+          "url": "https://github.com/sharkdp/bat/releases/download/v0.25.0/bat-v0.25.0-aarch64-unknown-linux-gnu.tar.gz",
+          "sha256": "d155df218dc2d662da191e2dacddc71c90197b62ebe7e2923a659e5dd055d5cb",
+          "archive_type": "tar.gz",
+          "bin_path": "bat-v0.25.0-aarch64-unknown-linux-gnu/bat"
+        },
+        "x86_64-macos": {
+          "url": "https://github.com/sharkdp/bat/releases/download/v0.25.0/bat-v0.25.0-x86_64-apple-darwin.tar.gz",
+          "sha256": "b974aa834b6b65610090aed2bc7310d11c6f500105696d23a130aee24fd8380f",
+          "archive_type": "tar.gz",
+          "bin_path": "bat-v0.25.0-x86_64-apple-darwin/bat"
+        },
+        "aarch64-macos": {
+          "url": "https://github.com/sharkdp/bat/releases/download/v0.25.0/bat-v0.25.0-aarch64-apple-darwin.tar.gz",
+          "sha256": "b3ed5a7515545445881f1036f0cc1b708c2b86cbce01c1b4033f38e0cfcc7b3c",
+          "archive_type": "tar.gz",
+          "bin_path": "bat-v0.25.0-aarch64-apple-darwin/bat"
+        },
+        "x86_64-windows": {
+          "url": "https://github.com/sharkdp/bat/releases/download/v0.25.0/bat-v0.25.0-x86_64-pc-windows-msvc.zip",
+          "sha256": "1d5ced071ba9c765e16f4065877c178cefcfd2fe9581e9ddc92af265b73991bd",
+          "archive_type": "zip",
+          "bin_path": "bat-v0.25.0-x86_64-pc-windows-msvc/bat.exe"
         }
       }
     },
