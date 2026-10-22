@@ -1575,6 +1575,10 @@ pub fn main() u8 {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
 
+    // Started as a shim (e.g. `rg.exe` hard-linked to abv0)? Run the target.
+    // Free for plain `abv0`: one basename comparison, no filesystem access.
+    if (@import("shim.zig").maybeRun(gpa.allocator())) |code| return code;
+
     // Install workers allocate concurrently. The original handed them a plain
     // ArenaAllocator, which is not thread-safe.
     var thread_safe = std.heap.ThreadSafeAllocator{ .child_allocator = gpa.allocator() };

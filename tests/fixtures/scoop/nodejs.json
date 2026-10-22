@@ -1,0 +1,50 @@
+{
+    "version": "26.12.1",
+    "description": "An asynchronous event driven JavaScript runtime designed to build scalable network applications.",
+    "homepage": "https://nodejs.org",
+    "license": "MIT",
+    "architecture": {
+        "64bit": {
+            "url": "https://nodejs.org/dist/v26.12.1/node-v26.12.1-win-x64.7z",
+            "hash": "4deef78146a60555c9518438cae38da8df71722ca856920b90078f5cdeb642a6",
+            "extract_dir": "node-v26.12.1-win-x64"
+        },
+        "arm64": {
+            "url": "https://nodejs.org/dist/v26.12.1/node-v26.12.1-win-arm64.7z",
+            "hash": "6331496efd27f1839bbc063c2053b57547b74f9119d3add736b1044cf1ffe127",
+            "extract_dir": "node-v26.12.1-win-arm64"
+        }
+    },
+    "persist": [
+        "bin",
+        "cache"
+    ],
+    "env_add_path": [
+        "bin",
+        "."
+    ],
+    "post_install": [
+        "# Set npm prefix to install modules inside bin and npm cache so they persist",
+        "Set-Content -Value \"prefix=$persist_dir\\bin`ncache=$persist_dir\\cache\" -Path \"$dir\\node_modules\\npm\\npmrc\""
+    ],
+    "checkver": {
+        "url": "https://nodejs.org/dist/index.json",
+        "jsonpath": "$[0].version",
+        "regex": "v([\\d.]+)"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://nodejs.org/dist/v$version/node-v$version-win-x64.7z",
+                "extract_dir": "node-v$version-win-x64"
+            },
+            "arm64": {
+                "url": "https://nodejs.org/dist/v$version/node-v$version-win-arm64.7z",
+                "extract_dir": "node-v$version-win-arm64"
+            }
+        },
+        "hash": {
+            "url": "$baseurl/SHASUMS256.txt.asc"
+        }
+    }
+}
