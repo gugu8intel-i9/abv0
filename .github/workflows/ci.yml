@@ -173,7 +173,9 @@ jobs:
           import json, sys
           path = sys.argv[1]
           d = json.load(open(path))
-          d["packages"]["jq"]["platforms"]["x86_64-linux"]["sha256"] = "0" * 64
+          # Every platform, so the check holds on any runner architecture.
+          for plat in d["packages"]["jq"]["platforms"].values():
+              plat["sha256"] = "0" * 64
           json.dump(d, open(path, "w"))
           PY
           set +e
