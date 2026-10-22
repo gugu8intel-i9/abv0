@@ -828,10 +828,13 @@ fn tmpRoot(tmp: *testing.TmpDir) ![]u8 {
     return tmp.dir.realpathAlloc(testing.allocator, ".");
 }
 
-fn writeAt(dir: std.fs.Dir, path: []const u8, data: []const u8, mode: std.fs.File.Mode) !void {
+fn writeAt(dir: std.fs.Dir, path: []const u8, data: []const u8, posix_mode: u32) !void {
+    // Windows has no mode bits (File.Mode is u0 there).
+    const mode: std.fs.File.Mode = if (builtin.os.tag == .windows) 0 else @intCast(posix_mode);
     if (std.fs.path.dirname(path)) |d| try dir.makePath(d);
     try dir.writeFile(.{ .sub_path = path, .data = data, .flags = .{ .mode = mode } });
     // The creation mode is filtered by the umask; the tests need exact bits.
+    if (builtin.os.tag == .windows) return;
     const f = try dir.openFile(path, .{});
     defer f.close();
     try f.chmod(mode);
@@ -876,9 +879,9 @@ test "a verified payload is found again and a bad hash is not" {
     const rel = try std.fmt.allocPrint(a, "cache/sha256/{s}/{s}", .{ hex[0..2], hex });
     defer a.free(rel);
     const st = try tmp.dir.statFile(rel);
-    try testing.expectEqual(@as(u32, 0o600), @as(u32, @intCast(st.mode)) & 0o777);
+    if (builtin.os.tag != .windows) try testing.expectEqual(@as(u32, 0o600), @as(u32, @intCast(st.mode)) & 0o777);
     const dst = try tmp.dir.statFile("cache");
-    try testing.expectEqual(@as(u32, 0o700), @as(u32, @intCast(dst.mode)) & 0o777);
+    if (builtin.os.tag != .windows) try testing.expectEqual(@as(u32, 0o700), @as(u32, @intCast(dst.mode)) & 0o777);
 
     const other = sha256Hex("something else");
     try testing.expect(lookup(a, root, &other) == null);
@@ -1064,6 +1067,8 @@ test "pruneCache drops entries that fit the cap only when stale, and counts a dr
 }
 
 test "dedupe links identical files across two versions and keeps modes distinct" {
+    // POSIX mode bits; Windows has none.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
@@ -1175,6 +1180,8 @@ test "gc of the CAS removes only files nothing else links to" {
 }
 
 test "making a shared file executable copies it first" {
+    // POSIX mode bits; Windows has none.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     var tmp = testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
