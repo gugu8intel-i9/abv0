@@ -15,7 +15,12 @@ abv0 install ripgrep jq                  # verified, parallel
 abv0 install gh:BurntSushi/ripgrep       # any GitHub release, verified
 abv0 run ripgrep -- --help               # run without touching PATH
 abv0 shell ripgrep                       # ephemeral subshell with just that package
+abv0 browse                              # pick packages from a searchable list
 ```
+
+`abv0 browse` opens the whole catalog in a full-screen list: type to search, arrow keys
+(or PgUp/PgDn/Home/End) to move, Space or Tab to pick, Enter to install what you picked
+(or the highlighted package), Esc to quit. Installed packages are marked with a tick.
 
 ---
 
@@ -122,6 +127,7 @@ abv0 doctor                        # PATH, permissions and link problems
 PACKAGES
   install <pkg>...         Install packages and their dependencies (verified, in parallel)
   install gh:owner/repo    Install any GitHub project's release, verified (no recipe needed)
+  browse                   Pick packages to install from a full-screen list
   uninstall <pkg>...       Remove packages and the links they created
   upgrade [--all|pkg]...   Upgrade outdated packages (keeps the previous version for rollback)
   outdated                 List packages with a newer version available (pinned ones marked)

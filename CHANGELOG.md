@@ -128,6 +128,12 @@
 
 ### New
 
+- **`abv0 browse`**, a full-screen package picker: type to search the catalog (name
+  matches first, then descriptions), move with the arrow keys, Space to pick, Enter to
+  install. Works in Terminal, iTerm, Linux terminals and Windows Terminal; no library.
+  Catalog text is shown with control characters stripped, so a description cannot move
+  the cursor or change the screen.
+
 - **`deps`, `uses`, `leaves`.** `deps <pkg>` lists a package's dependencies in install
   order (`--tree` nests them); `uses <pkg>` lists installed packages that depend on it;
   `leaves` lists installed packages nothing else depends on. All take `--json`.
