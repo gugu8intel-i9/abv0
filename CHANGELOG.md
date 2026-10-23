@@ -4,6 +4,12 @@
 
 ### Security
 
+- **Install-time malware scan.** Every file of a newly unpacked package is scanned before
+  it is linked; reverse-shell commands and mining-pool addresses block the install
+  (`--allow-suspicious` overrides, `ABV0_NO_SCAN=1` disables). `abv0 detect` scans the
+  whole package instead of one executable. The patterns are now whole commands: the old
+  fragments (`nicehash`, `nc -e`, `/bin/sh -i`) matched 8 of 60 ordinary catalog tools.
+
 - **Maintainer signing key.** The development key is replaced by the maintainer's key
   (`keys/manifest.pub`). The catalog and `release/SHA256SUMS` are re-signed with it, and
   the release binaries are rebuilt to trust it. Catalogs signed with the old key are

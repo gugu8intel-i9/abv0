@@ -153,7 +153,7 @@ MANIFESTS
 MAINTENANCE
   doctor                   Diagnose PATH, permissions and links
   fix                      Repair broken links and permissions
-  detect <pkg>             Scan an installed package for malware patterns
+  detect <pkg>             Scan every file of an installed package for malware patterns
   benchmark                Measure local store and index performance
   gc                       Remove temporary files and stale sandboxes
   cleanup                  Remove old versions (including rollback's), keeping the newest
@@ -200,6 +200,7 @@ abv0 install owner/repo               # the same as gh:owner/repo
 | `--registry <path>` | Use this manifest instead of the cached one. `<path>.sig` must verify. |
 | `--allow-unsigned-manifest` | Skip the manifest signature and replay checks (UNSAFE) |
 | `--allow-unverified` | Permit installs without a verified checksum |
+| `--allow-suspicious` | Install a package even if the malware scan blocks it |
 | `--micro-split` | Parallel ranged download for large assets |
 | `--no-stream` | Download fully before unpacking (disables the streaming install) |
 | `--force` | Overwrite files and replace conflicting bin links |
@@ -244,6 +245,7 @@ fetches and stores the macOS build without linking it into your `PATH`.
 | `ABV0_SPLIT_MIN` | Smallest download fetched over several connections at once, in bytes (`8M`, `512k` and `1G` work too). Default 8 MiB. |
 | `ABV0_CONNECTIONS` | Connections for a split download, 1 to 16. `1` turns splitting off. Unset, a download gets one connection per 4 MiB, up to 8. |
 | `GITHUB_TOKEN`, `GH_TOKEN` | Optional GitHub token for API requests. `GITHUB_TOKEN` is read first. |
+| `ABV0_NO_SCAN` | `1` turns off the install-time malware scan |
 | `NO_COLOR` | Disables colour, as `--no-color` does |
 
 The three path variables must be absolute, with no NUL bytes or line breaks. Anything
@@ -441,6 +443,16 @@ See [catalog/README.md](catalog/README.md) for the line format and the commands.
 [SECURITY.md](SECURITY.md) for each finding, its severity and how it was fixed.
 
 Behaviour you can rely on:
+
+- **Every install is scanned for malware.** Before anything is linked, abv0 reads every
+  file of the new package (about 5 ms for small tools) and looks for commands that only
+  malicious code carries: reverse shells (`bash -i >& /dev/tcp/…`, `nc -e /bin/sh`) and
+  mining-pool addresses (`stratum+tcp://`). A match removes the package and fails the
+  install; `--allow-suspicious` installs it anyway, and `ABV0_NO_SCAN=1` turns the scan
+  off. Weaker signs that ordinary tools also contain (credential names, SSH key paths)
+  never block and are listed by `abv0 detect <pkg>`. Tested on 140 catalog packages with
+  no false blocks. It is a pattern scan, not an antivirus: it catches known bad
+  behaviour, and code written to hide from it can.
 
 - **The manifest is signed.** `update` and the first-run bootstrap download the manifest
   and `<url>.sig`, verify the Ed25519 signature against the public key compiled in from

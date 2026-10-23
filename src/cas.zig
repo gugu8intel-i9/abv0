@@ -97,7 +97,7 @@ fn envText(buf: []u8, name: []const u8) ?[]const u8 {
 }
 
 /// Set means on: anything but empty, `0`, `false`, `no` or `off`.
-fn envFlag(name: []const u8) bool {
+pub fn envFlag(name: []const u8) bool {
     var buf: [32]u8 = undefined;
     const v = envText(&buf, name) orelse return false;
     if (v.len == 0) return false;
