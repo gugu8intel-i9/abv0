@@ -704,9 +704,20 @@ pub fn prewarm(hosts: []const []const u8) void {
     }
 }
 
-/// `prewarm` for the hosts a GitHub release download uses.
-pub fn prewarmGithub() void {
+/// `prewarm` for the hosts a GitHub release download uses. `parallel` is how
+/// many downloads may run at once: each gets a warm connection to the two
+/// hosts every release download touches (up to four of each).
+pub fn prewarmGithub(parallel: usize) void {
     prewarm(&github_hosts);
+    if (downloaderMode() == .curl) return;
+    const extra = @min(parallel, 4) -| 1;
+    for (0..extra) |_| {
+        for ([_][]const u8{ "github.com", "release-assets.githubusercontent.com" }) |h| {
+            if (routeNow(h) == .curl) continue;
+            const t = std.Thread.spawn(.{}, prewarmExtra, .{h}) catch return;
+            t.detach();
+        }
+    }
 }
 
 /// Prewarm handshakes still in flight. A network that resets or stalls the
@@ -757,13 +768,16 @@ fn prewarmOne(host: []u8, slot: usize) void {
     // the connection and reset it only once a request goes through. One real
     // request (any HTTP status will do) proves it, and leaves a warm,
     // verified connection in the pool for the first download.
-    var url_buf: [80]u8 = undefined;
-    const url = std.fmt.bufPrint(&url_buf, "https://{s}/", .{host}) catch return;
-    const s = client.open(std.heap.page_allocator, url, .{ .max_redirects = 0, .max_time_s = 10 }) catch |e| {
+    client.probe(host, 10) catch |e| {
         if (http.isTransportError(e)) reportBuiltinFailure(host, e);
-        return;
     };
-    s.close();
+}
+
+/// One more idle connection to `host`, for a parallel download. Its outcome
+/// is not part of the route decision, which `prewarmOne` makes.
+fn prewarmExtra(host: []const u8) void {
+    const client = http.shared() catch return;
+    client.probe(host, 10) catch {};
 }
 
 pub fn retryDelay(attempt: u32) void {
