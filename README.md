@@ -509,7 +509,9 @@ zig-out/bin/sign-manifest verify keys/manifest.pub packages/index.json
   `ABV0_MANIFEST_KEY` repository secret, and rebuild the binaries.
 - Releases also need `release/SHA256SUMS.sig`, a signature over `release/SHA256SUMS`
   made the same way (`sign-manifest sign <secret-key> release/SHA256SUMS`). `abv0
-  self-update` refuses a release whose checksums do not verify.
+  self-update` refuses a release whose checksums do not verify. The **Release**
+  workflow (Actions → Release → Run workflow) does all of this: it rebuilds `release/`,
+  regenerates and signs `SHA256SUMS` with the `ABV0_MANIFEST_KEY` secret, and commits it.
 - `-Dmanifest-pubkey=<hex>` at build time embeds a different public key instead of
   `keys/manifest.pub`.
 - The catalog in `packages/index.json` is rebuilt and signed daily by a GitHub workflow,

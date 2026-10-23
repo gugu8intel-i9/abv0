@@ -1,0 +1,93 @@
+# Rebuilds the binaries in release/ from the current code, regenerates
+# release/SHA256SUMS, signs it with the maintainer key and commits the result.
+# The installers download from release/, and `abv0 self-update` refuses
+# checksums whose signature does not verify against keys/manifest.pub.
+#
+# Run it from the Actions tab (Release -> Run workflow) after merging changes
+# that should reach users. Needs the ABV0_MANIFEST_KEY repository secret.
+
+name: Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build, sign and publish release/
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Require the signing key
+        env:
+          ABV0_MANIFEST_KEY: ${{ secrets.ABV0_MANIFEST_KEY }}
+        run: |
+          if [ -z "${ABV0_MANIFEST_KEY}" ]; then
+            echo "::error title=Missing secret::ABV0_MANIFEST_KEY is not set. Add the Ed25519 secret key (the counterpart of keys/manifest.pub) as a repository secret."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+
+      - name: Test
+        run: zig build test
+
+      - name: Build release binaries
+        run: |
+          set -euo pipefail
+          zig build -Doptimize=ReleaseFast
+          zig build release
+          ls -l release
+
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          cd release
+          sha256sum abv0-darwin-arm64 abv0-darwin-x86_64 abv0-linux-aarch64 \
+            abv0-linux-x86_64 abv0-windows-aarch64.exe abv0-windows-x86_64.exe > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Sign
+        env:
+          ABV0_MANIFEST_KEY: ${{ secrets.ABV0_MANIFEST_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          key="${RUNNER_TEMP}/manifest.key"
+          trap 'shred -u "${key}" 2>/dev/null || rm -f "${key}"' EXIT
+          printf '%s\n' "${ABV0_MANIFEST_KEY}" > "${key}"
+          ./zig-out/bin/sign-manifest sign "${key}" release/SHA256SUMS
+          # The key must be the one abv0 trusts, or self-update would refuse it.
+          ./zig-out/bin/sign-manifest verify keys/manifest.pub release/SHA256SUMS
+
+      - name: Smoke test the new Linux binary
+        run: |
+          set -euo pipefail
+          ./release/abv0-linux-x86_64 --version
+          # Loads the signed catalog, which checks the key built into the binary.
+          HOME="$(mktemp -d)" ./release/abv0-linux-x86_64 --registry packages/index.json search ripgrep | head -n 2
+
+      - name: Commit and push if changed
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- release; then
+            echo "Release binaries unchanged; nothing to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add release
+          git commit -m "chore(release): rebuild release binaries and sign checksums"
+          # The catalog job may have pushed meanwhile; it never touches release/.
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
