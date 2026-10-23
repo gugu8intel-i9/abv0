@@ -486,18 +486,19 @@ const commands = [_]Command{
     },
     .{
         .name = "migrate",
-        .summary = "Map the package names from a Homebrew install onto the abv0 catalog. Reads names only from a saved `brew list --formula` or a Brewfile (use - for stdin); it never runs brew. Lists what matched and what did not.",
+        .summary = "Move a Homebrew install to abv0. With no file, the Homebrew on this machine is read straight from disk in milliseconds (HOMEBREW_PREFIX, else /opt/homebrew, /usr/local or Linuxbrew); brew is never run. Takes what you installed by hand plus your apps, matches them to the catalog, and with --install installs them in parallel and keeps your brew pins.",
         .flags = &.{
             .{ .name = "--from-brew-list <file>", .help = "Names saved from `brew list --formula`, one per line" },
             .{ .name = "--brewfile <file>", .help = "A Brewfile; its brew \"name\" lines are read" },
             .{ .name = "--install", .help = "Install the matched packages (parallel, verified)" },
+            .{ .name = "--all", .help = "Also take formulae Homebrew installed as dependencies" },
             dry_run_flag,
             json_flag,
             jobs_flag,
             platform_flag,
             quiet_flag,
         },
-        .example = "abv0 migrate --from-brew-list brew.txt --install",
+        .example = "abv0 migrate --install",
     },
     .{
         .name = "run",
@@ -706,8 +707,8 @@ fn renderUsage(w: anytype) !void {
     try heading(w, "MANIFESTS");
     try w.writeAll(
         \\  bundle [install|dump]   Install from, or export to, a Brewfile
-        \\  migrate --from-brew-list F | --brewfile F
-        \\                          Map Homebrew package names to the catalog (--install to install them)
+        \\  migrate [--install]     Move your Homebrew packages and apps to abv0 (reads Homebrew from disk;
+        \\                          or --from-brew-list F | --brewfile F)
         \\  update                  Refresh the registry index
         \\  sync                    Recompile the local index and SQL export
         \\
@@ -748,7 +749,7 @@ fn renderUsage(w: anytype) !void {
         \\  --tree                  With deps: show a tree
         \\  --online                With search: also search GitHub repositories
         \\  --open                  With home: open the page in a browser
-        \\  --all                   With upgrade: every outdated package
+        \\  --all                   With upgrade: every outdated package; with migrate: dependencies too
         \\  --from-brew-list <f>    With migrate: names from `brew list --formula` (- for stdin)
         \\  --brewfile <f>          With migrate: names from a Brewfile (- for stdin)
         \\  --install               With migrate: install what matched
@@ -2525,8 +2526,15 @@ fn readNamesInput(a: std.mem.Allocator, path: []const u8) ![]u8 {
     return std.fs.cwd().readFileAlloc(a, path, max_names_bytes);
 }
 
-/// `migrate`: map the names from a Homebrew install onto the catalog. Names
-/// only; brew is never run.
+/// One name to move over from Homebrew.
+const BrewWanted = struct { name: []const u8, cask: bool = false, pinned: bool = false };
+
+/// `migrate`: move a Homebrew install over to abv0. With no file given, the
+/// Homebrew on this machine is read from disk (its Cellar, Caskroom, install
+/// receipts and pins), which takes milliseconds; brew is never run. Only what
+/// was installed by hand is taken (`--all` adds the dependencies), each name
+/// is matched to the catalog, and `--install` installs the matches in
+/// parallel and carries over `brew pin`s.
 fn cmdMigrate(
     a: std.mem.Allocator,
     st: *store.Store,
@@ -2536,47 +2544,101 @@ fn cmdMigrate(
     opts: store.InstallOptions,
     timer: *std.time.Timer,
 ) !u8 {
-    if (args.rest.items.len != 0 or (args.from_brew_list == null and args.brewfile == null)) {
-        term.err("usage: abv0 migrate [--from-brew-list <file> | --brewfile <file>] [--install]\n", .{});
-        term.err("  save your list first: brew list --formula > brew.txt   (use - to read stdin)\n", .{});
+    if (args.rest.items.len != 0) {
+        term.err("usage: abv0 migrate [--all] [--from-brew-list <file> | --brewfile <file>] [--install]\n", .{});
         return 2;
     }
 
-    var wanted = std.ArrayList([]const u8).init(a);
+    var wanted = std.ArrayList(BrewWanted).init(a);
     var seen = std.StringHashMap(void).init(a);
-    const inputs = [_]struct { path: ?[]const u8, source: cmds_extra.NameSource }{
-        .{ .path = args.from_brew_list, .source = .list },
-        .{ .path = args.brewfile, .source = .brewfile },
-    };
-    for (inputs) |in| {
-        const path = in.path orelse continue;
-        const text = readNamesInput(a, path) catch |e| {
-            term.err("{s}error{s}: cannot read {}: {s}\n", .{ term.red, term.reset, safe(path), explain(e) });
+    var deps_skipped: usize = 0;
+    const from_disk = args.from_brew_list == null and args.brewfile == null;
+
+    if (from_disk) {
+        var scan_timer = try std.time.Timer.start();
+        const prefixes = try cmds_extra.brewPrefixes(a, envOwned(a, "HOMEBREW_PREFIX"), envOwned(a, "HOME"));
+        var found = std.ArrayList([]const u8).init(a);
+        var formulae: usize = 0;
+        var casks: usize = 0;
+        for (prefixes) |prefix| {
+            const items = (try cmds_extra.scanBrew(a, prefix)) orelse continue;
+            try found.append(prefix);
+            for (items) |it| {
+                if (it.kind == .cask) casks += 1 else formulae += 1;
+                if (!it.requested and !args.all) {
+                    deps_skipped += 1;
+                    continue;
+                }
+                if (try seen.fetchPut(it.name, {}) == null) {
+                    try wanted.append(.{ .name = it.name, .cask = it.kind == .cask, .pinned = it.pinned });
+                }
+            }
+        }
+        if (found.items.len == 0) {
+            term.err("{s}error{s}: no Homebrew found (looked in", .{ term.red, term.reset });
+            for (prefixes) |p| term.err(" {}", .{safe(p)});
+            term.err(")\n  set HOMEBREW_PREFIX, or give a list: brew list --formula > brew.txt; abv0 migrate --from-brew-list brew.txt\n", .{});
             return 1;
+        }
+        if (!args.json) {
+            term.print("Homebrew at", .{});
+            for (found.items) |p| term.print(" {}", .{safe(p)});
+            term.print(": {d} formulae, {d} apps, read in {d:.2}ms", .{ formulae, casks, ms(scan_timer.read()) });
+            if (deps_skipped > 0) term.print(" ({d} dependencies left out; --all takes them too)", .{deps_skipped});
+            term.print("\n", .{});
+        }
+    } else {
+        const inputs = [_]struct { path: ?[]const u8, source: cmds_extra.NameSource }{
+            .{ .path = args.from_brew_list, .source = .list },
+            .{ .path = args.brewfile, .source = .brewfile },
         };
-        for (try cmds_extra.parseNames(a, text, in.source)) |n| {
-            if (try seen.fetchPut(n, {}) == null) try wanted.append(n);
+        for (inputs) |in| {
+            const path = in.path orelse continue;
+            const text = readNamesInput(a, path) catch |e| {
+                term.err("{s}error{s}: cannot read {}: {s}\n", .{ term.red, term.reset, safe(path), explain(e) });
+                return 1;
+            };
+            for (try cmds_extra.parseNames(a, text, in.source)) |n| {
+                if (try seen.fetchPut(n, {}) == null) try wanted.append(.{ .name = n });
+            }
         }
     }
 
     var matched = std.ArrayList(cmds_extra.Match).init(a);
     var unmatched = std.ArrayList([]const u8).init(a);
+    var no_build = std.ArrayList([]const u8).init(a);
     // Two Homebrew names can land on one catalog package; install it once.
     var installs = std.ArrayList([]const u8).init(a);
+    var to_pin = std.ArrayList([]const u8).init(a);
+    var already: usize = 0;
     var picked = std.StringHashMap(void).init(a);
-    for (wanted.items) |n| {
-        if (cmds_extra.matchName(reg, n)) |m| {
-            try matched.append(m);
-            if (try picked.fetchPut(m.pkg.name, {}) == null) try installs.append(m.pkg.name);
-        } else {
-            try unmatched.append(n);
+    for (wanted.items) |w| {
+        const found = if (w.cask) cmds_extra.matchCask(reg, w.name) else cmds_extra.matchName(reg, w.name);
+        const m = found orelse {
+            try unmatched.append(w.name);
+            continue;
+        };
+        if (m.pkg.platform(platform_name) == null) {
+            try no_build.append(w.name);
+            continue;
         }
+        try matched.append(m);
+        if (w.pinned and !auto.contains(to_pin.items, m.pkg.name)) try to_pin.append(m.pkg.name);
+        if (try picked.fetchPut(m.pkg.name, {}) != null) continue;
+        if (st.isInstalled(m.pkg, platform_name)) {
+            already += 1;
+            continue;
+        }
+        try installs.append(m.pkg.name);
     }
 
     const w = term.writer();
     if (!args.json) {
-        term.print("{d} names read: {s}{d} in the catalog{s}, {d} not\n", .{ wanted.items.len, term.green, matched.items.len, term.reset, unmatched.items.len });
-        if (matched.items.len > 0) {
+        term.print("{d} to move: {s}{d} in the catalog{s}, {d} not", .{ wanted.items.len, term.green, matched.items.len, term.reset, unmatched.items.len });
+        if (no_build.items.len > 0) term.print(", {d} without a build for {s}", .{ no_build.items.len, platform_name });
+        if (already > 0) term.print(", {d} already installed", .{already});
+        term.print("\n", .{});
+        if (matched.items.len > 0 and !output.quiet) {
             term.print("\n{s}in the catalog{s}\n", .{ term.bold, term.reset });
             for (matched.items) |m| {
                 term.print("  {:<24} -> {}", .{ safe(m.wanted), safe(m.pkg.name) });
@@ -2584,52 +2646,106 @@ fn cmdMigrate(
                 term.print("\n", .{});
             }
         }
-        if (unmatched.items.len > 0) {
-            term.print("\n{s}not in the catalog{s}\n", .{ term.bold, term.reset });
+        if (no_build.items.len > 0 and !output.quiet) {
+            term.print("\n{s}no build for {s}{s}\n", .{ term.bold, platform_name, term.reset });
+            for (no_build.items) |n| term.print("  {}\n", .{safe(n)});
+        }
+        if (unmatched.items.len > 0 and !output.quiet) {
+            term.print("\n{s}not in the catalog{s} (they stay with Homebrew)\n", .{ term.bold, term.reset });
             for (unmatched.items) |n| term.print("  {:<24} {s}abv0 search --online {}{s}\n", .{ safe(n), term.dim, safe(n), term.reset });
             term.print("  a project's own GitHub release installs with: abv0 install gh:<owner>/<repo>\n", .{});
         }
     }
 
     var failures: usize = 0;
-    var plan: ?Plan = null;
+    var names: []const []const u8 = &.{};
+    var levels: []const usize = &.{};
     var ok: []bool = try a.alloc(bool, 0);
-    if (args.install and installs.items.len > 0) {
-        plan = try planInstall(a, reg, installs.items);
+    const do_install = args.install and installs.items.len > 0;
+    if (do_install) {
+        const plan = try planInstall(a, reg, installs.items);
         if (output.dry_run) {
             if (args.json) {
                 try writeMigrateJson(w, matched.items, unmatched.items);
                 try w.writeAll(",\"install\":");
             }
-            try writeDryRunPlan(w, a, st, reg, plan.?.names, platform_name, "install");
+            try writeDryRunPlan(w, a, st, reg, plan.names, platform_name, "install");
             if (args.json) try w.writeAll("}\n");
             return 0;
         }
         if (!args.json) term.print("\n", .{});
-        ok = try a.alloc(bool, plan.?.names.len);
-        failures = try installWaves(a, st, reg, plan.?.names, plan.?.levels, ok, platform_name, opts, args.jobs);
+        const kept = try dropUnavailableDeps(a, reg, plan, installs.items, platform_name);
+        names = kept.names;
+        levels = kept.levels;
+        const before = try installedFlags(a, st, reg, names, platform_name);
+        ok = try a.alloc(bool, names.len);
+        failures = try installWaves(a, st, reg, names, levels, ok, platform_name, opts, args.jobs);
+        try recordInstall(a, st, names, ok, before, installs.items);
+    }
+
+    // `brew pin`s carry over once the package is here.
+    var pinned: usize = 0;
+    if (args.install and to_pin.items.len > 0 and !output.dry_run) {
+        var here = std.ArrayList([]const u8).init(a);
+        for (to_pin.items) |n| {
+            const p = reg.get(n) orelse continue;
+            if (st.isInstalled(p, platform_name)) try here.append(n);
+        }
+        pinned = cmds_extra.addPins(a, st, here.items) catch 0;
     }
 
     if (args.json) {
         try writeMigrateJson(w, matched.items, unmatched.items);
-        if (plan) |p| {
+        try w.writeAll(",\"no_build\":[");
+        for (no_build.items, 0..) |n, i| {
+            if (i > 0) try w.writeAll(",");
+            try writeJsonString(w, n);
+        }
+        try w.writeAll("]");
+        if (do_install) {
             try w.writeAll(",\"install\":");
-            try writeInstallJsonArray(w, reg, p.names, p.levels, ok);
+            try writeInstallJsonArray(w, reg, names, levels, ok);
         }
         try w.writeAll("}\n");
         return if (failures == 0) 0 else 1;
     }
-    if (plan) |p| {
+    if (do_install) {
         const elapsed = ms(timer.read());
         if (failures == 0) {
-            say("\n{s}done{s} {d} packages in {d:.2}ms\n", .{ term.green, term.reset, p.names.len, elapsed });
+            say("\n{s}done{s} {d} packages in {d:.2}ms\n", .{ term.green, term.reset, names.len, elapsed });
         } else {
-            term.print("\n{s}{d} of {d} packages failed{s} ({d:.2}ms)\n", .{ term.red, failures, p.names.len, term.reset, elapsed });
+            term.print("\n{s}{d} of {d} packages failed{s} ({d:.2}ms)\n", .{ term.red, failures, names.len, term.reset, elapsed });
         }
+        if (pinned > 0) term.print("pinned {d} (as in Homebrew)\n", .{pinned});
+        if (from_disk and failures == 0) try printBrewRemoval(a, matched.items, wanted.items);
     } else if (!args.install and installs.items.len > 0) {
         term.print("\nrun again with --install to install the {d} catalog packages\n", .{installs.items.len});
+    } else if (args.install and matched.items.len > 0) {
+        term.print("\nnothing to install: the catalog matches are already here\n", .{});
+        if (pinned > 0) term.print("pinned {d} (as in Homebrew)\n", .{pinned});
     }
     return if (failures == 0) 0 else 1;
+}
+
+/// After a move: the command that removes the moved packages from Homebrew.
+/// abv0 never runs it; the links Homebrew puts first on PATH would otherwise
+/// keep winning.
+fn printBrewRemoval(a: std.mem.Allocator, matched: []const cmds_extra.Match, wanted: []const BrewWanted) !void {
+    var formulae = std.ArrayList(u8).init(a);
+    var casks = std.ArrayList(u8).init(a);
+    for (matched) |m| {
+        var is_cask = false;
+        for (wanted) |x| {
+            if (std.mem.eql(u8, x.name, m.wanted)) is_cask = x.cask;
+        }
+        const list = if (is_cask) &casks else &formulae;
+        try list.append(' ');
+        try list.appendSlice(m.wanted);
+    }
+    if (formulae.items.len == 0 and casks.items.len == 0) return;
+    term.print("\nHomebrew still has its copies. When you are happy, remove them with:\n", .{});
+    if (formulae.items.len > 0) term.print("  brew uninstall{}\n", .{safe(formulae.items)});
+    if (casks.items.len > 0) term.print("  brew uninstall --cask{}\n", .{safe(casks.items)});
 }
 
 /// The `matched` and `unmatched` members of the `migrate --json` document,
