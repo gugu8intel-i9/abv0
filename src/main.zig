@@ -3789,6 +3789,7 @@ comptime {
     _ = @import("abvindex.zig");
     _ = @import("scan.zig");
     _ = @import("tui.zig");
+    _ = @import("winapp.zig");
     _ = @import("net.zig");
     _ = @import("store.zig");
     _ = @import("cmds_extra.zig");

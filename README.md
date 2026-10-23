@@ -18,6 +18,12 @@ abv0 shell ripgrep                       # ephemeral subshell with just that pac
 abv0 browse                              # pick packages from a searchable list
 ```
 
+**Desktop apps.** On macOS, apps such as Rectangle, VSCodium or Obsidian install into
+`~/Applications`. On Windows, portable builds (KeePassXC, VSCodium, Notepad++, ShareX,
+OBS Studio and others) unpack into abv0's store and get a Start Menu shortcut under
+*abv0*, so they appear in Start and in search; no installer runs and no admin rights are
+needed. `abv0 uninstall` removes the app and its shortcut.
+
 `abv0 browse` opens the whole catalog in a full-screen list: type to search, arrow keys
 (or PgUp/PgDn/Home/End) to move, Space or Tab to pick, Enter to install what you picked
 (or the highlighted package), Esc to quit. Installed packages are marked with a tick.

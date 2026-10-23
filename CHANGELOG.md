@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### New
+
+- **Windows desktop apps.** Portable Windows builds are installed into the store and get
+  a Start Menu shortcut (`%APPDATA%\Microsoft\Windows\Start Menu\Programs\abv0`),
+  written directly in the Shell Link format; uninstall removes it. The catalog takes
+  `win=Name.exe` (or `win="Display=Name*.exe"`) on an app line: the builder picks the
+  release's portable Windows .zip, downloads it and checks the program is inside.
+  Nineteen existing apps gained Windows builds and fourteen Windows apps were added
+  (Notepad++, ShareX, WinMerge, HandBrake, WezTerm, Telegram and others).
+
 ## 2.5.0 (2026-10-23)
 
 ### Security

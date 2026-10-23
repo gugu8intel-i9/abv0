@@ -128,6 +128,10 @@ pub const Source = struct {
     /// `app=Name.app`: the bundle's name. Required when the macOS asset is a
     /// .dmg (its contents cannot be listed off macOS); detected for a .zip.
     apps: []const []const u8 = &.{},
+    /// `win=Name.exe` or `win="Display=Name*.exe"`: the program of a portable
+    /// Windows build (a .zip that runs where it is unpacked). `*` matches any
+    /// run of characters; the name found in the archive is recorded.
+    win: []const []const u8 = &.{},
     line: usize = 0,
 };
 
@@ -253,6 +257,14 @@ fn parseLine(arena: Allocator, toks: []const []const u8, line_no: usize) !LineRe
                 try list.append(n);
             }
             src.apps = try list.toOwnedSlice();
+        } else if (std.mem.eql(u8, key, "win")) {
+            var list = std.ArrayList([]const u8).init(arena);
+            var it = std.mem.splitScalar(u8, val, ',');
+            while (it.next()) |n| {
+                if (!isUsableWinPattern(n)) return bad(arena, "win '{s}' is not a usable program name (want Name.exe or Display=Name.exe)", .{n});
+                try list.append(n);
+            }
+            src.win = try list.toOwnedSlice();
         } else if (std.mem.startsWith(u8, key, "asset.")) {
             const pi = platformIndex(key["asset.".len..]) orelse
                 return bad(arena, "unknown platform in '{s}'", .{key});
@@ -262,8 +274,9 @@ fn parseLine(arena: Allocator, toks: []const []const u8, line_no: usize) !LineRe
         }
     }
     // `app=` alone means an app source; `kind=` says it outright.
-    src.kind = kind_key orelse if (src.apps.len != 0) SourceKind.app else SourceKind.cli;
+    src.kind = kind_key orelse if (src.apps.len != 0 or src.win.len != 0) SourceKind.app else SourceKind.cli;
     if (src.kind == .cli and src.apps.len != 0) return bad(arena, "app= needs kind=app", .{});
+    if (src.kind == .cli and src.win.len != 0) return bad(arena, "win= needs kind=app", .{});
     if (src.kind == .app and src.bin.len != 0) return bad(arena, "bin= does not apply to kind=app", .{});
     return .{ .source = src };
 }
@@ -420,7 +433,7 @@ pub fn validateEntry(e: Entry) ?[]const u8 {
     if (!registry.isUsablePackage(pkg)) return "name, version, bin or dependency rejected by registry rules";
     if (e.bin.len == 0 and e.app_bundles.len == 0) return "no executables";
     for (e.app_bundles) |a| {
-        if (!isUsableAppName(a)) return "app bundle name is not a plain Name.app";
+        if (!isUsableAppName(a) and deps.winapp.parseEntry(a) == null) return "app entry is neither a plain Name.app nor a Windows Name.exe";
     }
     if (e.plats.len == 0) return "no platforms";
     if (e.homepage.len != 0 and !net.isSafeUrl(e.homepage)) return "homepage is not an https URL";
@@ -1739,7 +1752,22 @@ fn buildEntry(ctx: *Ctx, a: Allocator, src: Source, prev: ?Entry, index: usize) 
     for (platform_tags, 0..) |tag, i| {
         if (src.skip[i]) continue;
         if (src.kind == .app) {
-            // An app source publishes macOS bundles only.
+            if (osOfPlatform(i) == .windows) {
+                // Windows: only with win=, and only a portable .zip.
+                if (src.win.len == 0) continue;
+                const found = if (src.assets[i]) |want| findAssetNamed(rel.assets, want) else pickWinAppAsset(rel.assets, tag);
+                const chosen = found orelse {
+                    try notes.writer().print("{s}: no portable .zip; ", .{tag});
+                    continue;
+                };
+                if (!std.ascii.endsWithIgnoreCase(rel.assets[chosen].name, ".zip")) {
+                    try notes.writer().print("{s}: {s} is not a .zip; ", .{ tag, rel.assets[chosen].name });
+                    continue;
+                }
+                pick[i] = chosen;
+                continue;
+            }
+            // Otherwise an app source publishes macOS bundles.
             if (osOfPlatform(i) != .macos) continue;
             const found = if (src.assets[i]) |want| findAssetNamed(rel.assets, want) else pickAppAsset(rel.assets, tag, src.apps.len != 0);
             const chosen = found orelse {
@@ -2156,6 +2184,136 @@ fn zipAppsOfFile(a: Allocator, path: []const u8) ![]const []const u8 {
     return zipTopLevelApps(a, f.seekableStream());
 }
 
+// ---------------------------------------------------------------------------
+// Windows portable apps
+// ---------------------------------------------------------------------------
+
+/// Words that mark a Windows asset as an installer or something other than a
+/// portable build.
+const win_reject_tokens = [_][]const u8{
+    "setup", "installer", "install", "msi",      "msix",      "appx",    "linux",    "mac",
+    "macos", "darwin",    "osx",     "src",      "source",    "sources", "debug",    "symbols",
+    "pdb",   "dbg",       "sbom",    "checksum", "checksums", "sha256",  "blockmap", "android",
+};
+const win_os_tokens = [_][]const u8{ "win", "windows", "win32", "win64", "w64", "msvc", "mingw" };
+
+/// The portable .zip for the Windows `platform_tag` names, or null. It has to
+/// say it is for Windows; one that names no architecture counts as x86_64.
+pub fn pickWinAppAsset(assets: []const ghrelease.Asset, platform_tag: []const u8) ?usize {
+    const want_arm = std.mem.startsWith(u8, platform_tag, "aarch64");
+    var best: ?usize = null;
+    var best_score: u32 = 0;
+    for (assets, 0..) |asset, i| {
+        const name = asset.name;
+        if (!std.ascii.endsWithIgnoreCase(name, ".zip")) continue;
+        if (!hasWord(name, &win_os_tokens) and std.ascii.indexOfIgnoreCase(name, "windows") == null and
+            std.ascii.indexOfIgnoreCase(name, "win64") == null and std.ascii.indexOfIgnoreCase(name, "win32") == null) continue;
+        if (hasWord(name, &win_reject_tokens)) continue;
+        const arm = hasSubstring(name, &.{ "arm64", "aarch64" });
+        const x86 = hasSubstring(name, &.{ "x86_64", "x86-64", "x64", "amd64", "win64" });
+        const x86_32 = hasWord(name, &.{ "x86", "i386", "i686", "ia32", "win32", "32bit" }) and !x86;
+        if (arm and x86) continue;
+        if (arm != want_arm) continue;
+        if (!arm and x86_32) continue;
+        var score: u32 = if (arm or x86) 100 else 50;
+        if (std.ascii.indexOfIgnoreCase(name, "portable") != null) score += 20;
+        const better = if (best) |b|
+            (score > best_score or (score == best_score and name.len < assets[b].name.len))
+        else
+            true;
+        if (better) {
+            best = i;
+            best_score = score;
+        }
+    }
+    return best;
+}
+
+/// A `win=` value: `Name.exe` or `Display=Name.exe`, where the file name may
+/// hold `*` wildcards.
+fn isUsableWinPattern(p: []const u8) bool {
+    const eq = std.mem.indexOfScalar(u8, p, '=');
+    const file = if (eq) |i| p[i + 1 ..] else p;
+    if (eq) |i| {
+        if (!deps.winapp.isSafeDisplayName(p[0..i])) return false;
+    }
+    // With the wildcards replaced, it must be a plain program name.
+    var buf: [128]u8 = undefined;
+    if (file.len > buf.len) return false;
+    for (file, 0..) |c, k| buf[k] = if (c == '*') 'x' else c;
+    return deps.winapp.isSafeExeName(buf[0..file.len]);
+}
+
+/// `name` matches `pattern`, ignoring case, where `*` matches any run.
+fn globMatch(pattern: []const u8, name: []const u8) bool {
+    if (pattern.len == 0) return name.len == 0;
+    if (pattern[0] == '*') {
+        var k: usize = 0;
+        while (k <= name.len) : (k += 1) {
+            if (globMatch(pattern[1..], name[k..])) return true;
+        }
+        return false;
+    }
+    if (name.len == 0 or std.ascii.toLower(pattern[0]) != std.ascii.toLower(name[0])) return false;
+    return globMatch(pattern[1..], name[1..]);
+}
+
+/// The `app_bundles` entry for one `win=` value, from the file paths in the
+/// archive: the shallowest file whose name matches, as `Display=File.exe`.
+/// The display name is the one given, else the file's stem, else (with a
+/// wildcard) the package name. Null when nothing matches.
+fn resolveWinEntry(a: Allocator, pkg_name: []const u8, pattern: []const u8, paths: []const []const u8) !?[]const u8 {
+    const eq = std.mem.indexOfScalar(u8, pattern, '=');
+    const file_pat = if (eq) |i| pattern[i + 1 ..] else pattern;
+    var best: ?[]const u8 = null;
+    var best_depth: usize = std.math.maxInt(usize);
+    for (paths) |path| {
+        if (path.len == 0 or path[path.len - 1] == '/') continue;
+        const base = if (std.mem.lastIndexOfScalar(u8, path, '/')) |s| path[s + 1 ..] else path;
+        if (!globMatch(file_pat, base)) continue;
+        const depth = std.mem.count(u8, path, "/");
+        if (depth < best_depth) {
+            best = base;
+            best_depth = depth;
+        }
+    }
+    const file = best orelse return null;
+    if (!deps.winapp.isSafeExeName(file)) return null;
+    const display = if (eq) |i|
+        pattern[0..i]
+    else if (std.mem.indexOfScalar(u8, file_pat, '*') == null)
+        file[0 .. file.len - 4]
+    else
+        pkg_name;
+    const entry = try std.fmt.allocPrint(a, "{s}={s}", .{ display, file });
+    if (deps.winapp.parseEntry(entry) == null) return null;
+    return entry;
+}
+
+/// Every file path in a zip archive (forward slashes, as stored).
+pub fn zipFileNames(a: Allocator, seekable: anytype) ![]const []const u8 {
+    var iter = try std.zip.Iterator(@TypeOf(seekable)).init(seekable);
+    var found = std.ArrayList([]const u8).init(a);
+    var name_buf: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+    while (try iter.next()) |entry| {
+        if (entry.filename_len > name_buf.len) continue;
+        const name = name_buf[0..entry.filename_len];
+        try iter.stream.seekTo(entry.header_zip_offset + @sizeOf(std.zip.CentralDirectoryFileHeader));
+        const got = try iter.stream.context.reader().readAll(name);
+        if (got != name.len) return error.ZipTruncated;
+        const copy = try a.dupe(u8, name);
+        std.mem.replaceScalar(u8, copy, '\\', '/');
+        try found.append(copy);
+    }
+    return found.toOwnedSlice();
+}
+
+fn zipFileNamesOfFile(a: Allocator, path: []const u8) ![]const []const u8 {
+    const f = try std.fs.cwd().openFile(path, .{});
+    defer f.close();
+    return zipFileNames(a, f.seekableStream());
+}
+
 fn containsName(list: []const []const u8, want: []const u8) bool {
     for (list) |n| {
         if (std.mem.eql(u8, n, want)) return true;
@@ -2179,10 +2337,35 @@ fn buildApp(
     notes: *std.ArrayList(u8),
 ) !Outcome {
     var apps: []const []const u8 = src.apps;
+    var win_entries = std.ArrayList([]const u8).init(a);
 
     for (pick, 0..) |p, pi| {
         const idx = p orelse continue;
         const asset = rel.assets[idx];
+        if (osOfPlatform(pi) == .windows) {
+            const l = ensureLocal(ctx, a, rel.assets, idx, tmp_dir, locals) catch |e| {
+                try notes.writer().print("{s}: cannot download {s} to find its program ({s}); ", .{ platform_tags[pi], asset.name, netErrorName(e) });
+                pick[pi] = null;
+                continue;
+            };
+            if (!std.mem.eql(u8, &l.sha, &(shas[pi].?))) {
+                return failf(a, "{s}: downloaded file does not match its published SHA-256", .{asset.name});
+            }
+            const names = zipFileNamesOfFile(a, l.path) catch |e| {
+                try notes.writer().print("{s}: cannot read {s} ({s}); ", .{ platform_tags[pi], asset.name, @errorName(e) });
+                pick[pi] = null;
+                continue;
+            };
+            for (src.win) |pattern| {
+                const entry = resolveWinEntry(a, src.name, pattern, names) catch null orelse {
+                    try notes.writer().print("{s}: {s} has no program matching {s}; ", .{ platform_tags[pi], asset.name, pattern });
+                    pick[pi] = null;
+                    break;
+                };
+                if (!containsName(win_entries.items, entry)) try win_entries.append(entry);
+            }
+            continue;
+        }
         const kind = ghrelease.archiveKindOf(asset.name).?;
         if (!std.mem.eql(u8, kind, "zip")) continue;
         var on_disk = false;
@@ -2233,8 +2416,17 @@ fn buildApp(
             .bin_path = "",
         });
     }
-    if (plats.items.len == 0 or apps.len == 0) return failf(a, "no installable app bundle: {s}", .{notes.items});
-    return finishEntry(ctx, a, src, version, &.{}, apps, try plats.toOwnedSlice());
+    // Mac bundles are needed only when a Mac platform is published.
+    var mac_published = false;
+    for (pick, 0..) |p, pi| {
+        if (p != null and osOfPlatform(pi) == .macos) mac_published = true;
+    }
+    if (!mac_published) apps = &.{};
+    var all = std.ArrayList([]const u8).init(a);
+    try all.appendSlice(apps);
+    try all.appendSlice(win_entries.items);
+    if (plats.items.len == 0 or all.items.len == 0) return failf(a, "no installable app: {s}", .{notes.items});
+    return finishEntry(ctx, a, src, version, &.{}, try all.toOwnedSlice(), try plats.toOwnedSlice());
 }
 
 /// The distinct repositories the run will have to look up, merged: a source on
@@ -4279,4 +4471,72 @@ test "catalog/sources.txt is sorted within each section" {
         }
         prev = name;
     }
+}
+
+test "sources: win= for portable Windows apps" {
+    const text =
+        \\keepassxc keepassxreboot/keepassxc app=KeePassXC.app win=KeePassXC.exe
+        \\godot godotengine/godot win="Godot=Godot_v*_win64.exe"
+        \\badwin acme/badwin win=..\\evil.exe
+        \\cliwin acme/cliwin kind=cli win=x.exe
+        \\notexe acme/notexe win=tool.bat
+    ;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const parsed = try parseSources(arena.allocator(), text);
+    try testing.expectEqual(@as(usize, 2), parsed.sources.len);
+    try testing.expectEqual(@as(usize, 3), parsed.problems.len);
+    try testing.expect(parsed.sources[0].kind == .app);
+    try testing.expectEqualStrings("KeePassXC.exe", parsed.sources[0].win[0]);
+    try testing.expect(parsed.sources[1].kind == .app);
+    try testing.expectEqualStrings("Godot=Godot_v*_win64.exe", parsed.sources[1].win[0]);
+}
+
+test "pickWinAppAsset takes the portable zip for the right architecture" {
+    const names = [_][]const u8{
+        "KeePassXC-2.7.9-Win64.msi",
+        "KeePassXC-2.7.9-Win64.zip",
+        "KeePassXC-2.7.9-Win64-LegacyWindows.zip.DIGEST",
+        "KeePassXC-2.7.9-arm64.dmg",
+        "VSCodium-win32-arm64-1.95.zip",
+        "VSCodium-linux-x64-1.95.tar.gz",
+        "app-setup-win64.zip",
+        "app-1.0-windows-x86.zip",
+        "sources.zip",
+    };
+    var assets: [names.len]ghrelease.Asset = undefined;
+    for (names, 0..) |n, i| assets[i] = .{ .name = n, .url = "https://example.com/x", .size = 1, .sha256 = null };
+    try testing.expectEqualStrings("KeePassXC-2.7.9-Win64.zip", names[pickWinAppAsset(&assets, "x86_64-windows").?]);
+    try testing.expectEqualStrings("VSCodium-win32-arm64-1.95.zip", names[pickWinAppAsset(&assets, "aarch64-windows").?]);
+    const none = [_]ghrelease.Asset{ .{ .name = "tool-setup-x64.exe", .url = "https://example.com/x", .size = 1, .sha256 = null }, .{ .name = "tool-linux.zip", .url = "https://example.com/x", .size = 1, .sha256 = null } };
+    try testing.expect(pickWinAppAsset(&none, "x86_64-windows") == null);
+}
+
+test "resolveWinEntry finds the shallowest matching program" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const paths = [_][]const u8{
+        "Godot_v4.3-stable_win64.exe",
+        "Godot_v4.3-stable_win64_console.exe",
+        "KeePassXC-2.7.9/",
+        "KeePassXC-2.7.9/plugins/KeePassXC.exe",
+        "KeePassXC-2.7.9/KeePassXC.exe",
+        "KeePassXC-2.7.9/keepassxc-cli.exe",
+    };
+    try testing.expectEqualStrings("KeePassXC=KeePassXC.exe", (try resolveWinEntry(a, "keepassxc", "KeePassXC.exe", &paths)).?);
+    try testing.expectEqualStrings("Godot=Godot_v4.3-stable_win64.exe", (try resolveWinEntry(a, "godot", "Godot=Godot_v*_win64.exe", &paths)).?);
+    // A wildcard with no display name falls back to the package name.
+    try testing.expectEqualStrings("godot=Godot_v4.3-stable_win64.exe", (try resolveWinEntry(a, "godot", "Godot_v*_win64.exe", &paths)).?);
+    try testing.expect((try resolveWinEntry(a, "x", "Missing.exe", &paths)) == null);
+    try testing.expect(globMatch("*.EXE", "a.exe"));
+    try testing.expect(!globMatch("a*b.exe", "a.exe"));
+}
+
+test "validateEntry accepts Windows app entries and refuses unsafe ones" {
+    const plats = [_]PlatEntry{.{ .tag = "x86_64-windows", .url = "https://example.com/a.zip", .sha256 = "0" ** 64, .archive_type = "zip", .bin_path = "" }};
+    var e = Entry{ .name = "keepassxc", .version = "2.7.9", .app_bundles = &.{ "KeePassXC.app", "KeePassXC=KeePassXC.exe" }, .plats = &plats };
+    try testing.expect(validateEntry(e) == null);
+    e.app_bundles = &.{"x=..\\evil.exe"};
+    try testing.expect(validateEntry(e) != null);
 }
