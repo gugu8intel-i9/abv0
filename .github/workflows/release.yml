@@ -45,7 +45,8 @@ jobs:
       - name: Build release binaries
         run: |
           set -euo pipefail
-          zig build -Doptimize=ReleaseFast
+          # abv0 itself plus sign-manifest, which the Sign step uses.
+          zig build install sign-tool -Doptimize=ReleaseFast
           zig build release
           ls -l release
 
