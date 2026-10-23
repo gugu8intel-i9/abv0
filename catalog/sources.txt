@@ -33,6 +33,9 @@
 #                             from the archive; the bundle has to sit at the
 #                             top level of the zip. Quote names with spaces:
 #                             app="Brave Browser.app".
+#   deps=a,b                  catalog packages this one needs; abv0 installs
+#                             them with it and removes them when nothing needs
+#                             them any more
 #   win=Name.exe              a portable Windows build (implies kind=app): the
 #                             release's Windows .zip is published and abv0 adds
 #                             a Start Menu shortcut to Name.exe. The tool

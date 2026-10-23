@@ -4,6 +4,20 @@
 
 ### New
 
+- **Automatic upkeep.** A catalog older than a day (`ABV0_UPDATE_HOURS`) is refreshed
+  before the commands that read it. `abv0 maintain` refreshes, upgrades unpinned
+  packages, installs missing dependencies, removes unused ones, cleans up and runs
+  self-update. `abv0 autoupdate on [--weekly] | off | status` schedules it with launchd,
+  a systemd user timer or cron, or Task Scheduler.
+- **Dependencies.** Catalog lines take `deps=`. `upgrade` installs dependencies a new
+  version adds, `fix` installs missing ones, and a dependency with no build for the
+  platform is skipped with a note instead of failing the install. abv0 records which
+  packages it pulled in as dependencies (`state/deps-only`); after an uninstall, those
+  nothing needs are removed (`ABV0_AUTO_REMOVE=0` keeps them). Nothing else is ever
+  removed automatically.
+- **Daily cleanup.** The first package-changing command of the day clears temporary
+  files and stale sandboxes (`ABV0_AUTO_CLEAN=0` turns it off).
+
 - **Windows desktop apps.** Portable Windows builds are installed into the store and get
   a Start Menu shortcut (`%APPDATA%\Microsoft\Windows\Start Menu\Programs\abv0`),
   written directly in the Shell Link format; uninstall removes it. The catalog takes

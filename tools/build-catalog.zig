@@ -132,6 +132,8 @@ pub const Source = struct {
     /// Windows build (a .zip that runs where it is unpacked). `*` matches any
     /// run of characters; the name found in the archive is recorded.
     win: []const []const u8 = &.{},
+    /// `deps=a,b`: catalog packages this one needs; installed with it.
+    deps: []const []const u8 = &.{},
     line: usize = 0,
 };
 
@@ -257,6 +259,14 @@ fn parseLine(arena: Allocator, toks: []const []const u8, line_no: usize) !LineRe
                 try list.append(n);
             }
             src.apps = try list.toOwnedSlice();
+        } else if (std.mem.eql(u8, key, "deps")) {
+            var list = std.ArrayList([]const u8).init(arena);
+            var it = std.mem.splitScalar(u8, val, ',');
+            while (it.next()) |n| {
+                if (!safepath.isValidId(n) or std.mem.eql(u8, n, name)) return bad(arena, "deps '{s}' is not a package name", .{n});
+                try list.append(n);
+            }
+            src.deps = try list.toOwnedSlice();
         } else if (std.mem.eql(u8, key, "win")) {
             var list = std.ArrayList([]const u8).init(arena);
             var it = std.mem.splitScalar(u8, val, ',');
@@ -1725,10 +1735,25 @@ fn pinnedUnchanged(opts: Options, src: Source, prev: ?Entry) bool {
     return std.mem.eql(u8, v, prev.?.version);
 }
 
+/// A previous entry can stand in for its source only if the line has not
+/// changed what the entry holds: the same dependencies, and Windows programs
+/// exactly when the line has `win=`.
+fn prevMatchesSource(src: Source, prev: Entry) bool {
+    if (src.deps.len != prev.deps.len) return false;
+    for (src.deps) |d| {
+        if (!containsName(prev.deps, d)) return false;
+    }
+    var prev_win = false;
+    for (prev.app_bundles) |a| {
+        if (deps.winapp.parseEntry(a) != null) prev_win = true;
+    }
+    return prev_win == (src.win.len != 0);
+}
+
 fn buildEntry(ctx: *Ctx, a: Allocator, src: Source, prev: ?Entry, index: usize) !Outcome {
     const opts = ctx.opts;
 
-    if (pinnedUnchanged(opts, src, prev)) return .reuse;
+    if (pinnedUnchanged(opts, src, prev) and prevMatchesSource(src, prev.?)) return .reuse;
 
     const rel_json = ctx.net.fetchRelease(a, src.owner, src.repo, src.tag) catch |e|
         return lookupFailed(ctx, a, src, "release", e);
@@ -1739,7 +1764,7 @@ fn buildEntry(ctx: *Ctx, a: Allocator, src: Source, prev: ?Entry, index: usize) 
 
     if (!opts.force) {
         if (prev) |p| {
-            if (std.mem.eql(u8, p.version, version)) return .reuse;
+            if (std.mem.eql(u8, p.version, version) and prevMatchesSource(src, p)) return .reuse;
         }
     }
 
@@ -2064,6 +2089,7 @@ fn finishEntry(
         .license = license,
         .bin = bin,
         .app_bundles = apps,
+        .deps = src.deps,
         .plats = plats,
     };
     if (validateEntry(entry)) |why| return failf(a, "invalid entry: {s}", .{why});
@@ -4539,4 +4565,27 @@ test "validateEntry accepts Windows app entries and refuses unsafe ones" {
     try testing.expect(validateEntry(e) == null);
     e.app_bundles = &.{"x=..\\evil.exe"};
     try testing.expect(validateEntry(e) != null);
+}
+
+test "sources: deps= lists catalog packages" {
+    const text =
+        \\yt-dlp yt-dlp/yt-dlp deps=ffmpeg
+        \\self acme/self deps=self
+        \\bad acme/bad deps=../x
+    ;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const parsed = try parseSources(arena.allocator(), text);
+    try testing.expectEqual(@as(usize, 1), parsed.sources.len);
+    try testing.expectEqualStrings("ffmpeg", parsed.sources[0].deps[0]);
+    try testing.expectEqual(@as(usize, 2), parsed.problems.len);
+}
+
+test "an unchanged version is rebuilt when the line adds deps or win" {
+    const prev = Entry{ .name = "x", .version = "1", .app_bundles = &.{"X.app"} };
+    try testing.expect(prevMatchesSource(.{ .name = "x", .owner = "o", .repo = "x" }, prev));
+    try testing.expect(!prevMatchesSource(.{ .name = "x", .owner = "o", .repo = "x", .deps = &.{"y"} }, prev));
+    try testing.expect(!prevMatchesSource(.{ .name = "x", .owner = "o", .repo = "x", .win = &.{"X.exe"} }, prev));
+    const prev_win = Entry{ .name = "x", .version = "1", .app_bundles = &.{ "X.app", "X=X.exe" }, .deps = &.{"y"} };
+    try testing.expect(prevMatchesSource(.{ .name = "x", .owner = "o", .repo = "x", .deps = &.{"y"}, .win = &.{"X.exe"} }, prev_win));
 }

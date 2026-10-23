@@ -147,6 +147,22 @@ jobs:
           ./zig-out/bin/abv0.exe --registry test-app.json --allow-unsigned-manifest uninstall rgapp
           if (Test-Path -LiteralPath $lnk) { throw "uninstall left the shortcut behind" }
 
+      - name: Maintain and autoupdate on, status, off
+        shell: bash
+        env:
+          # Keep the binary under test: no self-update from the release.
+          ABV0_AUTO_SELF_UPDATE: "0"
+        run: |
+          set -euo pipefail
+          abv0=./zig-out/bin/abv0
+          $abv0 --registry packages/index.json maintain
+          $abv0 autoupdate on --weekly
+          $abv0 autoupdate status | tee status.txt
+          grep -q '^scheduled: *yes' status.txt || { echo "not scheduled after 'on'"; exit 1; }
+          $abv0 autoupdate off
+          $abv0 autoupdate status | tee status.txt
+          grep -q '^scheduled: *no' status.txt || { echo "still scheduled after 'off'"; exit 1; }
+
       - name: Run jq and rg (Unix)
         if: runner.os != 'Windows'
         shell: bash
