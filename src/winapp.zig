@@ -10,11 +10,14 @@
 //! `Display Name=file.exe` when the shortcut should be called something other
 //! than the file. macOS ignores these entries, as Windows ignores `Name.app`.
 //!
-//! The shortcut is written directly in the Shell Link format ([MS-SHLLINK]),
-//! with the target given by a LinkInfo local path rather than an ID list, so no
-//! COM call or helper program is needed.
+//! On Windows the shortcut is made by the Shell itself (the ShellLink COM
+//! object that Explorer uses), so its target is stored the way every Windows
+//! component reads it. `shortcutBytes` writes the Shell Link format directly
+//! ([MS-SHLLINK], target as a LinkInfo local path); it is the fallback when COM
+//! is unavailable and what the tests check on other systems.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub const Entry = struct {
     /// Shortcut name, without `.lnk`.
@@ -181,9 +184,18 @@ pub fn shortcutBytes(a: std.mem.Allocator, target: []const u8, work_dir: []const
     return out.toOwnedSlice();
 }
 
-/// Write the shortcut at `lnk_path` (replacing it), through a temporary file
-/// so a reader never sees half a shortcut.
+/// Write the shortcut at `lnk_path`, replacing it. On Windows through the
+/// Shell (see `comShortcut`), falling back to `writeShortcutFile`.
 pub fn writeShortcut(a: std.mem.Allocator, lnk_path: []const u8, target: []const u8, work_dir: []const u8) !void {
+    if (builtin.os.tag == .windows) {
+        if (comShortcut(a, lnk_path, target, work_dir)) |_| return else |_| {}
+    }
+    return writeShortcutFile(a, lnk_path, target, work_dir);
+}
+
+/// Write `shortcutBytes` at `lnk_path` through a temporary file, so a reader
+/// never sees half a shortcut.
+pub fn writeShortcutFile(a: std.mem.Allocator, lnk_path: []const u8, target: []const u8, work_dir: []const u8) !void {
     const bytes = try shortcutBytes(a, target, work_dir);
     defer a.free(bytes);
     const tmp = try std.fmt.allocPrint(a, "{s}.tmp", .{lnk_path});
@@ -193,6 +205,80 @@ pub fn writeShortcut(a: std.mem.Allocator, lnk_path: []const u8, target: []const
         std.fs.cwd().deleteFile(tmp) catch {};
         return e;
     };
+}
+
+// ---------------------------------------------------------------------------
+// The Shell's own shortcut writer (Windows)
+// ---------------------------------------------------------------------------
+
+const win = std.os.windows;
+
+const clsid_shell_link = win.GUID.parse("{00021401-0000-0000-C000-000000000046}");
+const iid_ishell_link_w = win.GUID.parse("{000214F9-0000-0000-C000-000000000046}");
+const iid_ipersist_file = win.GUID.parse("{0000010B-0000-0000-C000-000000000046}");
+
+/// A COM interface pointer: the first word is its method table.
+const ComObject = extern struct { vtbl: [*]const *const anyopaque };
+
+const ole32 = struct {
+    extern "ole32" fn CoInitializeEx(reserved: ?*anyopaque, flags: u32) callconv(win.WINAPI) win.HRESULT;
+    extern "ole32" fn CoUninitialize() callconv(win.WINAPI) void;
+    extern "ole32" fn CoCreateInstance(clsid: *const win.GUID, outer: ?*anyopaque, ctx: u32, iid: *const win.GUID, out: *?*ComObject) callconv(win.WINAPI) win.HRESULT;
+};
+
+// Method slots. IUnknown: QueryInterface 0, AddRef 1, Release 2.
+// IShellLinkW then: GetPath 3, GetIDList 4, SetIDList 5, GetDescription 6,
+// SetDescription 7, GetWorkingDirectory 8, SetWorkingDirectory 9, GetArguments 10,
+// SetArguments 11, GetHotkey 12, SetHotkey 13, GetShowCmd 14, SetShowCmd 15,
+// GetIconLocation 16, SetIconLocation 17, SetRelativePath 18, Resolve 19, SetPath 20.
+// IPersistFile: GetClassID 3, IsDirty 4, Load 5, Save 6.
+const QueryInterface = *const fn (*ComObject, *const win.GUID, *?*ComObject) callconv(win.WINAPI) win.HRESULT;
+const Release = *const fn (*ComObject) callconv(win.WINAPI) u32;
+const SetString = *const fn (*ComObject, [*:0]const u16) callconv(win.WINAPI) win.HRESULT;
+const SetIcon = *const fn (*ComObject, [*:0]const u16, c_int) callconv(win.WINAPI) win.HRESULT;
+const SetShowCmd = *const fn (*ComObject, c_int) callconv(win.WINAPI) win.HRESULT;
+const Save = *const fn (*ComObject, [*:0]const u16, win.BOOL) callconv(win.WINAPI) win.HRESULT;
+
+fn method(comptime F: type, obj: *ComObject, slot: usize) F {
+    return @ptrCast(@alignCast(obj.vtbl[slot]));
+}
+
+fn check(hr: win.HRESULT) !void {
+    if (hr < 0) return error.ComCallFailed;
+}
+
+/// Make the shortcut with the Shell's ShellLink object, as Explorer does.
+fn comShortcut(a: std.mem.Allocator, lnk_path: []const u8, target: []const u8, work_dir: []const u8) !void {
+    if (builtin.os.tag != .windows) return error.Unsupported;
+    const lnk_w = try std.unicode.utf8ToUtf16LeAllocZ(a, lnk_path);
+    defer a.free(lnk_w);
+    const target_w = try std.unicode.utf8ToUtf16LeAllocZ(a, target);
+    defer a.free(target_w);
+    const dir_w = try std.unicode.utf8ToUtf16LeAllocZ(a, work_dir);
+    defer a.free(dir_w);
+
+    const COINIT_APARTMENTTHREADED = 0x2;
+    const CLSCTX_INPROC_SERVER = 0x1;
+    // S_OK or S_FALSE: this call owns an initialization and must undo it.
+    // RPC_E_CHANGED_MODE: the thread already uses COM, which works too.
+    const init = ole32.CoInitializeEx(null, COINIT_APARTMENTTHREADED);
+    defer if (init == 0 or init == 1) ole32.CoUninitialize();
+
+    var link_opt: ?*ComObject = null;
+    try check(ole32.CoCreateInstance(&clsid_shell_link, null, CLSCTX_INPROC_SERVER, &iid_ishell_link_w, &link_opt));
+    const link = link_opt orelse return error.ComCallFailed;
+    defer _ = method(Release, link, 2)(link);
+
+    try check(method(SetString, link, 20)(link, target_w));
+    try check(method(SetString, link, 9)(link, dir_w));
+    try check(method(SetIcon, link, 17)(link, target_w, 0));
+    try check(method(SetShowCmd, link, 15)(link, 1)); // SW_SHOWNORMAL
+
+    var file_opt: ?*ComObject = null;
+    try check(method(QueryInterface, link, 0)(link, &iid_ipersist_file, &file_opt));
+    const file = file_opt orelse return error.ComCallFailed;
+    defer _ = method(Release, file, 2)(file);
+    try check(method(Save, file, 6)(file, lnk_w, win.TRUE));
 }
 
 /// Where the program `exe` sits under `root`: the shallowest regular file with
