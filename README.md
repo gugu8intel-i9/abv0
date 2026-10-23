@@ -177,8 +177,8 @@ EXECUTION
 
 MANIFESTS
   bundle [install|dump]    Install from, or export to, a Brewfile
-  migrate --from-brew-list F | --brewfile F
-                           Map Homebrew package names to the catalog (--install installs them)
+  migrate [--install]      Move your Homebrew packages and apps to abv0 (reads Homebrew from disk;
+                           or --from-brew-list F | --brewfile F)
   update                   Refresh the registry index
   sync                     Recompile the local index and SQL export
 
@@ -196,6 +196,20 @@ MAINTENANCE
   version                  Print the version
   help [command]           This message, or help for one command
 ```
+
+### Moving from Homebrew
+
+```sh
+abv0 migrate            # what would move (reads Homebrew from disk, never runs brew)
+abv0 migrate --install  # install it all in parallel, keeping your brew pins
+```
+
+abv0 finds Homebrew at `HOMEBREW_PREFIX`, else `/opt/homebrew`, `/usr/local` or Linuxbrew.
+It takes the formulae you installed yourself plus your apps (`--all` adds the ones
+Homebrew pulled in as dependencies). Names not in the catalog stay with Homebrew. At the
+end it prints the `brew uninstall ...` line for what moved; abv0 never removes anything
+from Homebrew itself. A saved `brew list` or a Brewfile works too:
+`abv0 migrate --from-brew-list brew.txt` or `--brewfile Brewfile`.
 
 ### GitHub installs
 

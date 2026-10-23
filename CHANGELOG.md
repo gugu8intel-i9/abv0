@@ -4,6 +4,12 @@
 
 ### New
 
+- **Move from Homebrew in one command.** `abv0 migrate` with no file reads the Homebrew
+  on this machine straight from disk (its Cellar, Caskroom, install receipts and pins),
+  in well under a millisecond for a typical install; brew is never run. It takes what
+  you installed by hand plus your apps (`--all` adds dependencies), matches them to the
+  catalog, and `--install` installs them in parallel, keeps your `brew pin`s and prints
+  the `brew uninstall` line for what moved. Already installed matches are skipped.
 - **Automatic upkeep.** A catalog older than a day (`ABV0_UPDATE_HOURS`) is refreshed
   before the commands that read it. `abv0 maintain` refreshes, upgrades unpinned
   packages, installs missing dependencies, removes unused ones, cleans up and runs

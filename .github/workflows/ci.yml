@@ -163,6 +163,27 @@ jobs:
           $abv0 autoupdate status | tee status.txt
           grep -q '^scheduled: *no' status.txt || { echo "still scheduled after 'off'"; exit 1; }
 
+      - name: Migrate from Homebrew (a made-up one, and the runner's real one)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          abv0=./zig-out/bin/abv0
+          fake="$RUNNER_TEMP/fakebrew"
+          mkdir -p "$fake/Cellar/jq/1.7.1" "$fake/Cellar/oniguruma/6.9.9" "$fake/Cellar/fd/10.2.0" "$fake/var/homebrew/pinned"
+          echo '{"installed_on_request": true}' > "$fake/Cellar/jq/1.7.1/INSTALL_RECEIPT.json"
+          echo '{"installed_on_request": false}' > "$fake/Cellar/oniguruma/6.9.9/INSTALL_RECEIPT.json"
+          touch "$fake/var/homebrew/pinned/fd"
+          HOMEBREW_PREFIX="$fake" $abv0 --registry packages/index.json migrate --install | tee migrate.txt
+          grep -q 'dependencies left out' migrate.txt || { echo "the dependency was not left out"; exit 1; }
+          $abv0 --registry packages/index.json list --installed | grep -E '^fd[[:space:]]' || { echo "fd was not installed"; exit 1; }
+          $abv0 pinned | grep -qx fd || { echo "the brew pin did not carry over"; exit 1; }
+          $abv0 unpin fd
+          # The runner's own Homebrew, where there is one: read only.
+          if command -v brew >/dev/null 2>&1; then
+            HOMEBREW_PREFIX="$(brew --prefix)" $abv0 --registry packages/index.json --dry-run migrate --install | tail -n 5
+          fi
+
       - name: Run jq and rg (Unix)
         if: runner.os != 'Windows'
         shell: bash

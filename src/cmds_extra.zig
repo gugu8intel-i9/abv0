@@ -1544,6 +1544,159 @@ pub fn matchName(reg: *const registry.Registry, wanted: []const u8) ?Match {
 }
 
 // ---------------------------------------------------------------------------
+// migrate: read a Homebrew install straight from disk
+// ---------------------------------------------------------------------------
+
+pub const BrewKind = enum { formula, cask };
+
+pub const BrewItem = struct {
+    name: []const u8,
+    kind: BrewKind,
+    /// Installed by hand, not pulled in as a dependency.
+    requested: bool,
+    /// `brew pin` was used on it.
+    pinned: bool,
+};
+
+/// Where Homebrew may live, most likely first. With `HOMEBREW_PREFIX` set,
+/// only that one.
+pub fn brewPrefixes(a: std.mem.Allocator, env_prefix: ?[]const u8, home: ?[]const u8) ![]const []const u8 {
+    var out = std.ArrayList([]const u8).init(a);
+    if (env_prefix) |p| {
+        if (p.len != 0) {
+            try out.append(p);
+            return out.toOwnedSlice();
+        }
+    }
+    try out.appendSlice(&.{ "/opt/homebrew", "/usr/local", "/home/linuxbrew/.linuxbrew" });
+    if (home) |h| try out.append(try std.fs.path.join(a, &.{ h, ".linuxbrew" }));
+    return out.toOwnedSlice();
+}
+
+/// What an install receipt says about `installed_on_request`, or null when it
+/// does not say. Only that one key is looked at, so the file is not parsed.
+pub fn receiptRequested(text: []const u8) ?bool {
+    const key = "\"installed_on_request\"";
+    const at = std.mem.indexOf(u8, text, key) orelse return null;
+    var rest = std.mem.trimLeft(u8, text[at + key.len ..], " \t\r\n");
+    if (rest.len == 0 or rest[0] != ':') return null;
+    rest = std.mem.trimLeft(u8, rest[1..], " \t\r\n");
+    if (std.mem.startsWith(u8, rest, "true")) return true;
+    if (std.mem.startsWith(u8, rest, "false")) return false;
+    return null;
+}
+
+/// True when one of the version folders of `formula` has a receipt saying
+/// it was installed by hand. A formula without a readable receipt counts as
+/// installed by hand, so nothing is left behind by mistake.
+fn formulaRequested(cellar: std.fs.Dir, formula: []const u8, buf: []u8) bool {
+    var dir = cellar.openDir(formula, .{ .iterate = true }) catch return true;
+    defer dir.close();
+    var it = dir.iterate();
+    var any = false;
+    while (it.next() catch null) |entry| {
+        if (entry.name.len == 0 or entry.name[0] == '.') continue;
+        var vdir = dir.openDir(entry.name, .{}) catch continue;
+        defer vdir.close();
+        const f = vdir.openFile("INSTALL_RECEIPT.json", .{}) catch continue;
+        defer f.close();
+        const n = f.readAll(buf) catch continue;
+        any = true;
+        if (receiptRequested(buf[0..n]) orelse true) return true;
+    }
+    return !any;
+}
+
+fn lessName(_: void, x: BrewItem, y: BrewItem) bool {
+    return std.mem.order(u8, x.name, y.name) == .lt;
+}
+
+/// The formulae and casks of the Homebrew at `prefix`, sorted by name, or
+/// null when there is no Homebrew there. Only folders and small receipt files
+/// are read; brew itself is never run.
+pub fn scanBrew(a: std.mem.Allocator, prefix: []const u8) !?[]BrewItem {
+    var root = std.fs.cwd().openDir(prefix, .{}) catch return null;
+    defer root.close();
+
+    var out = std.ArrayList(BrewItem).init(a);
+    errdefer out.deinit();
+    var found = false;
+
+    var pinned_dir: ?std.fs.Dir = root.openDir("var/homebrew/pinned", .{}) catch null;
+    defer if (pinned_dir) |*d| d.close();
+
+    // Receipts are a few kilobytes; the key is near the top.
+    var buf: [64 * 1024]u8 = undefined;
+    if (root.openDir("Cellar", .{ .iterate = true })) |cellar_const| {
+        var cellar = cellar_const;
+        defer cellar.close();
+        found = true;
+        var it = cellar.iterate();
+        while (try it.next()) |entry| {
+            if (entry.kind != .directory and entry.kind != .sym_link) continue;
+            if (entry.name.len == 0 or entry.name[0] == '.') continue;
+            const name = cleanName(entry.name) orelse continue;
+            const pinned = if (pinned_dir) |d| blk: {
+                d.access(name, .{}) catch break :blk false;
+                break :blk true;
+            } else false;
+            try out.append(.{
+                .name = try a.dupe(u8, name),
+                .kind = .formula,
+                .requested = formulaRequested(cellar, name, &buf),
+                .pinned = pinned,
+            });
+        }
+    } else |_| {}
+
+    if (root.openDir("Caskroom", .{ .iterate = true })) |casks_const| {
+        var casks = casks_const;
+        defer casks.close();
+        found = true;
+        var it = casks.iterate();
+        while (try it.next()) |entry| {
+            if (entry.kind != .directory) continue;
+            if (entry.name.len == 0 or entry.name[0] == '.') continue;
+            const name = cleanName(entry.name) orelse continue;
+            try out.append(.{ .name = try a.dupe(u8, name), .kind = .cask, .requested = true, .pinned = false });
+        }
+    } else |_| {}
+
+    if (!found) {
+        out.deinit();
+        return null;
+    }
+    const items = try out.toOwnedSlice();
+    std.mem.sort(BrewItem, items, {}, lessName);
+    return items;
+}
+
+/// Find a cask in the catalog. Casks are apps: only a package with the same
+/// name counts, never one that merely ships a program of that name.
+pub fn matchCask(reg: *const registry.Registry, wanted: []const u8) ?Match {
+    if (reg.get(wanted)) |p| return .{ .wanted = wanted, .pkg = p, .via = .exact };
+    return null;
+}
+
+/// Pin each of `names` that is not pinned yet; returns how many were added.
+pub fn addPins(a: std.mem.Allocator, st: *const store.Store, names: []const []const u8) !usize {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    const current = try readPins(aa, st);
+    var next = std.ArrayList([]const u8).init(aa);
+    try next.appendSlice(current);
+    var added: usize = 0;
+    for (names) |n| {
+        if (!safepath.isValidId(n) or containsName(next.items, n)) continue;
+        try next.append(n);
+        added += 1;
+    }
+    if (added > 0) try writePins(aa, st, next.items);
+    return added;
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -2142,4 +2295,75 @@ test "relinkGithub moves the bin link between installed GitHub versions; ownedBi
     try testing.expectError(store.StoreError.ExecutableNotFound, st.relinkGithub(aa, "tool", "9.9", "x86_64-linux", opts));
     rows = try listVersions(aa, &st, "tool", "x86_64-linux");
     try testing.expect(rows[1].active);
+}
+
+test "receiptRequested reads only installed_on_request" {
+    try testing.expectEqual(@as(?bool, true), receiptRequested("{\n  \"homebrew_version\": \"4.4\",\n  \"installed_on_request\": true,\n}"));
+    try testing.expectEqual(@as(?bool, false), receiptRequested("{\"installed_as_dependency\":true,\"installed_on_request\":false}"));
+    try testing.expectEqual(@as(?bool, null), receiptRequested("{\"installed_on_request\": null}"));
+    try testing.expectEqual(@as(?bool, null), receiptRequested("{}"));
+}
+
+test "brewPrefixes: HOMEBREW_PREFIX alone, else the usual places" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    const one = try brewPrefixes(aa, "/x/brew", "/home/u");
+    try testing.expectEqual(@as(usize, 1), one.len);
+    try testing.expectEqualStrings("/x/brew", one[0]);
+    const all = try brewPrefixes(aa, null, "/home/u");
+    try testing.expectEqualStrings("/opt/homebrew", all[0]);
+    try testing.expectEqualStrings("/home/u/.linuxbrew", all[all.len - 1]);
+}
+
+test "scanBrew reads formulae, receipts, pins and casks from disk" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const d = tmp.dir;
+    try d.makePath("Cellar/jq/1.7.1");
+    try d.writeFile(.{ .sub_path = "Cellar/jq/1.7.1/INSTALL_RECEIPT.json", .data = "{\"installed_on_request\": true}" });
+    try d.makePath("Cellar/oniguruma/6.9.9");
+    try d.writeFile(.{ .sub_path = "Cellar/oniguruma/6.9.9/INSTALL_RECEIPT.json", .data = "{\"installed_on_request\": false}" });
+    // No receipt: counts as installed by hand.
+    try d.makePath("Cellar/ripgrep/14.1.0");
+    try d.makePath("Cellar/.hidden");
+    try d.makePath("var/homebrew/pinned");
+    try d.writeFile(.{ .sub_path = "var/homebrew/pinned/ripgrep", .data = "" });
+    try d.makePath("Caskroom/wezterm/2024");
+
+    const root = try d.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(root);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const items = (try scanBrew(arena.allocator(), root)).?;
+
+    try testing.expectEqual(@as(usize, 4), items.len);
+    try testing.expectEqualStrings("jq", items[0].name);
+    try testing.expect(items[0].requested and !items[0].pinned and items[0].kind == .formula);
+    try testing.expectEqualStrings("oniguruma", items[1].name);
+    try testing.expect(!items[1].requested);
+    try testing.expectEqualStrings("ripgrep", items[2].name);
+    try testing.expect(items[2].requested and items[2].pinned);
+    try testing.expectEqualStrings("wezterm", items[3].name);
+    try testing.expect(items[3].kind == .cask and items[3].requested);
+
+    // A folder without Cellar or Caskroom is not a Homebrew.
+    try d.makePath("empty");
+    const empty = try d.realpathAlloc(testing.allocator, "empty");
+    defer testing.allocator.free(empty);
+    try testing.expect((try scanBrew(arena.allocator(), empty)) == null);
+}
+
+test "addPins adds each name once" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(root);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    var st = try testStore(aa, root);
+    try testing.expectEqual(@as(usize, 2), try addPins(aa, &st, &.{ "jq", "fd", "jq" }));
+    try testing.expectEqual(@as(usize, 0), try addPins(aa, &st, &.{"fd"}));
+    try testing.expect(isPinned(&st, aa, "jq") and isPinned(&st, aa, "fd"));
 }
