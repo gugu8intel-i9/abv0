@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.6.0 (2026-10-23)
 
 ### New
 
@@ -23,10 +23,9 @@
   removed automatically.
 - **Daily cleanup.** The first package-changing command of the day clears temporary
   files and stale sandboxes (`ABV0_AUTO_CLEAN=0` turns it off).
-
 - **Windows desktop apps.** Portable Windows builds are installed into the store and get
   a Start Menu shortcut (`%APPDATA%\Microsoft\Windows\Start Menu\Programs\abv0`),
-  written directly in the Shell Link format; uninstall removes it. The catalog takes
+  made with the Windows Shell (a plain .lnk file is the fallback); uninstall removes it. The catalog takes
   `win=Name.exe` (or `win="Display=Name*.exe"`) on an app line: the builder picks the
   release's portable Windows .zip, downloads it and checks the program is inside.
   Nineteen existing apps gained Windows builds and fourteen Windows apps were added
