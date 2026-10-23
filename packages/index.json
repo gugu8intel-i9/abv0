@@ -1,6 +1,6 @@
 {
   "registry_version": 1,
-  "updated_at": "2026-10-23T06:09:18Z",
+  "updated_at": "2026-10-23T07:13:21Z",
   "packages": {
     "act": {
       "name": "act",
@@ -12092,7 +12092,7 @@
     },
     "soft-serve": {
       "name": "soft-serve",
-      "version": "0.12.3",
+      "version": "0.12.4",
       "description": "The mighty, self-hostable Git server for the command line🍦",
       "homepage": "https://github.com/charmbracelet/soft-serve",
       "license": "MIT",
@@ -12100,34 +12100,34 @@
       "app_bundles": [],
       "platforms": {
         "aarch64-linux": {
-          "url": "https://github.com/charmbracelet/soft-serve/releases/download/v0.12.3/soft-serve_0.12.3_Linux_arm64.tar.gz",
-          "sha256": "72885cc2489fd5acafaaf787243920e42e538210073c3b08bbb79421aa85d532",
+          "url": "https://github.com/charmbracelet/soft-serve/releases/download/v0.12.4/soft-serve_0.12.4_Linux_arm64.tar.gz",
+          "sha256": "9f70fbd02577abcad05c9bf2c91cf22f6026f92da6ae0f834dcead65271153eb",
           "archive_type": "tar.gz",
-          "bin_path": "soft-serve_0.12.3_Linux_arm64/soft"
+          "bin_path": "soft-serve_0.12.4_Linux_arm64/soft"
         },
         "aarch64-macos": {
-          "url": "https://github.com/charmbracelet/soft-serve/releases/download/v0.12.3/soft-serve_0.12.3_Darwin_arm64.tar.gz",
-          "sha256": "98a9a6ff208453285f0133ea25bc71a5dd8b0c876454bca6792cb9abf8bd3474",
+          "url": "https://github.com/charmbracelet/soft-serve/releases/download/v0.12.4/soft-serve_0.12.4_Darwin_arm64.tar.gz",
+          "sha256": "563a59bc8df53c0bfee712713a1a88c11cc9e6cad7973e1361afb9deb35af7b3",
           "archive_type": "tar.gz",
-          "bin_path": "soft-serve_0.12.3_Darwin_arm64/soft"
+          "bin_path": "soft-serve_0.12.4_Darwin_arm64/soft"
         },
         "x86_64-linux": {
-          "url": "https://github.com/charmbracelet/soft-serve/releases/download/v0.12.3/soft-serve_0.12.3_Linux_x86_64.tar.gz",
-          "sha256": "ffd0fa5878301131d8e16ac016665af74e59630bbbf66f5fea4d20a8399adc28",
+          "url": "https://github.com/charmbracelet/soft-serve/releases/download/v0.12.4/soft-serve_0.12.4_Linux_x86_64.tar.gz",
+          "sha256": "bcf2e49bd95c34946708a7efe8ed5040125f84ed213bbc1a4a59982811af636b",
           "archive_type": "tar.gz",
-          "bin_path": "soft-serve_0.12.3_Linux_x86_64/soft"
+          "bin_path": "soft-serve_0.12.4_Linux_x86_64/soft"
         },
         "x86_64-macos": {
-          "url": "https://github.com/charmbracelet/soft-serve/releases/download/v0.12.3/soft-serve_0.12.3_Darwin_x86_64.tar.gz",
-          "sha256": "cbd857522dcae683f5b47ea1f69d4b56547ff1014bc797df19f2d1965f942cba",
+          "url": "https://github.com/charmbracelet/soft-serve/releases/download/v0.12.4/soft-serve_0.12.4_Darwin_x86_64.tar.gz",
+          "sha256": "0b4a74de31c1fd6f523392c4e4238daa2d6f9bdf4f44c9420b5d5cf68e4a46e4",
           "archive_type": "tar.gz",
-          "bin_path": "soft-serve_0.12.3_Darwin_x86_64/soft"
+          "bin_path": "soft-serve_0.12.4_Darwin_x86_64/soft"
         },
         "x86_64-windows": {
-          "url": "https://github.com/charmbracelet/soft-serve/releases/download/v0.12.3/soft-serve_0.12.3_Windows_x86_64.zip",
-          "sha256": "8b4df904351d3571029d8d1b71318f88c4569c84967f408f083f6690c4e49f2a",
+          "url": "https://github.com/charmbracelet/soft-serve/releases/download/v0.12.4/soft-serve_0.12.4_Windows_x86_64.zip",
+          "sha256": "120af747596a55b241cd1fbff5923d913c578b1e39720a0cb894908c9ff72ee3",
           "archive_type": "zip",
-          "bin_path": "soft-serve_0.12.3_Windows_x86_64/soft.exe"
+          "bin_path": "soft-serve_0.12.4_Windows_x86_64/soft.exe"
         }
       }
     },
