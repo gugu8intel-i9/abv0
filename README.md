@@ -445,15 +445,19 @@ See [catalog/README.md](catalog/README.md) for the line format and the commands.
 Behaviour you can rely on:
 
 - **Every install is scanned for malware.** Before anything is linked, abv0 reads every
-  file of the new package (about 5 ms for small tools) and looks for commands that only
-  malicious code carries: reverse shells (`bash -i >& /dev/tcp/…`, `nc -e /bin/sh`) and
-  mining-pool addresses (`stratum+tcp://`). A match removes the package and fails the
-  install; `--allow-suspicious` installs it anyway, and `ABV0_NO_SCAN=1` turns the scan
-  off. Weaker signs that ordinary tools also contain (credential names, SSH key paths)
-  never block and are listed by `abv0 detect <pkg>`. Tested on 140 catalog packages with
-  no false blocks. It is a pattern scan, not an antivirus: it catches known bad
-  behaviour, and code written to hide from it can.
-
+  file of the new package (about 5 ms for small tools) and checks it against rules that
+  need several signs together: a dropper must download a file, make it executable in a
+  temp folder *and* run it in the background; a stealer must collect several saved
+  passwords or wallets *and* send them to a webhook. It also catches reverse shells,
+  cryptominers, startup persistence (cron `@reboot`, macOS login items, Windows Run
+  keys), `/etc/ld.so.preload` rootkits, and commands hidden in base64, which it decodes
+  and scans. Script-only rules never judge compiled programs, which often carry such
+  text as data. A match removes the package and fails the install; `--allow-suspicious`
+  installs it anyway and `ABV0_NO_SCAN=1` turns the scan off. Weaker signs that ordinary
+  tools also contain never block and are listed by `abv0 detect <pkg>`. Tested on about
+  175 catalog packages (secret scanners, password managers and backup tools included)
+  with no false blocks, and on a set of attack samples, all caught. It is a rule-based
+  scan, not an antivirus: code written to evade it can.
 - **The manifest is signed.** `update` and the first-run bootstrap download the manifest
   and `<url>.sig`, verify the Ed25519 signature against the public key compiled in from
   `keys/manifest.pub`, and only then use the file. The manifest's `updated_at` may not go
