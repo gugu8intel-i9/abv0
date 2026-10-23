@@ -2344,7 +2344,8 @@ test "brewPrefixes: HOMEBREW_PREFIX alone, else the usual places" {
     try testing.expectEqualStrings("/x/brew", one[0]);
     const all = try brewPrefixes(aa, null, "/home/u");
     try testing.expectEqualStrings("/opt/homebrew", all[0]);
-    try testing.expectEqualStrings("/home/u/.linuxbrew", all[all.len - 1]);
+    const linuxbrew = try std.fs.path.join(aa, &.{ "/home/u", ".linuxbrew" });
+    try testing.expectEqualStrings(linuxbrew, all[all.len - 1]);
 }
 
 test "scanBrew reads formulae, receipts, pins and casks from disk" {
