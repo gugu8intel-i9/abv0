@@ -276,6 +276,13 @@ fn scanBase64(text: []const u8, scratch: []u8) Mask {
 // Packages
 // ---------------------------------------------------------------------------
 
+/// `path` with `/` separators, so a report reads the same on Windows.
+fn slashed(a: std.mem.Allocator, path: []const u8) ![]const u8 {
+    const out = try a.dupe(u8, path);
+    if (std.fs.path.sep != '/') std.mem.replaceScalar(u8, out, std.fs.path.sep, '/');
+    return out;
+}
+
 pub const Finding = struct {
     reason: []const u8,
     strong: bool,
@@ -343,7 +350,7 @@ pub fn scanTree(a: std.mem.Allocator, dir_path: []const u8) !Result {
         if (new == 0) continue;
         for (0..rules.len) |i| {
             if ((new >> @intCast(i)) & 1 == 0) continue;
-            first_file[i] = try a.dupe(u8, entry.path);
+            first_file[i] = try slashed(a, entry.path);
             hidden_rule[i] = (with_hidden >> @intCast(i)) & 1 == 1;
         }
         fired |= new;
