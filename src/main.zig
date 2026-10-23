@@ -20,7 +20,7 @@ const cmds_extra = @import("cmds_extra.zig");
 const ghrelease = @import("ghrelease.zig");
 const ghverify = @import("ghverify.zig");
 
-pub const version = "2.0.0";
+pub const version = "2.5.0";
 
 const default_registry_url = "https://raw.githubusercontent.com/gugu8intel-i9/abv0/main/packages/index.json";
 
