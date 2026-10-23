@@ -406,7 +406,7 @@ alacritty       alacritty/alacritty       app=Alacritty.app
 alt-tab         lwouis/alt-tab-macos      kind=app
 amethyst        ianyh/Amethyst            kind=app
 appflowy        AppFlowy-IO/AppFlowy      app=AppFlowy.app win=AppFlowy.exe
-audacity        audacity/audacity         app=Audacity.app win=Audacity.exe
+audacity        audacity/audacity         app=Audacity.app
 brave           brave/brave-browser       app="Brave Browser.app" win="Brave=brave.exe"
 bruno           usebruno/bruno            app=Bruno.app win=Bruno.exe
 cryptomator     cryptomator/cryptomator   app=Cryptomator.app
@@ -420,7 +420,7 @@ iina            iina/iina                 app=IINA.app
 jan             janhq/jan                 app=Jan.app
 joplin          laurent22/joplin          app=Joplin.app
 kap             wulkano/Kap               app=Kap.app
-keepassxc       keepassxreboot/keepassxc  app=KeePassXC.app win=KeePassXC.exe
+keepassxc       keepassxreboot/keepassxc  app=KeePassXC.app win=KeePassXC.exe asset.x86_64-windows=-x64.zip asset.aarch64-windows=-ARM64.zip
 keka            aonez/Keka                app=Keka.app
 kitty           kovidgoyal/kitty          app=kitty.app
 lapce           lapce/lapce               app=Lapce.app win="Lapce=lapce.exe"
@@ -436,7 +436,7 @@ netnewswire     Ranchero-Software/NetNewsWire kind=app
 obs-studio      obsproject/obs-studio     app=OBS.app win="OBS Studio=obs64.exe"
 obsidian        obsidianmd/obsidian-releases app=Obsidian.app
 ollama          ollama/ollama             kind=app
-podman-desktop  podman-desktop/podman-desktop app="Podman Desktop.app" win="Podman Desktop.exe"
+podman-desktop  podman-desktop/podman-desktop app="Podman Desktop.app"
 prism-launcher  PrismLauncher/PrismLauncher kind=app win="Prism Launcher=prismlauncher.exe"
 pulsar          pulsar-edit/pulsar        app=Pulsar.app win=Pulsar.exe
 rancher-desktop rancher-sandbox/rancher-desktop app="Rancher Desktop.app"
@@ -463,7 +463,7 @@ notepad-plus-plus notepad-plus-plus/notepad-plus-plus win="Notepad++=notepad++.e
 screentogif     NickeManarin/ScreenToGif  win=ScreenToGif.exe asset.x86_64-windows=Portable.x64.zip
 sharex          ShareX/ShareX             win=ShareX.exe asset.x86_64-windows=portable-x64.zip
 system-informer winsiderss/systeminformer win="System Informer=SystemInformer.exe" asset.x86_64-windows=bin.zip
-telegram-desktop telegramdesktop/tdesktop win="Telegram=Telegram.exe" asset.x86_64-windows=tportable-x64 asset.aarch64-windows=tportable-arm64
+telegram-desktop telegramdesktop/tdesktop win="Telegram=Telegram.exe" asset.x86_64-windows=td-portable-win-x64 asset.aarch64-windows=td-portable-win-arm
 wezterm         wez/wezterm               win="WezTerm=wezterm-gui.exe"
 winmerge        WinMerge/winmerge         win="WinMerge=WinMergeU.exe" asset.x86_64-windows=-x64-exe.zip
 
