@@ -206,6 +206,9 @@ fn parseArgsDiag(allocator: std.mem.Allocator, argv: []const []const u8, diag: *
             if (i >= argv.len) return failArg(diag, arg, "", error.MissingOptionValue);
             args.jobs = std.fmt.parseInt(usize, argv[i], 10) catch
                 return failArg(diag, arg, argv[i], error.InvalidNumber);
+        } else if (std.mem.eql(u8, arg, "--daily") or std.mem.eql(u8, arg, "--weekly")) {
+            // `autoupdate on` reads these from the rest.
+            try args.rest.append(arg);
         } else if (arg.len > 1 and arg[0] == '-' and !std.mem.eql(u8, arg, "-")) {
             return failArg(diag, arg, "", error.UnknownOption);
         } else if (args.command == null) {
@@ -3771,6 +3774,14 @@ test "parseArgs handles commands, flags and separators" {
 test "parseArgs errors on a missing option value instead of silently continuing" {
     try testing.expectError(error.MissingOptionValue, parseArgs(testing.allocator, &.{ "install", "jq", "--platform" }));
     try testing.expectError(error.MissingOptionValue, parseArgs(testing.allocator, &.{ "bundle", "-f" }));
+}
+
+test "parseArgs passes --weekly through to autoupdate" {
+    var args = try parseArgs(testing.allocator, &.{ "autoupdate", "on", "--weekly" });
+    defer args.deinit();
+    try testing.expectEqualStrings("autoupdate", args.command.?);
+    try testing.expectEqual(@as(usize, 2), args.rest.items.len);
+    try testing.expectEqualStrings("--weekly", args.rest.items[1]);
 }
 
 test "parseArgs rejects unknown options" {
