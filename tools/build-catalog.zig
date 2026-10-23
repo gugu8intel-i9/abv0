@@ -1782,7 +1782,11 @@ fn buildEntry(ctx: *Ctx, a: Allocator, src: Source, prev: ?Entry, index: usize) 
                 if (src.win.len == 0) continue;
                 const found = if (src.assets[i]) |want| findAssetNamed(rel.assets, want) else pickWinAppAsset(rel.assets, tag);
                 const chosen = found orelse {
-                    try notes.writer().print("{s}: no portable .zip; ", .{tag});
+                    try notes.writer().print("{s}: no portable .zip (zips:", .{tag});
+                    for (rel.assets) |asset| {
+                        if (std.ascii.endsWithIgnoreCase(asset.name, ".zip")) try notes.writer().print(" {s}", .{asset.name});
+                    }
+                    try notes.appendSlice("); ");
                     continue;
                 };
                 if (!std.ascii.endsWithIgnoreCase(rel.assets[chosen].name, ".zip")) {
@@ -1792,8 +1796,10 @@ fn buildEntry(ctx: *Ctx, a: Allocator, src: Source, prev: ?Entry, index: usize) 
                 pick[i] = chosen;
                 continue;
             }
-            // Otherwise an app source publishes macOS bundles.
+            // Otherwise an app source publishes macOS bundles; a line with
+            // win= and no app= is for Windows only.
             if (osOfPlatform(i) != .macos) continue;
+            if (src.win.len != 0 and src.apps.len == 0) continue;
             const found = if (src.assets[i]) |want| findAssetNamed(rel.assets, want) else pickAppAsset(rel.assets, tag, src.apps.len != 0);
             const chosen = found orelse {
                 try notes.writer().print("{s}: no .dmg or .zip for this Mac; ", .{tag});
@@ -2232,8 +2238,11 @@ pub fn pickWinAppAsset(assets: []const ghrelease.Asset, platform_tag: []const u8
     for (assets, 0..) |asset, i| {
         const name = asset.name;
         if (!std.ascii.endsWithIgnoreCase(name, ".zip")) continue;
+        // "portable" also marks a Windows build: the reject words below
+        // drop any that name another system.
         if (!hasWord(name, &win_os_tokens) and std.ascii.indexOfIgnoreCase(name, "windows") == null and
-            std.ascii.indexOfIgnoreCase(name, "win64") == null and std.ascii.indexOfIgnoreCase(name, "win32") == null) continue;
+            std.ascii.indexOfIgnoreCase(name, "win64") == null and std.ascii.indexOfIgnoreCase(name, "win32") == null and
+            std.ascii.indexOfIgnoreCase(name, "portable") == null) continue;
         if (hasWord(name, &win_reject_tokens)) continue;
         const arm = hasSubstring(name, &.{ "arm64", "aarch64" });
         const x86 = hasSubstring(name, &.{ "x86_64", "x86-64", "x64", "amd64", "win64" });
@@ -2452,6 +2461,8 @@ fn buildApp(
     try all.appendSlice(apps);
     try all.appendSlice(win_entries.items);
     if (plats.items.len == 0 or all.items.len == 0) return failf(a, "no installable app: {s}", .{notes.items});
+    // Platforms that were dropped still go to the log.
+    if (notes.items.len != 0) std.debug.print("{s}: partial: {s}\n", .{ src.name, notes.items });
     return finishEntry(ctx, a, src, version, &.{}, try all.toOwnedSlice(), try plats.toOwnedSlice());
 }
 
@@ -4536,6 +4547,14 @@ test "pickWinAppAsset takes the portable zip for the right architecture" {
     try testing.expectEqualStrings("VSCodium-win32-arm64-1.95.zip", names[pickWinAppAsset(&assets, "aarch64-windows").?]);
     const none = [_]ghrelease.Asset{ .{ .name = "tool-setup-x64.exe", .url = "https://example.com/x", .size = 1, .sha256 = null }, .{ .name = "tool-linux.zip", .url = "https://example.com/x", .size = 1, .sha256 = null } };
     try testing.expect(pickWinAppAsset(&none, "x86_64-windows") == null);
+
+    // "portable" alone marks a Windows build, unless another system is named.
+    const portable = [_]ghrelease.Asset{
+        .{ .name = "ShareX-21.0.0-portable-x64.zip", .url = "https://example.com/x", .size = 1, .sha256 = null },
+        .{ .name = "Tool-portable-macos.zip", .url = "https://example.com/x", .size = 1, .sha256 = null },
+    };
+    try testing.expectEqual(@as(?usize, 0), pickWinAppAsset(&portable, "x86_64-windows"));
+    try testing.expect(pickWinAppAsset(portable[1..], "x86_64-windows") == null);
 }
 
 test "resolveWinEntry finds the shallowest matching program" {

@@ -453,17 +453,17 @@ zettlr          Zettlr/Zettlr             app=Zettlr.app
 
 # ---- GUI apps for Windows (portable builds) ------------------------------
 autohotkey      AutoHotkey/AutoHotkey     win="AutoHotkey=AutoHotkey64.exe" asset.x86_64-windows=AutoHotkey_2
-ditto           sabrogden/Ditto           win=Ditto.exe asset.x86_64-windows=DittoPortable_64bit
+ditto           sabrogden/Ditto           win=Ditto.exe asset.x86_64-windows=DittoPortable_
 flow-launcher   Flow-Launcher/Flow.Launcher win="Flow Launcher=Flow.Launcher.exe" asset.x86_64-windows=Portable.zip
-handbrake       HandBrake/HandBrake       win=HandBrake.exe
+handbrake       HandBrake/HandBrake       app=HandBrake.app win=HandBrake.exe asset.x86_64-windows=x86_64-Win_GUI.zip asset.aarch64-windows=arm64-Win_GUI.zip
 imageglass      d2phap/ImageGlass         win=ImageGlass.exe asset.x86_64-windows=_x64.zip
 librehardwaremonitor LibreHardwareMonitor/LibreHardwareMonitor win="Libre Hardware Monitor=LibreHardwareMonitor.exe" asset.x86_64-windows=.zip
 mpv-net         mpvnet-player/mpv.net     win="mpv.net=mpvnet.exe" asset.x86_64-windows=portable-x64.zip
 notepad-plus-plus notepad-plus-plus/notepad-plus-plus win="Notepad++=notepad++.exe" asset.x86_64-windows=portable.x64.zip asset.aarch64-windows=portable.arm64.zip
 screentogif     NickeManarin/ScreenToGif  win=ScreenToGif.exe asset.x86_64-windows=Portable.x64.zip
-sharex          ShareX/ShareX             win=ShareX.exe asset.x86_64-windows=portable.zip
+sharex          ShareX/ShareX             win=ShareX.exe asset.x86_64-windows=portable-x64.zip
 system-informer winsiderss/systeminformer win="System Informer=SystemInformer.exe" asset.x86_64-windows=bin.zip
-telegram-desktop telegramdesktop/tdesktop win="Telegram=Telegram.exe" asset.x86_64-windows=tportable-x64
+telegram-desktop telegramdesktop/tdesktop win="Telegram=Telegram.exe" asset.x86_64-windows=tportable-x64 asset.aarch64-windows=tportable-arm64
 wezterm         wez/wezterm               win="WezTerm=wezterm-gui.exe"
 winmerge        WinMerge/winmerge         win="WinMerge=WinMergeU.exe" asset.x86_64-windows=-x64-exe.zip
 
