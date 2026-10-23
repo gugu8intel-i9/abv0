@@ -112,6 +112,57 @@ jobs:
           rg.exe --version
           if ($LASTEXITCODE -ne 0) { throw "rg.exe --version failed" }
 
+      - name: Windows app gets a working Start Menu shortcut
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # A one-package manifest: ripgrep's Windows build, listed as an app
+          # whose program is rg.exe, so the install makes a Start Menu shortcut.
+          $m = Get-Content packages/index.json -Raw | ConvertFrom-Json
+          $rg = $m.packages.ripgrep
+          $pkg = [ordered]@{
+            name = 'rgapp'; version = $rg.version; description = 'shortcut test'; homepage = ''; license = 'MIT'
+            bin = @(); app_bundles = @('abv0 CI Test=rg.exe'); deps = @()
+            platforms = [ordered]@{ 'x86_64-windows' = $rg.platforms.'x86_64-windows' }
+          }
+          $doc = [ordered]@{ registry_version = 1; updated_at = $m.updated_at; packages = [ordered]@{ rgapp = $pkg } }
+          $doc | ConvertTo-Json -Depth 10 | Set-Content -Encoding utf8NoBOM test-app.json
+          ./zig-out/bin/abv0.exe --registry test-app.json --allow-unsigned-manifest install rgapp
+          if ($LASTEXITCODE -ne 0) { throw "install failed" }
+
+          $lnk = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\abv0\abv0 CI Test.lnk'
+          if (-not (Test-Path -LiteralPath $lnk)) { throw "no shortcut at $lnk" }
+          # Windows' own shortcut reader must resolve abv0's file to the program.
+          $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
+          "target:      $($sc.TargetPath)"
+          "working dir: $($sc.WorkingDirectory)"
+          if (-not $sc.TargetPath.EndsWith('rg.exe')) { throw "shortcut points at '$($sc.TargetPath)'" }
+          if (-not (Test-Path -LiteralPath $sc.TargetPath)) { throw "shortcut target does not exist" }
+          if ($sc.WorkingDirectory -ne (Split-Path $sc.TargetPath)) { throw "working directory is not the program's folder" }
+          # And launching the shortcut starts it.
+          $p = Start-Process -FilePath $lnk -ArgumentList '--version' -PassThru -Wait -WindowStyle Hidden
+          if ($p -and $p.ExitCode -ne 0) { throw "running the shortcut exited $($p.ExitCode)" }
+
+          ./zig-out/bin/abv0.exe --registry test-app.json --allow-unsigned-manifest uninstall rgapp
+          if (Test-Path -LiteralPath $lnk) { throw "uninstall left the shortcut behind" }
+
+      - name: Maintain and autoupdate on, status, off
+        shell: bash
+        env:
+          # Keep the binary under test: no self-update from the release.
+          ABV0_AUTO_SELF_UPDATE: "0"
+        run: |
+          set -euo pipefail
+          abv0=./zig-out/bin/abv0
+          $abv0 --registry packages/index.json maintain
+          $abv0 autoupdate on --weekly
+          $abv0 autoupdate status | tee status.txt
+          grep -q '^scheduled: *yes' status.txt || { echo "not scheduled after 'on'"; exit 1; }
+          $abv0 autoupdate off
+          $abv0 autoupdate status | tee status.txt
+          grep -q '^scheduled: *no' status.txt || { echo "still scheduled after 'off'"; exit 1; }
+
       - name: Run jq and rg (Unix)
         if: runner.os != 'Windows'
         shell: bash

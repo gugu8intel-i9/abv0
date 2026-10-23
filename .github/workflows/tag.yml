@@ -1,0 +1,62 @@
+# Creates an annotated release tag (v<version>) on a commit of main and
+# pushes it. Run it from the Actions tab (Tag -> Run workflow) after the
+# Release workflow has published release/ for that version.
+
+name: Tag
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to create, such as v2.5.0"
+        required: true
+      commit:
+        description: "Commit to tag (default: the latest commit on main)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    name: Create ${{ inputs.tag }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check the tag and the commit
+        env:
+          TAG: ${{ inputs.tag }}
+          COMMIT: ${{ inputs.commit }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+            echo "::error::'$TAG' is not a version tag like v2.5.0"; exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "::error::$TAG already exists"; exit 1
+          fi
+          target="${COMMIT:-HEAD}"
+          sha="$(git rev-parse --verify "${target}^{commit}")"
+          # Only commits that are on main can be tagged.
+          git merge-base --is-ancestor "$sha" origin/main || { echo "::error::$sha is not on main"; exit 1; }
+          # The version in the source must match the tag.
+          want="${TAG#v}"
+          got="$(git show "$sha:src/main.zig" | sed -n 's/^pub const version = "\(.*\)";/\1/p')"
+          [ "$got" = "$want" ] || { echo "::error::src/main.zig at $sha says $got, not $want"; exit 1; }
+          echo "SHA=$sha" >> "$GITHUB_ENV"
+
+      - name: Create and push the tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" "$SHA" -m "abv0 ${TAG#v}" -m "See CHANGELOG.md."
+          git push origin "refs/tags/$TAG"
+          echo "Tagged $SHA as $TAG"

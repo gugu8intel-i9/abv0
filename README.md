@@ -18,6 +18,30 @@ abv0 shell ripgrep                       # ephemeral subshell with just that pac
 abv0 browse                              # pick packages from a searchable list
 ```
 
+**Staying up to date, automatically.**
+
+- The catalog refreshes itself when it is more than a day old, before `install`,
+  `upgrade`, `outdated`, `search`, `info` or `browse` use it (`ABV0_UPDATE_HOURS`
+  changes the age, `ABV0_AUTO_UPDATE=0` turns it off).
+- `abv0 maintain` does all upkeep in one go: refresh the catalog, upgrade every package
+  that is not pinned, install missing dependencies, remove dependencies nothing needs,
+  clear temporary files, and update abv0 itself.
+- `abv0 autoupdate on` runs `maintain` every night at about 03:17 (`--weekly` for
+  Sundays) through the system's own scheduler: launchd on macOS, a systemd user timer or
+  cron on Linux, Task Scheduler on Windows. `abv0 autoupdate status` shows whether it is
+  on and when it last ran; `abv0 autoupdate off` removes it.
+- Dependencies install with what needs them, `upgrade` adds any a new version needs, and
+  `abv0 fix` reinstalls missing ones. When you uninstall something, dependencies that
+  nothing else uses go with it. Only packages abv0 itself pulled in as dependencies are
+  ever removed this way; anything you installed stays until you remove it.
+- Once a day, a command that changes packages also clears temporary files.
+
+**Desktop apps.** On macOS, apps such as Rectangle, VSCodium or Obsidian install into
+`~/Applications`. On Windows, portable builds (KeePassXC, VSCodium, Notepad++, ShareX,
+OBS Studio and others) unpack into abv0's store and get a Start Menu shortcut under
+*abv0*, so they appear in Start and in search; no installer runs and no admin rights are
+needed. `abv0 uninstall` removes the app and its shortcut.
+
 `abv0 browse` opens the whole catalog in a full-screen list: type to search, arrow keys
 (or PgUp/PgDn/Home/End) to move, Space or Tab to pick, Enter to install what you picked
 (or the highlighted package), Esc to quit. Installed packages are marked with a tick.
@@ -128,6 +152,8 @@ PACKAGES
   install <pkg>...         Install packages and their dependencies (verified, in parallel)
   install gh:owner/repo    Install any GitHub project's release, verified (no recipe needed)
   browse                   Pick packages to install from a full-screen list
+  maintain                 Refresh, upgrade, fix dependencies and clean up in one go
+  autoupdate on|off|status Run maintain daily (or --weekly) via the system scheduler
   uninstall <pkg>...       Remove packages and the links they created
   upgrade [--all|pkg]...   Upgrade outdated packages (keeps the previous version for rollback)
   outdated                 List packages with a newer version available (pinned ones marked)
@@ -252,6 +278,11 @@ fetches and stores the macOS build without linking it into your `PATH`.
 | `ABV0_CONNECTIONS` | Connections for a split download, 1 to 16. `1` turns splitting off. Unset, a download gets one connection per 4 MiB, up to 8. |
 | `GITHUB_TOKEN`, `GH_TOKEN` | Optional GitHub token for API requests. `GITHUB_TOKEN` is read first. |
 | `ABV0_NO_SCAN` | `1` turns off the install-time malware scan |
+| `ABV0_AUTO_UPDATE` | `0` stops commands refreshing a stale catalog |
+| `ABV0_UPDATE_HOURS` | How old the catalog may get before it is refreshed (default `24`) |
+| `ABV0_AUTO_REMOVE` | `0` keeps unused dependencies after an uninstall |
+| `ABV0_AUTO_CLEAN` | `0` turns off the daily cleanup of temporary files |
+| `ABV0_AUTO_SELF_UPDATE` | `0` stops `maintain` updating abv0 itself |
 | `NO_COLOR` | Disables colour, as `--no-color` does |
 
 The three path variables must be absolute, with no NUL bytes or line breaks. Anything

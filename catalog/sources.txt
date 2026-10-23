@@ -33,6 +33,15 @@
 #                             from the archive; the bundle has to sit at the
 #                             top level of the zip. Quote names with spaces:
 #                             app="Brave Browser.app".
+#   deps=a,b                  catalog packages this one needs; abv0 installs
+#                             them with it and removes them when nothing needs
+#                             them any more
+#   win=Name.exe              a portable Windows build (implies kind=app): the
+#                             release's Windows .zip is published and abv0 adds
+#                             a Start Menu shortcut to Name.exe. The tool
+#                             downloads the zip and checks the program is in it.
+#                             win="Display=Name*.exe" names the shortcut and
+#                             lets * match a version in the file name.
 #
 # Values with spaces go in double quotes. '#' starts a comment. A line that
 # cannot be parsed is reported and skipped; it never stops the run.
@@ -396,14 +405,14 @@ yt-dlp          yt-dlp/yt-dlp             asset.x86_64-linux=yt-dlp_linux asset.
 alacritty       alacritty/alacritty       app=Alacritty.app
 alt-tab         lwouis/alt-tab-macos      kind=app
 amethyst        ianyh/Amethyst            kind=app
-appflowy        AppFlowy-IO/AppFlowy      app=AppFlowy.app
+appflowy        AppFlowy-IO/AppFlowy      app=AppFlowy.app win=AppFlowy.exe
 audacity        audacity/audacity         app=Audacity.app
-brave           brave/brave-browser       app="Brave Browser.app"
-bruno           usebruno/bruno            app=Bruno.app
+brave           brave/brave-browser       app="Brave Browser.app" win="Brave=brave.exe"
+bruno           usebruno/bruno            app=Bruno.app win=Bruno.exe
 cryptomator     cryptomator/cryptomator   app=Cryptomator.app
-dbeaver         dbeaver/dbeaver           app=DBeaver.app
+dbeaver         dbeaver/dbeaver           app=DBeaver.app win="DBeaver=dbeaver.exe"
 github-desktop  desktop/desktop           app="GitHub Desktop.app"
-godot           godotengine/godot         kind=app
+godot           godotengine/godot         kind=app win="Godot=Godot_v*_win64.exe" asset.x86_64-windows=stable_win64.exe.zip
 hammerspoon     Hammerspoon/hammerspoon   kind=app
 hyper           vercel/hyper              app=Hyper.app
 ice             jordanbaird/Ice           kind=app
@@ -411,36 +420,52 @@ iina            iina/iina                 app=IINA.app
 jan             janhq/jan                 app=Jan.app
 joplin          laurent22/joplin          app=Joplin.app
 kap             wulkano/Kap               app=Kap.app
-keepassxc       keepassxreboot/keepassxc  app=KeePassXC.app
+keepassxc       keepassxreboot/keepassxc  app=KeePassXC.app win=KeePassXC.exe asset.x86_64-windows=-x64.zip asset.aarch64-windows=-ARM64.zip
 keka            aonez/Keka                app=Keka.app
 kitty           kovidgoyal/kitty          app=kitty.app
-lapce           lapce/lapce               app=Lapce.app
-localsend       localsend/localsend       app=LocalSend.app
-logseq          logseq/logseq             app=Logseq.app
+lapce           lapce/lapce               app=Lapce.app win="Lapce=lapce.exe"
+localsend       localsend/localsend       app=LocalSend.app win="LocalSend=localsend_app.exe"
+logseq          logseq/logseq             app=Logseq.app win=Logseq.exe
 loop            MrKai77/Loop              kind=app
 losslesscut     mifi/lossless-cut         app=LosslessCut.app
 maccy           p0deje/Maccy              app=Maccy.app
 monitorcontrol  MonitorControl/MonitorControl app=MonitorControl.app
-motrix          agalwood/Motrix           app=Motrix.app
-neovide         neovide/neovide           app=Neovide.app
+motrix          agalwood/Motrix           app=Motrix.app win=Motrix.exe
+neovide         neovide/neovide           app=Neovide.app win="Neovide=neovide.exe" asset.x86_64-windows=neovide.exe.zip
 netnewswire     Ranchero-Software/NetNewsWire kind=app
-obs-studio      obsproject/obs-studio     app=OBS.app
+obs-studio      obsproject/obs-studio     app=OBS.app win="OBS Studio=obs64.exe"
 obsidian        obsidianmd/obsidian-releases app=Obsidian.app
 ollama          ollama/ollama             kind=app
 podman-desktop  podman-desktop/podman-desktop app="Podman Desktop.app"
-prism-launcher  PrismLauncher/PrismLauncher kind=app
-pulsar          pulsar-edit/pulsar        app=Pulsar.app
+prism-launcher  PrismLauncher/PrismLauncher kind=app win="Prism Launcher=prismlauncher.exe"
+pulsar          pulsar-edit/pulsar        app=Pulsar.app win=Pulsar.exe
 rancher-desktop rancher-sandbox/rancher-desktop app="Rancher Desktop.app"
 rectangle       rxhanson/Rectangle        app=Rectangle.app
 stats           exelban/stats             app=Stats.app
-tabby           Eugeny/tabby              app=Tabby.app
+tabby           Eugeny/tabby              app=Tabby.app win=Tabby.exe
 transmission    transmission/transmission app=Transmission.app
 ungoogled-chromium ungoogled-software/ungoogled-chromium-macos app=Chromium.app
-vscodium        VSCodium/vscodium         app=VSCodium.app
-wave            wavetermdev/waveterm      app=Wave.app
+vscodium        VSCodium/vscodium         app=VSCodium.app win=VSCodium.exe
+wave            wavetermdev/waveterm      app=Wave.app win=Wave.exe
 whisky          Whisky-App/Whisky         kind=app
 zed             zed-industries/zed        app=Zed.app
 zettlr          Zettlr/Zettlr             app=Zettlr.app
+
+# ---- GUI apps for Windows (portable builds) ------------------------------
+autohotkey      AutoHotkey/AutoHotkey     win="AutoHotkey=AutoHotkey64.exe" asset.x86_64-windows=AutoHotkey_2
+ditto           sabrogden/Ditto           win=Ditto.exe asset.x86_64-windows=DittoPortable_
+flow-launcher   Flow-Launcher/Flow.Launcher win="Flow Launcher=Flow.Launcher.exe" asset.x86_64-windows=Portable.zip
+handbrake       HandBrake/HandBrake       app=HandBrake.app win=HandBrake.exe asset.x86_64-windows=x86_64-Win_GUI.zip asset.aarch64-windows=arm64-Win_GUI.zip
+imageglass      d2phap/ImageGlass         win=ImageGlass.exe asset.x86_64-windows=_x64.zip
+librehardwaremonitor LibreHardwareMonitor/LibreHardwareMonitor win="Libre Hardware Monitor=LibreHardwareMonitor.exe" asset.x86_64-windows=.zip
+mpv-net         mpvnet-player/mpv.net     win="mpv.net=mpvnet.exe" asset.x86_64-windows=portable-x64.zip
+notepad-plus-plus notepad-plus-plus/notepad-plus-plus win="Notepad++=notepad++.exe" asset.x86_64-windows=portable.x64.zip asset.aarch64-windows=portable.arm64.zip
+screentogif     NickeManarin/ScreenToGif  win=ScreenToGif.exe asset.x86_64-windows=Portable.x64.zip
+sharex          ShareX/ShareX             win=ShareX.exe asset.x86_64-windows=portable-x64.zip
+system-informer winsiderss/systeminformer win="System Informer=SystemInformer.exe" asset.x86_64-windows=bin.zip
+telegram-desktop telegramdesktop/tdesktop win="Telegram=Telegram.exe" asset.x86_64-windows=td-portable-win-x64 asset.aarch64-windows=td-portable-win-arm
+wezterm         wez/wezterm               win="WezTerm=wezterm-gui.exe"
+winmerge        WinMerge/winmerge         win="WinMerge=WinMergeU.exe" asset.x86_64-windows=-x64-exe.zip
 
 # ---- GUI apps: Linux and Windows builds ----------------------------------
 audacity-portable audacity/audacity         bin=audacity skip=x86_64-macos,aarch64-macos,x86_64-windows,aarch64-windows

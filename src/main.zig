@@ -12,6 +12,7 @@ const term = @import("term.zig");
 const net = @import("net.zig");
 const abvindex = @import("abvindex.zig");
 const tui = @import("tui.zig");
+const auto = @import("auto.zig");
 const archive = @import("archive.zig");
 const bloom = @import("bloom.zig");
 const wal = @import("wal.zig");
@@ -205,6 +206,9 @@ fn parseArgsDiag(allocator: std.mem.Allocator, argv: []const []const u8, diag: *
             if (i >= argv.len) return failArg(diag, arg, "", error.MissingOptionValue);
             args.jobs = std.fmt.parseInt(usize, argv[i], 10) catch
                 return failArg(diag, arg, argv[i], error.InvalidNumber);
+        } else if (std.mem.eql(u8, arg, "--daily") or std.mem.eql(u8, arg, "--weekly")) {
+            // `autoupdate on` reads these from the rest.
+            try args.rest.append(arg);
         } else if (arg.len > 1 and arg[0] == '-' and !std.mem.eql(u8, arg, "-")) {
             return failArg(diag, arg, "", error.UnknownOption);
         } else if (args.command == null) {
@@ -602,6 +606,20 @@ const commands = [_]Command{
         .example = "abv0 which rg",
     },
     .{
+        .name = "maintain",
+        .args = "",
+        .summary = "Do all upkeep at once: refresh the catalog, upgrade every package that is not pinned, install missing dependencies, remove dependencies nothing needs, clear temporary files and update abv0 itself. This is what `abv0 autoupdate on` schedules.",
+        .flags = &.{ quiet_flag, verbose_flag },
+        .example = "abv0 maintain",
+    },
+    .{
+        .name = "autoupdate",
+        .args = "on [--daily|--weekly] | off | status",
+        .summary = "Run `abv0 maintain` automatically through the system scheduler (launchd on macOS, a systemd user timer or cron on Linux, Task Scheduler on Windows), at about 03:17. `status` shows whether it is on and when it last ran.",
+        .flags = &.{},
+        .example = "abv0 autoupdate on",
+    },
+    .{
         .name = "self-update",
         .summary = "Update abv0 itself from a signed release.",
         .flags = &.{.{ .name = "--check", .help = "Only report whether an update exists" }},
@@ -703,6 +721,8 @@ fn renderUsage(w: anytype) !void {
         \\  gc                      Remove temporary files and stale sandboxes
         \\  cleanup                 Remove old versions (including rollback's), keeping the newest
         \\  completions <shell>     Print a bash, zsh, fish or pwsh completion script
+        \\  maintain                Refresh, upgrade, fix dependencies and clean up in one go
+        \\  autoupdate on|off|status  Run `maintain` daily (or --weekly) via the system scheduler
         \\  self-update [--check]   Update abv0 from a signed release
         \\  reset                   Uninstall everything
         \\  report [--bug]          Open a prefilled GitHub issue
@@ -1773,7 +1793,7 @@ pub fn main() u8 {
 
 /// Commands that can download packages. Only these pay for loading the CA store.
 fn installsPackages(cmd: []const u8) bool {
-    const names = [_][]const u8{ "install", "upgrade", "bundle", "run", "shell", "browse" };
+    const names = [_][]const u8{ "install", "upgrade", "bundle", "run", "shell", "browse", "maintain", "fix" };
     for (names) |name| {
         if (std.mem.eql(u8, cmd, name)) return true;
     }
@@ -1885,7 +1905,15 @@ fn run(base: std.mem.Allocator, a: std.mem.Allocator) !u8 {
     var st = try store.Store.init(base);
     defer st.deinit();
 
+    // Once a day, a command that changes packages also clears temporary files
+    // and stale sandboxes (ABV0_AUTO_CLEAN=0 turns this off).
+    if (changesPackages(cmd) and !output.dry_run and auto.enabled("ABV0_AUTO_CLEAN") and auto.dueDaily(a, st.root, "gc")) {
+        _ = st.gc(a) catch 0;
+        auto.markDone(a, st.root, "gc");
+    }
+
     // ---- commands that need no registry ----
+    if (std.mem.eql(u8, cmd, "autoupdate")) return cmdAutoupdate(a, &st, args.rest.items);
     if (std.mem.eql(u8, cmd, "gc")) {
         const n = try st.gc(a);
         say("reclaimed {d} items in {d:.2}ms\n", .{ n, ms(timer.read()) });
@@ -1923,11 +1951,17 @@ fn run(base: std.mem.Allocator, a: std.mem.Allocator) !u8 {
     // download reuses a ready connection. Returns at once; failures are ignored.
     if (installsPackages(cmd) and !output.dry_run) net.prewarmGithub(args.rest.items.len);
 
+    if (args.registry_path == null and !output.dry_run and refreshesCatalog(cmd)) {
+        autoRefresh(a, &st, args.allow_unsigned_manifest, std.mem.eql(u8, cmd, "maintain"));
+    }
+
     var reg = if (args.registry_path) |p|
         try loadExplicitRegistry(base, &st, p, args.allow_unsigned_manifest)
     else
         try loadRegistry(base, &st, args.allow_unsigned_manifest);
     defer reg.deinit();
+
+    if (std.mem.eql(u8, cmd, "maintain")) return cmdMaintain(a, &st, &reg, &args, platform_name, opts);
 
     if (std.mem.eql(u8, cmd, "pin")) return cmds_extra.cmdPin(a, &st, &reg, args.rest.items);
     if (std.mem.eql(u8, cmd, "list")) return cmdList(&reg, args.json);
@@ -1956,8 +1990,9 @@ fn run(base: std.mem.Allocator, a: std.mem.Allocator) !u8 {
     }
     if (std.mem.eql(u8, cmd, "fix")) {
         const n = try st.fix(a, &reg, platform_name);
-        say("repaired {d} packages in {d:.2}ms\n", .{ n, ms(timer.read()) });
-        return 0;
+        const deps = try installMissingDeps(a, &st, &reg, platform_name, opts, args.jobs);
+        say("repaired {d} packages and installed {d} missing dependencies in {d:.2}ms\n", .{ n, deps.installed, ms(timer.read()) });
+        return if (deps.failed == 0) 0 else 1;
     }
     if (std.mem.eql(u8, cmd, "detect")) return cmdDetect(a, &st, &reg, args.rest.items, platform_name);
     if (std.mem.eql(u8, cmd, "reset")) {
@@ -2683,21 +2718,31 @@ fn cmdInstall(
         return 0;
     }
 
-    const ok = try a.alloc(bool, plan.names.len);
+    const requested = try requestedNames(a, reg, args.rest.items);
+    defer a.free(requested);
+    const kept = try dropUnavailableDeps(a, reg, plan, requested, platform_name);
+    defer a.free(kept.names);
+    defer a.free(kept.levels);
+    const before = try installedFlags(a, st, reg, kept.names, platform_name);
+    defer a.free(before);
+
+    const ok = try a.alloc(bool, kept.names.len);
     defer a.free(ok);
-    const failures = try installWaves(a, st, reg, plan.names, plan.levels, ok, platform_name, opts, args.jobs);
+    const failures = try installWaves(a, st, reg, kept.names, kept.levels, ok, platform_name, opts, args.jobs);
+    try recordInstall(a, st, kept.names, ok, before, requested);
+    const plan_names = kept.names;
 
     if (output.json) {
-        try writeInstallJson(term.writer(), reg, plan.names, plan.levels, ok);
+        try writeInstallJson(term.writer(), reg, kept.names, kept.levels, ok);
         return if (failures == 0) 0 else 1;
     }
 
     const elapsed = ms(timer.read());
     if (failures == 0) {
-        say("\n{s}done{s} {d} packages in {d:.2}ms\n", .{ term.green, term.reset, plan.names.len, elapsed });
+        say("\n{s}done{s} {d} packages in {d:.2}ms\n", .{ term.green, term.reset, plan_names.len, elapsed });
         return 0;
     }
-    term.print("\n{s}{d} of {d} packages failed{s} ({d:.2}ms)\n", .{ term.red, failures, plan.names.len, term.reset, elapsed });
+    term.print("\n{s}{d} of {d} packages failed{s} ({d:.2}ms)\n", .{ term.red, failures, plan_names.len, term.reset, elapsed });
     return 1;
 }
 
@@ -2715,6 +2760,426 @@ fn findGithubInstall(a: std.mem.Allocator, st: *const store.Store, name: []const
         return e;
     }
     return null;
+}
+
+// ---------------------------------------------------------------------------
+// Dependencies, auto-update and upkeep
+// ---------------------------------------------------------------------------
+
+/// Commands that install, upgrade or remove packages.
+fn changesPackages(cmd: []const u8) bool {
+    const names = [_][]const u8{ "install", "upgrade", "uninstall", "browse", "maintain", "bundle", "migrate", "fix" };
+    for (names) |n| {
+        if (std.mem.eql(u8, cmd, n)) return true;
+    }
+    return false;
+}
+
+/// Commands that read the catalog and should not work from a stale one.
+fn refreshesCatalog(cmd: []const u8) bool {
+    const names = [_][]const u8{ "install", "upgrade", "outdated", "browse", "search", "info", "maintain", "bundle", "migrate", "fix" };
+    for (names) |n| {
+        if (std.mem.eql(u8, cmd, n)) return true;
+    }
+    return false;
+}
+
+/// Refresh the installed catalog when it is older than ABV0_UPDATE_HOURS
+/// (default 24; `ABV0_AUTO_UPDATE=0` turns this off). `always` refreshes
+/// unless it was done in the last hour. A failed refresh is reported and the
+/// copy on disk is used.
+fn autoRefresh(a: std.mem.Allocator, st: *store.Store, allow_unsigned: bool, always: bool) void {
+    const limit: i64 = if (always) 3600 else (auto.refreshAfterSeconds() orelse return);
+    const paths = registryPaths(a, st) catch return;
+    defer a.free(paths[0]);
+    defer a.free(paths[1]);
+    // No catalog yet: loading it fetches one anyway.
+    const age = auto.ageSeconds(paths[0]) orelse return;
+    if (age < limit) return;
+    const hours = @divTrunc(age, 3600);
+    if (hours >= 48) {
+        say("{s}catalog{s}  {d} days old; refreshing\n", .{ term.dim, term.reset, @divTrunc(hours, 24) });
+    } else {
+        say("{s}catalog{s}  {d} hours old; refreshing\n", .{ term.dim, term.reset, hours });
+    }
+    const was_quiet = output.quiet;
+    output.quiet = true;
+    const code = cmdUpdate(a, st, allow_unsigned) catch 1;
+    output.quiet = was_quiet;
+    if (code != 0) {
+        term.err("{s}warning{s}: could not refresh the catalog; using the copy on disk\n", .{ term.yellow, term.reset });
+        // Do not try again on every command while offline.
+        if (std.fs.cwd().openFile(paths[0], .{ .mode = .read_write })) |f| {
+            defer f.close();
+            const now = std.time.nanoTimestamp();
+            f.updateTimes(now, now) catch {};
+        } else |_| {}
+    }
+}
+
+/// The registry names a command line asked for (gh: specs and unknown names
+/// are left out). Owned by `a`.
+fn requestedNames(a: std.mem.Allocator, reg: *const registry.Registry, rest: []const []const u8) ![]const []const u8 {
+    var out = std.ArrayList([]const u8).init(a);
+    for (rest) |name| {
+        if (store.Store.resolveRequest(reg, name)) |p| try out.append(p.name);
+    }
+    return out.toOwnedSlice();
+}
+
+/// `plan` without the dependencies that have no build for this platform: each
+/// is named once, and what needs it is installed anyway. Requested packages
+/// always stay, so their own error is reported as before.
+fn dropUnavailableDeps(a: std.mem.Allocator, reg: *const registry.Registry, plan: Plan, requested: []const []const u8, platform_name: []const u8) !struct { names: []const []const u8, levels: []const usize } {
+    var names = std.ArrayList([]const u8).init(a);
+    errdefer names.deinit();
+    var levels = std.ArrayList(usize).init(a);
+    errdefer levels.deinit();
+    for (plan.names, plan.levels) |name, lv| {
+        if (!auto.contains(requested, name)) {
+            if (store.Store.resolveRequest(reg, name)) |p| {
+                if (p.platform(platform_name) == null) {
+                    term.err("{s}note{s}: dependency {s} has no build for {s}; skipping it\n", .{ term.yellow, term.reset, p.name, platform_name });
+                    continue;
+                }
+            }
+        }
+        try names.append(name);
+        try levels.append(lv);
+    }
+    return .{ .names = try names.toOwnedSlice(), .levels = try levels.toOwnedSlice() };
+}
+
+/// Which of `names` are installed right now.
+fn installedFlags(a: std.mem.Allocator, st: *const store.Store, reg: *const registry.Registry, names: []const []const u8, platform_name: []const u8) ![]bool {
+    const out = try a.alloc(bool, names.len);
+    for (names, 0..) |n, i| {
+        out[i] = if (store.Store.resolveRequest(reg, n)) |p| st.isInstalled(p, platform_name) else true;
+    }
+    return out;
+}
+
+/// After an install: the requested packages are the user's; the others that
+/// were installed by this run (not before it) are dependencies.
+fn recordInstall(a: std.mem.Allocator, st: *const store.Store, names: []const []const u8, ok: []const bool, before: []const bool, requested: []const []const u8) !void {
+    var pulled = std.ArrayList([]const u8).init(a);
+    defer pulled.deinit();
+    for (names, ok, before) |n, done, was| {
+        if (done and !was and !auto.contains(requested, n)) try pulled.append(n);
+    }
+    auto.noteInstall(a, st.root, requested, pulled.items) catch {};
+}
+
+/// Names of the packages installed for `platform_name`. Owned by `a`.
+fn installedNames(a: std.mem.Allocator, st: *const store.Store, platform_name: []const u8) ![]const []const u8 {
+    var out = std.ArrayList([]const u8).init(a);
+    var dir = std.fs.cwd().openDir(st.store_root, .{ .iterate = true }) catch return out.toOwnedSlice();
+    defer dir.close();
+    var it = dir.iterate();
+    while (try it.next()) |entry| {
+        if (entry.kind != .directory) continue;
+        const parsed = store.Store.parseStoreDirName(entry.name) orelse continue;
+        if (!std.mem.eql(u8, parsed.platform, platform_name)) continue;
+        if (auto.contains(out.items, parsed.name)) continue;
+        try out.append(try a.dupe(u8, parsed.name));
+    }
+    return out.toOwnedSlice();
+}
+
+/// Uninstall dependencies nothing installed needs any more. Only packages abv0
+/// recorded as pulled in are candidates (ABV0_AUTO_REMOVE=0 turns this off).
+fn removeUnusedDeps(a: std.mem.Allocator, st: *store.Store, reg: *const registry.Registry, platform_name: []const u8) !usize {
+    if (!auto.enabled("ABV0_AUTO_REMOVE")) return 0;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    var removed: usize = 0;
+    // Removing one can free another, so repeat until nothing changes.
+    var rounds: usize = 0;
+    while (rounds < 16) : (rounds += 1) {
+        const installed = try installedNames(aa, st, platform_name);
+        const deps_only = try auto.readNames(aa, st.root, auto.deps_only_file);
+        const gone = try auto.orphans(aa, reg, installed, deps_only);
+        if (gone.len == 0) break;
+        for (gone) |name| {
+            const pkg = reg.get(name) orelse registry.Package{ .name = name, .version = "" };
+            if (st.uninstall(aa, pkg) catch false) {
+                say("  {s}removed{s}  {s} (no longer needed)\n", .{ term.dim, term.reset, name });
+                removed += 1;
+            }
+        }
+        try auto.forget(aa, st.root, gone);
+    }
+    return removed;
+}
+
+/// Install every dependency of an installed package that is itself missing.
+fn installMissingDeps(
+    a: std.mem.Allocator,
+    st: *store.Store,
+    reg: *const registry.Registry,
+    platform_name: []const u8,
+    opts: store.InstallOptions,
+    jobs: ?usize,
+) !struct { installed: usize, failed: usize } {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    const installed = try installedNames(aa, st, platform_name);
+    var missing = std.ArrayList([]const u8).init(aa);
+    for (installed) |n| {
+        const pkg = reg.get(n) orelse continue;
+        for (pkg.deps) |d| {
+            const dep = reg.get(d) orelse continue;
+            if (dep.platform(platform_name) == null or st.isInstalled(dep, platform_name)) continue;
+            if (!auto.contains(missing.items, d)) try missing.append(d);
+        }
+    }
+    if (missing.items.len == 0) return .{ .installed = 0, .failed = 0 };
+    for (missing.items) |d| say("  {s}missing{s}  dependency {s}\n", .{ term.yellow, term.reset, d });
+    const plan = try planInstall(aa, reg, missing.items);
+    const kept = try dropUnavailableDeps(aa, reg, plan, missing.items, platform_name);
+    const before = try installedFlags(aa, st, reg, kept.names, platform_name);
+    const ok = try aa.alloc(bool, kept.names.len);
+    const failures = try installWaves(aa, st, reg, kept.names, kept.levels, ok, platform_name, opts, jobs);
+    try recordInstall(aa, st, kept.names, ok, before, &.{});
+    var n: usize = 0;
+    for (ok) |done| {
+        if (done) n += 1;
+    }
+    return .{ .installed = n, .failed = failures };
+}
+
+/// `abv0 maintain`: what the scheduled job runs, and what anyone can run by
+/// hand. Refresh the catalog (done before the registry is loaded), upgrade
+/// every package that is not pinned, install missing dependencies, remove
+/// unused ones, clear temporary files, then update abv0 itself.
+fn cmdMaintain(
+    a: std.mem.Allocator,
+    st: *store.Store,
+    reg: *const registry.Registry,
+    args: *Args,
+    platform_name: []const u8,
+    opts: store.InstallOptions,
+) !u8 {
+    var bad: u8 = 0;
+    say("{s}maintain{s} {s}\n", .{ term.bold, term.reset, platform_name });
+    if (try cmdUpgrade(a, st, reg, &.{}, true, platform_name, opts, args.jobs) != 0) bad = 1;
+    const deps = try installMissingDeps(a, st, reg, platform_name, opts, args.jobs);
+    if (deps.failed != 0) bad = 1;
+    _ = try removeUnusedDeps(a, st, reg, platform_name);
+    const cleared = st.gc(a) catch 0;
+    auto.markDone(a, st.root, "gc");
+    if (cleared > 0) say("  {s}cleaned{s}  {d} temporary items\n", .{ term.dim, term.reset, cleared });
+    if (auto.enabled("ABV0_AUTO_SELF_UPDATE")) {
+        if ((cmds_extra.cmdSelfUpdate(a, st, null, &.{}) catch 1) != 0) bad = 1;
+    }
+    auto.markDone(a, st.root, "maintain");
+    return bad;
+}
+
+/// Run a system tool, discarding its output. Its exit code, or null when it
+/// could not be started.
+fn runTool(a: std.mem.Allocator, argv: []const []const u8) ?u8 {
+    const r = std.process.Child.run(.{ .allocator = a, .argv = argv, .max_output_bytes = 1 << 20 }) catch return null;
+    a.free(r.stdout);
+    a.free(r.stderr);
+    return switch (r.term) {
+        .Exited => |c| c,
+        else => 255,
+    };
+}
+
+/// Like runTool, returning stdout (owned by `a`) when the tool succeeded.
+fn toolOutput(a: std.mem.Allocator, argv: []const []const u8) ?[]u8 {
+    const r = std.process.Child.run(.{ .allocator = a, .argv = argv, .max_output_bytes = 1 << 20 }) catch return null;
+    a.free(r.stderr);
+    switch (r.term) {
+        .Exited => |c| if (c == 0) return r.stdout,
+        else => {},
+    }
+    a.free(r.stdout);
+    return null;
+}
+
+fn envOwned(a: std.mem.Allocator, name: []const u8) ?[]u8 {
+    return std.process.getEnvVarOwned(a, name) catch null;
+}
+
+/// `abv0 autoupdate on [--weekly] | off | status`: a scheduled `abv0 maintain`
+/// through the system's own scheduler (launchd, systemd or cron, Task
+/// Scheduler).
+fn cmdAutoupdate(base: std.mem.Allocator, st: *store.Store, rest: []const []const u8) !u8 {
+    var arena = std.heap.ArenaAllocator.init(base);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const sub = if (rest.len > 0) rest[0] else "status";
+    var interval: auto.Interval = .daily;
+    for (rest[@min(rest.len, 1)..]) |opt| {
+        if (std.mem.eql(u8, opt, "--weekly")) interval = .weekly else if (std.mem.eql(u8, opt, "--daily")) interval = .daily else {
+            term.err("usage: abv0 autoupdate on [--daily|--weekly] | off | status\n", .{});
+            return 2;
+        }
+    }
+    const logs = try std.fs.path.join(a, &.{ st.root, "logs" });
+    const log = try std.fs.path.join(a, &.{ logs, "maintain.log" });
+    const env = auto.JobEnv{ .home = envOwned(a, "ABV0_HOME"), .bin_dir = envOwned(a, "ABV0_BIN_DIR") };
+
+    if (std.mem.eql(u8, sub, "on")) {
+        const exe = try std.fs.selfExePathAlloc(a);
+        try std.fs.cwd().makePath(logs);
+        const how = scheduleOn(a, st, exe, log, interval, env) catch |e| {
+            const why: []const u8 = switch (e) {
+                error.CrontabFailed => "no scheduler found: this needs a systemd user session or cron (the crontab command)",
+                error.LaunchctlFailed => "launchctl refused the job",
+                error.SchtasksFailed => "Task Scheduler refused the job",
+                else => @errorName(e),
+            };
+            term.err("{s}error{s}: could not schedule abv0 maintain: {s}\n", .{ term.red, term.reset, why });
+            return 1;
+        };
+        say("{s}on{s}  abv0 maintain runs {s} at about 03:17 ({s})\n", .{ term.green, term.reset, @tagName(interval), how });
+        say("     it refreshes the catalog, upgrades unpinned packages, installs missing\n     dependencies, removes unused ones, cleans up and updates abv0\n", .{});
+        say("     log: {s}\n", .{log});
+        return 0;
+    }
+    if (std.mem.eql(u8, sub, "off")) {
+        scheduleOff(a, st);
+        say("{s}off{s}  automatic upkeep is disabled\n", .{ term.yellow, term.reset });
+        return 0;
+    }
+    if (std.mem.eql(u8, sub, "status")) {
+        const state = scheduleStatus(a, st);
+        say("scheduled:   {s}\n", .{state});
+        const last = try std.fs.path.join(a, &.{ st.root, "state", "last-maintain" });
+        if (auto.ageSeconds(last)) |age| {
+            say("last run:    {d} hours ago\n", .{@divTrunc(age, 3600)});
+        } else say("last run:    never\n", .{});
+        if (auto.refreshAfterSeconds()) |sec| {
+            say("catalog:     refreshed when older than {d} hours (ABV0_UPDATE_HOURS)\n", .{@divTrunc(sec, 3600)});
+        } else say("catalog:     automatic refresh off (ABV0_AUTO_UPDATE=0)\n", .{});
+        say("log:         {s}\n", .{log});
+        return 0;
+    }
+    term.err("usage: abv0 autoupdate on [--daily|--weekly] | off | status\n", .{});
+    return 2;
+}
+
+/// The user's id, for launchd's `gui/<uid>` domain (macOS only).
+fn currentUid() u32 {
+    const c = struct {
+        extern "c" fn getuid() c_uint;
+    };
+    return @intCast(c.getuid());
+}
+
+fn launchdPlistPath(a: std.mem.Allocator, st: *const store.Store) ![]u8 {
+    return std.fs.path.join(a, &.{ st.home, "Library", "LaunchAgents", auto.job_label ++ ".plist" });
+}
+
+fn systemdDir(a: std.mem.Allocator, st: *const store.Store) ![]u8 {
+    if (envOwned(a, "XDG_CONFIG_HOME")) |x| {
+        if (std.fs.path.isAbsolute(x)) return std.fs.path.join(a, &.{ x, "systemd", "user" });
+    }
+    return std.fs.path.join(a, &.{ st.home, ".config", "systemd", "user" });
+}
+
+fn hasUserSystemd(a: std.mem.Allocator) bool {
+    return (runTool(a, &.{ "systemctl", "--user", "show-environment" }) orelse 1) == 0;
+}
+
+fn scheduleOn(a: std.mem.Allocator, st: *const store.Store, exe: []const u8, log: []const u8, interval: auto.Interval, env: auto.JobEnv) anyerror![]const u8 {
+    switch (builtin.os.tag) {
+        .macos => {
+            const plist = try launchdPlistPath(a, st);
+            try std.fs.cwd().makePath(std.fs.path.dirname(plist).?);
+            try std.fs.cwd().writeFile(.{ .sub_path = plist, .data = try auto.launchdPlist(a, exe, log, interval, env) });
+            const domain = try std.fmt.allocPrint(a, "gui/{d}", .{currentUid()});
+            const target = try std.fmt.allocPrint(a, "{s}/{s}", .{ domain, auto.job_label });
+            _ = runTool(a, &.{ "launchctl", "bootout", target });
+            if ((runTool(a, &.{ "launchctl", "bootstrap", domain, plist }) orelse 1) != 0) {
+                if ((runTool(a, &.{ "launchctl", "load", "-w", plist }) orelse 1) != 0) return error.LaunchctlFailed;
+            }
+            return "launchd";
+        },
+        .windows => {
+            const tr = try auto.schtasksCommand(a, exe, log, env);
+            var argv = std.ArrayList([]const u8).init(a);
+            try argv.appendSlice(&.{ "schtasks", "/Create", "/F", "/TN", auto.job_name, "/ST", "03:17", "/TR", tr });
+            if (interval == .daily) try argv.appendSlice(&.{ "/SC", "DAILY" }) else try argv.appendSlice(&.{ "/SC", "WEEKLY", "/D", "SUN" });
+            if ((runTool(a, argv.items) orelse 1) != 0) return error.SchtasksFailed;
+            return "Task Scheduler";
+        },
+        else => {
+            if (hasUserSystemd(a)) {
+                const dir = try systemdDir(a, st);
+                try std.fs.cwd().makePath(dir);
+                const units = try auto.systemdUnits(a, exe, interval, env);
+                try std.fs.cwd().writeFile(.{ .sub_path = try std.fs.path.join(a, &.{ dir, auto.job_name ++ ".service" }), .data = units.service });
+                try std.fs.cwd().writeFile(.{ .sub_path = try std.fs.path.join(a, &.{ dir, auto.job_name ++ ".timer" }), .data = units.timer });
+                _ = runTool(a, &.{ "systemctl", "--user", "daemon-reload" });
+                if ((runTool(a, &.{ "systemctl", "--user", "enable", "--now", auto.job_name ++ ".timer" }) orelse 1) == 0) return "systemd user timer";
+            }
+            // No user systemd: the user's crontab.
+            const current = toolOutput(a, &.{ "crontab", "-l" }) orelse "";
+            const text = try auto.editCrontab(a, current, try auto.cronLine(a, exe, log, interval, env));
+            const tmp = try std.fs.path.join(a, &.{ st.root, "state", "crontab.tmp" });
+            try std.fs.cwd().makePath(std.fs.path.dirname(tmp).?);
+            try std.fs.cwd().writeFile(.{ .sub_path = tmp, .data = text });
+            defer std.fs.cwd().deleteFile(tmp) catch {};
+            if ((runTool(a, &.{ "crontab", tmp }) orelse 1) != 0) return error.CrontabFailed;
+            return "cron";
+        },
+    }
+}
+
+fn scheduleOff(a: std.mem.Allocator, st: *const store.Store) void {
+    switch (builtin.os.tag) {
+        .macos => {
+            const plist = launchdPlistPath(a, st) catch return;
+            const target = std.fmt.allocPrint(a, "gui/{d}/{s}", .{ currentUid(), auto.job_label }) catch return;
+            if ((runTool(a, &.{ "launchctl", "bootout", target }) orelse 1) != 0) _ = runTool(a, &.{ "launchctl", "unload", "-w", plist });
+            std.fs.cwd().deleteFile(plist) catch {};
+        },
+        .windows => _ = runTool(a, &.{ "schtasks", "/Delete", "/F", "/TN", auto.job_name }),
+        else => {
+            if (hasUserSystemd(a)) _ = runTool(a, &.{ "systemctl", "--user", "disable", "--now", auto.job_name ++ ".timer" });
+            if (systemdDir(a, st)) |dir| {
+                for ([_][]const u8{ ".service", ".timer" }) |ext| {
+                    const f = std.fmt.allocPrint(a, "{s}{s}", .{ auto.job_name, ext }) catch continue;
+                    std.fs.cwd().deleteFile(std.fs.path.join(a, &.{ dir, f }) catch continue) catch {};
+                }
+            } else |_| {}
+            if (toolOutput(a, &.{ "crontab", "-l" })) |current| {
+                if (std.mem.indexOf(u8, current, auto.cron_marker) != null) {
+                    const text = auto.editCrontab(a, current, null) catch return;
+                    const tmp = std.fs.path.join(a, &.{ st.root, "state", "crontab.tmp" }) catch return;
+                    std.fs.cwd().writeFile(.{ .sub_path = tmp, .data = text }) catch return;
+                    defer std.fs.cwd().deleteFile(tmp) catch {};
+                    _ = runTool(a, &.{ "crontab", tmp });
+                }
+            }
+        },
+    }
+}
+
+fn scheduleStatus(a: std.mem.Allocator, st: *const store.Store) []const u8 {
+    switch (builtin.os.tag) {
+        .macos => {
+            const plist = launchdPlistPath(a, st) catch return "unknown";
+            if (!platform.pathExists(plist)) return "no (run `abv0 autoupdate on`)";
+            const target = std.fmt.allocPrint(a, "gui/{d}/{s}", .{ currentUid(), auto.job_label }) catch return "unknown";
+            return if ((runTool(a, &.{ "launchctl", "print", target }) orelse 1) == 0) "yes (launchd)" else "set up but not loaded (run `abv0 autoupdate on`)";
+        },
+        .windows => return if ((runTool(a, &.{ "schtasks", "/Query", "/TN", auto.job_name }) orelse 1) == 0) "yes (Task Scheduler)" else "no (run `abv0 autoupdate on`)",
+        else => {
+            if (hasUserSystemd(a) and (runTool(a, &.{ "systemctl", "--user", "is-enabled", "--quiet", auto.job_name ++ ".timer" }) orelse 1) == 0) return "yes (systemd user timer)";
+            if (toolOutput(a, &.{ "crontab", "-l" })) |c| {
+                if (std.mem.indexOf(u8, c, auto.cron_marker) != null) return "yes (cron)";
+            }
+            return "no (run `abv0 autoupdate on`)";
+        },
+    }
 }
 
 fn cmdUninstall(
@@ -2755,8 +3220,13 @@ fn cmdUninstall(
         } else {
             say("{} was not installed\n", .{safe(pkg.name)});
         }
+        auto.forget(a, st.root, &.{pkg.name}) catch {};
     }
-    if (output.dry_run) term.print("\ndry run: nothing was changed\n", .{});
+    if (output.dry_run) {
+        term.print("\ndry run: nothing was changed\n", .{});
+        return failed;
+    }
+    _ = try removeUnusedDeps(a, st, reg, platform_name);
     return failed;
 }
 
@@ -2915,8 +3385,16 @@ fn cmdUpgrade(
     defer names.deinit();
     var levels = std.ArrayList(usize).init(a);
     defer levels.deinit();
+    // Dependencies already installed are left alone; one a new version needs
+    // and that is missing is installed with it (if it exists for this system).
+    var new_deps = std.ArrayList([]const u8).init(a);
+    defer new_deps.deinit();
     for (plan.names, plan.levels) |name, lv| {
-        if (!wanted.contains(name)) continue;
+        if (!wanted.contains(name)) {
+            const dep = store.Store.resolveRequest(reg, name) orelse continue;
+            if (st.isInstalled(dep, platform_name) or dep.platform(platform_name) == null) continue;
+            try new_deps.append(name);
+        }
         try names.append(name);
         try levels.append(lv);
     }
@@ -2943,6 +3421,14 @@ fn cmdUpgrade(
     const ok = try a.alloc(bool, names.items.len);
     defer a.free(ok);
     const failures = try installWaves(a, st, reg, names.items, levels.items, ok, platform_name, opts, jobs);
+    {
+        var pulled = std.ArrayList([]const u8).init(a);
+        defer pulled.deinit();
+        for (names.items, ok) |name, done| {
+            if (done and auto.contains(new_deps.items, name)) try pulled.append(name);
+        }
+        auto.noteInstall(a, st.root, &.{}, pulled.items) catch {};
+    }
 
     for (names.items, ok) |name, done| {
         if (!done) continue;
@@ -3288,6 +3774,14 @@ test "parseArgs handles commands, flags and separators" {
 test "parseArgs errors on a missing option value instead of silently continuing" {
     try testing.expectError(error.MissingOptionValue, parseArgs(testing.allocator, &.{ "install", "jq", "--platform" }));
     try testing.expectError(error.MissingOptionValue, parseArgs(testing.allocator, &.{ "bundle", "-f" }));
+}
+
+test "parseArgs passes --weekly through to autoupdate" {
+    var args = try parseArgs(testing.allocator, &.{ "autoupdate", "on", "--weekly" });
+    defer args.deinit();
+    try testing.expectEqualStrings("autoupdate", args.command.?);
+    try testing.expectEqual(@as(usize, 2), args.rest.items.len);
+    try testing.expectEqualStrings("--weekly", args.rest.items[1]);
 }
 
 test "parseArgs rejects unknown options" {
@@ -3789,6 +4283,8 @@ comptime {
     _ = @import("abvindex.zig");
     _ = @import("scan.zig");
     _ = @import("tui.zig");
+    _ = @import("winapp.zig");
+    _ = @import("auto.zig");
     _ = @import("net.zig");
     _ = @import("store.zig");
     _ = @import("cmds_extra.zig");

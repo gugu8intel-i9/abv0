@@ -19,6 +19,7 @@ const bindetect = @import("bindetect.zig");
 const shim = @import("shim.zig");
 const cas = @import("cas.zig");
 const scan = @import("scan.zig");
+const winapp = @import("winapp.zig");
 
 pub const Package = registry.Package;
 
@@ -131,12 +132,16 @@ pub const Store = struct {
         const locks_root = try std.fs.path.join(allocator, &.{ root, "locks" });
         errdefer allocator.free(locks_root);
 
-        // GUI bundles only mean something on macOS; the original created
-        // ~/Applications on Linux too.
+        // Where GUI apps go: ~/Applications on macOS, abv0's folder in the
+        // Start Menu on Windows (see winapp.zig). Elsewhere nothing uses it.
         const apps_root = if (platform.is_macos)
             try std.fs.path.join(allocator, &.{ home, "Applications" })
-        else
-            try std.fs.path.join(allocator, &.{ root, "apps" });
+        else if (platform.is_windows) blk: {
+            const appdata = std.process.getEnvVarOwned(allocator, "APPDATA") catch
+                break :blk try std.fs.path.join(allocator, &.{ root, "apps" });
+            defer allocator.free(appdata);
+            break :blk try std.fs.path.join(allocator, &.{ appdata, "Microsoft", "Windows", "Start Menu", "Programs", "abv0" });
+        } else try std.fs.path.join(allocator, &.{ root, "apps" });
         errdefer allocator.free(apps_root);
 
         // These used to be four makePath calls plus three `chmod` subprocess
@@ -1272,6 +1277,7 @@ pub const Store = struct {
         opts: InstallOptions,
     ) !void {
         if (pkg.app_bundles.len == 0) return;
+        if (builtin.os.tag == .windows) return self.linkWindowsApps(a, pkg, pkg_dir, opts);
         platform.makeSecureDir(self.apps_root) catch {};
 
         var guard = try Guard.acquire(a, self.locks_root, owners_lock);
@@ -1281,6 +1287,8 @@ pub const Store = struct {
         defer owners.deinit();
 
         for (pkg.app_bundles) |app_name| {
+            // Windows programs (`Name.exe`) are for linkWindowsApps.
+            if (winapp.parseEntry(app_name) != null) continue;
             if (!isSafeAppName(app_name)) {
                 term.err("{s}warning{s}: {s}: refusing app bundle name '{s}'\n", .{ term.yellow, term.reset, pkg.name, app_name });
                 continue;
@@ -1317,6 +1325,80 @@ pub const Store = struct {
             };
             if (!ok) continue;
             try owners.recs.append(.{ .kind = "app", .name = app_name, .pkg = pkg.name });
+        }
+        try self.writeOwners(a, owners.recs.items);
+    }
+
+    /// Windows: a Start Menu shortcut for each `Name.exe` (or `Display=Name.exe`)
+    /// entry, pointing at that program inside the unpacked package. Owned like
+    /// a macOS bundle, under the shortcut's file name.
+    fn linkWindowsApps(
+        self: *Store,
+        a: std.mem.Allocator,
+        pkg: Package,
+        pkg_dir: []const u8,
+        opts: InstallOptions,
+    ) !void {
+        var any = false;
+        for (pkg.app_bundles) |raw| {
+            if (winapp.parseEntry(raw) != null) any = true;
+        }
+        if (!any) return;
+        std.fs.cwd().makePath(self.apps_root) catch {};
+
+        var guard = try Guard.acquire(a, self.locks_root, owners_lock);
+        defer guard.release();
+        var owners: Owners = undefined;
+        try self.readOwners(&owners, a);
+        defer owners.deinit();
+
+        const root_abs = try std.fs.cwd().realpathAlloc(a, pkg_dir);
+        defer a.free(root_abs);
+
+        // One shortcut name can be listed for several programs (an x64 and an
+        // ARM build name their files differently); only the one present counts.
+        var made = std.StringHashMap(void).init(a);
+        defer made.deinit();
+        var missing = std.ArrayList([]const u8).init(a);
+        defer missing.deinit();
+
+        for (pkg.app_bundles) |raw| {
+            const e = winapp.parseEntry(raw) orelse continue;
+            const rel = (try winapp.findProgram(a, root_abs, e.exe)) orelse {
+                try missing.append(e.display);
+                continue;
+            };
+            defer a.free(rel);
+            const target = try std.fs.path.join(a, &.{ root_abs, rel });
+            defer a.free(target);
+            const work_dir = std.fs.path.dirname(target) orelse root_abs;
+
+            const lnk_name = try winapp.shortcutFileName(a, e);
+            defer a.free(lnk_name);
+            const lnk = try std.fs.path.join(a, &.{ self.apps_root, lnk_name });
+            defer a.free(lnk);
+
+            // Only a shortcut this package made may be replaced.
+            if (platform.pathExists(lnk)) {
+                const owner = ownerOf(owners.recs.items, "app", lnk_name);
+                if (owner == null or !std.mem.eql(u8, owner.?, pkg.name)) {
+                    term.err("{s}warning{s}: the Start Menu already has {s} and abv0 did not put it there for '{s}'; leaving it alone\n", .{ term.yellow, term.reset, lnk_name, pkg.name });
+                    continue;
+                }
+            }
+            dropOwner(&owners.recs, "app", lnk_name);
+            winapp.writeShortcut(a, lnk, target, work_dir) catch |err| {
+                term.err("{s}warning{s}: could not make the Start Menu shortcut for {s}: {s}\n", .{ term.yellow, term.reset, e.display, @errorName(err) });
+                continue;
+            };
+            try owners.recs.append(.{ .kind = "app", .name = try owners.arena.allocator().dupe(u8, lnk_name), .pkg = pkg.name });
+            try made.put(e.display, {});
+            if (!opts.quiet) term.print("  {s}app{s}      {s} {s}(Start Menu){s}\n", .{ term.green, term.reset, e.display, term.dim, term.reset });
+        }
+        for (missing.items) |d| {
+            if (made.contains(d)) continue;
+            try made.put(d, {});
+            term.err("{s}warning{s}: {s}: the program for {s} is not in the download; no shortcut made\n", .{ term.yellow, term.reset, pkg.name, d });
         }
         try self.writeOwners(a, owners.recs.items);
     }
@@ -1440,7 +1522,7 @@ pub const Store = struct {
                     if (removeBinFiles(a, self.bin_root, r.name, builtin.os.tag)) |gone| {
                         if (gone) removed = true;
                     } else |_| {}
-                } else if (std.mem.eql(u8, r.kind, "app") and isSafeAppName(r.name)) {
+                } else if (std.mem.eql(u8, r.kind, "app") and (isSafeAppName(r.name) or winapp.isSafeShortcutName(r.name))) {
                     const p = try std.fs.path.join(a, &.{ self.apps_root, r.name });
                     defer a.free(p);
                     if (std.fs.cwd().deleteTree(p)) |_| {
@@ -3615,4 +3697,40 @@ test "install refuses a package the scan blocks and links nothing" {
     // The user can still choose to install it.
     try s.install(pkg, "x86_64-linux", .{ .quiet = true, .allow_suspicious = true });
     try tmp.dir.access("bin/tool", .{});
+}
+
+test "Windows apps get a Start Menu shortcut that uninstall removes" {
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var s = try testStore(&tmp);
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try tmp.dir.makePath("store/tool@1.0@x86_64-windows/Tool-1.0/bin");
+    try tmp.dir.writeFile(.{ .sub_path = "store/tool@1.0@x86_64-windows/Tool-1.0/bin/Tool.exe", .data = "MZ" });
+    const pkg_dir = try std.fs.path.join(a, &.{ s.store_root, "tool@1.0@x86_64-windows" });
+    const plats = [_]registry.PlatformInfo{.{ .name = "x86_64-windows" }};
+    // A Mac bundle in the same list is ignored here; a bad name is refused.
+    const apps = [_][]const u8{ "Tool.app", "My Tool=Tool.exe", "..\\x.exe", "Missing.exe" };
+    const pkg = Package{ .name = "tool", .version = "1.0", .app_bundles = &apps, .platforms = &plats };
+
+    try s.linkWindowsApps(a, pkg, pkg_dir, .{ .quiet = true });
+    const lnk = try tmp.dir.readFileAlloc(a, "apps/My Tool.lnk", 1 << 16);
+    try testing.expectEqual(@as(u32, 0x4c), std.mem.readInt(u32, lnk[0..4], .little));
+    // The target is the real program, as an absolute path.
+    const want = try std.unicode.utf8ToUtf16LeAlloc(a, "Tool.exe");
+    try testing.expect(std.mem.indexOf(u8, lnk, std.mem.sliceAsBytes(want)) != null);
+    try testing.expectError(error.FileNotFound, tmp.dir.access("apps/Missing.lnk", .{}));
+
+    // A shortcut someone else made under the same name is left alone.
+    try tmp.dir.writeFile(.{ .sub_path = "apps/Other.lnk", .data = "theirs" });
+    const other = [_][]const u8{"Other=Tool.exe"};
+    try s.linkWindowsApps(a, .{ .name = "tool", .version = "1.0", .app_bundles = &other, .platforms = &plats }, pkg_dir, .{ .quiet = true });
+    try testing.expectEqualStrings("theirs", try tmp.dir.readFileAlloc(a, "apps/Other.lnk", 64));
+
+    _ = try s.uninstall(a, pkg);
+    try testing.expectError(error.FileNotFound, tmp.dir.access("apps/My Tool.lnk", .{}));
+    try testing.expectEqualStrings("theirs", try tmp.dir.readFileAlloc(a, "apps/Other.lnk", 64));
 }
