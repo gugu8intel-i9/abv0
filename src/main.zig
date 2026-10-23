@@ -49,6 +49,7 @@ const Args = struct {
     micro_split: bool = false,
     no_stream: bool = false,
     allow_unverified: bool = false,
+    allow_suspicious: bool = false,
     allow_unsigned_manifest: bool = false,
     /// `--color=auto|always|never`; `--no-color` means `never`.
     color: term.ColorMode = .auto,
@@ -137,6 +138,8 @@ fn parseArgsDiag(allocator: std.mem.Allocator, argv: []const []const u8, diag: *
             args.no_stream = true;
         } else if (std.mem.eql(u8, arg, "--allow-unverified")) {
             args.allow_unverified = true;
+        } else if (std.mem.eql(u8, arg, "--allow-suspicious")) {
+            args.allow_suspicious = true;
         } else if (std.mem.eql(u8, arg, "--allow-unsigned-manifest")) {
             args.allow_unsigned_manifest = true;
         } else if (std.mem.eql(u8, arg, "--registry")) {
@@ -268,6 +271,7 @@ fn explain(err: anyerror) []const u8 {
         net.Error.NoDownloaderAvailable => "no download tool found (install curl and make sure it is on PATH)",
         net.Error.UnsafeUrl => "refused a download URL that is not plain https",
         store.StoreError.ChecksumMismatch => "checksum mismatch: the download does not match the pinned sha256 (retry; if it persists, run `abv0 update`)",
+        store.StoreError.SuspiciousPackage => "the malware scan blocked it (use --allow-suspicious to install it anyway)",
         store.StoreError.ChecksumMissing => "no pinned checksum for this package (use --allow-unverified to install it anyway)",
         store.StoreError.BinaryConflict => "an executable with this name already belongs to another package (use --force to replace it)",
         store.StoreError.DownloadLooksLikeErrorPage => "the server sent an error page instead of the package (retry later)",
@@ -361,6 +365,7 @@ const platform_flag = Flag{ .name = "--platform <tag>", .help = "Target platform
 const jobs_flag = Flag{ .name = "-j, --jobs <n>", .help = "Parallel workers" };
 const file_flag = Flag{ .name = "-f, --file <path>", .help = "Manifest path (default: Brewfile)" };
 const unverified_flag = Flag{ .name = "--allow-unverified", .help = "Permit installs without a verified checksum" };
+const suspicious_flag = Flag{ .name = "--allow-suspicious", .help = "Install even if the malware scan blocks the package" };
 const unsigned_flag = Flag{ .name = "--allow-unsigned-manifest", .help = "Skip signature and replay checks (UNSAFE)" };
 const force_flag = Flag{ .name = "--force", .help = "Overwrite files and replace conflicting bin links" };
 const installed_flag = Flag{ .name = "--installed", .help = "Show what is installed, not the registry" };
@@ -373,9 +378,9 @@ const commands = [_]Command{
         .args = "<pkg|gh:owner/repo[@tag]>...",
         .summary = "Install packages and their dependencies, verified, in parallel. A gh:owner/repo spec installs that project's own GitHub release (no recipe needed), checked against GitHub's sha256 digest or the release's checksums file.",
         .flags = &.{
-            dry_run_flag,                                                                      json_flag,  jobs_flag,  platform_flag,
-            unverified_flag,                                                                   force_flag, quiet_flag, verbose_flag,
-            .{ .name = "--micro-split", .help = "Parallel ranged download for large assets" },
+            dry_run_flag,    json_flag,                                                                         jobs_flag,  platform_flag,
+            unverified_flag, suspicious_flag,                                                                   force_flag, quiet_flag,
+            verbose_flag,    .{ .name = "--micro-split", .help = "Parallel ranged download for large assets" },
         },
         .example = "abv0 install jq gh:BurntSushi/ripgrep",
     },
@@ -528,7 +533,7 @@ const commands = [_]Command{
     .{
         .name = "detect",
         .args = "<pkg>",
-        .summary = "Scan an installed package's executable for malware-like patterns (exit 1 if suspicious).",
+        .summary = "Scan every file of an installed package for malware-like patterns (exit 1 if anything is found).",
         .example = "abv0 detect jq",
     },
     .{
@@ -704,6 +709,7 @@ fn renderUsage(w: anytype) !void {
         \\  --registry <path>       Use this manifest (its <path>.sig must verify)
         \\  --allow-unsigned-manifest  Skip signature and replay checks (UNSAFE)
         \\  --allow-unverified      Permit installs without a verified checksum
+        \\  --allow-suspicious      Install even if the malware scan blocks the package (ABV0_NO_SCAN=1 skips the scan)
         \\  --micro-split           Parallel ranged download for large assets
         \\  --no-stream             Download fully before unpacking (disable streaming install)
         \\  --force                 Overwrite output files and replace conflicting bin links
@@ -1849,6 +1855,7 @@ fn run(base: std.mem.Allocator, a: std.mem.Allocator) !u8 {
         .micro_split = args.micro_split,
         .no_stream = args.no_stream,
         .allow_unverified = args.allow_unverified,
+        .allow_suspicious = args.allow_suspicious,
         .force = args.force,
         .quiet = output.quiet,
     };
@@ -3009,20 +3016,32 @@ fn cmdDetect(
         return 1;
     }
 
-    const bin = try st.resolveBinary(a, pkg, platform_name);
-    defer a.free(bin);
+    const pkg_dir = try st.pkgStorePath(a, pkg, platform_name);
+    defer a.free(pkg_dir);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const result = try @import("scan.zig").scanTree(arena.allocator(), pkg_dir);
 
-    var threat = try store.Store.scanFile(a, bin);
-    defer threat.deinit();
+    term.print("scanned {d} files ({d} KiB) in {s}\n\n", .{ result.files, result.bytes / 1024, pkg_dir });
+    printScan(result);
+    return if (result.findings.len == 0) 0 else 1;
+}
 
-    term.print("scanned {s}\n\n", .{bin});
-    if (threat.score == 0) {
-        term.print("{s}clean{s}  threat score 0/100\n", .{ term.green, term.reset });
-        return 0;
+/// The findings of a package scan, one line each.
+fn printScan(result: @import("scan.zig").Result) void {
+    if (result.findings.len == 0) {
+        term.print("{s}clean{s}\n", .{ term.green, term.reset });
+        return;
     }
-    term.print("{s}suspicious{s}  threat score {d}/100\n", .{ term.red, term.reset, threat.score });
-    for (threat.reasons.items) |r| term.print("  - {s}\n", .{r});
-    return 1;
+    if (result.blocked) {
+        term.print("{s}suspicious{s}  an install would be blocked\n", .{ term.red, term.reset });
+    } else {
+        term.print("{s}notes{s}  nothing that blocks an install\n", .{ term.yellow, term.reset });
+    }
+    for (result.findings) |f| {
+        const mark = if (f.strong) "!" else "-";
+        term.print("  {s} {s} ({}{s})\n", .{ mark, f.reason, safe(f.file), if (f.hidden) ", hidden in base64" else "" });
+    }
 }
 
 fn cmdUpdate(a: std.mem.Allocator, st: *store.Store, allow_unsigned: bool) !u8 {
@@ -3724,6 +3743,7 @@ comptime {
     _ = @import("sevenzip.zig");
     _ = @import("registry.zig");
     _ = @import("abvindex.zig");
+    _ = @import("scan.zig");
     _ = @import("net.zig");
     _ = @import("store.zig");
     _ = @import("cmds_extra.zig");

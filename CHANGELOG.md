@@ -4,6 +4,16 @@
 
 ### Security
 
+- **Install-time malware scan.** Every file of a newly unpacked package is scanned before
+  it is linked (src/scan.zig). Rules need several signs in the same file (download +
+  chmod in /tmp + background run; four saved-secret paths + a webhook), cover reverse
+  shells, miners, droppers, cron/launchd/Run-key persistence, ld.so.preload rootkits and
+  encoded execution, decode base64 runs in text files, and apply script-only rules to
+  text files only. A strong finding blocks the install (`--allow-suspicious` overrides,
+  `ABV0_NO_SCAN=1` disables); `abv0 detect` lists every finding and its file. The old
+  single-string patterns (`nicehash`, `nc -e`) matched 8 of 60 ordinary catalog tools.
+- **zig checksums fixed.** The three `zig` entries in `catalog/manual.json` carried wrong
+  SHA-256 values, so abv0 (correctly) refused to install zig; they now match ziglang.org.
 - **Maintainer signing key.** The development key is replaced by the maintainer's key
   (`keys/manifest.pub`). The catalog and `release/SHA256SUMS` are re-signed with it, and
   the release binaries are rebuilt to trust it. Catalogs signed with the old key are

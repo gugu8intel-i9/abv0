@@ -44,19 +44,19 @@
       "platforms": {
         "x86_64-macos": {
           "url": "https://ziglang.org/download/0.13.0/zig-macos-x86_64-0.13.0.tar.xz",
-          "sha256": "df06e87a2d480d1daea5040eec9a7861962a98f12cc20a10aa493397ab4ccbc1",
+          "sha256": "8b06ed1091b2269b700b3b07f8e3be3b833000841bae5aa6a09b1a8b4773effd",
           "archive_type": "tar.xz",
           "bin_path": "zig-macos-x86_64-0.13.0/zig"
         },
         "aarch64-macos": {
           "url": "https://ziglang.org/download/0.13.0/zig-macos-aarch64-0.13.0.tar.xz",
-          "sha256": "1bc78b3014a938c5b9679f2feaf1cd14fc8e5c2cfca50c6ca80bc4f78aa0e7d5",
+          "sha256": "46fae219656545dfaf4dce12fb4e8685cec5b51d721beee9389ab4194d43394c",
           "archive_type": "tar.xz",
           "bin_path": "zig-macos-aarch64-0.13.0/zig"
         },
         "x86_64-linux": {
           "url": "https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz",
-          "sha256": "0386ab4ec35850abdb158c5825cf8abf0d01b6973ba041b6ecbebb08ffbf78e7",
+          "sha256": "d45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea",
           "archive_type": "tar.xz",
           "bin_path": "zig-linux-x86_64-0.13.0/zig"
         }
