@@ -11,6 +11,7 @@ const safepath = @import("safepath.zig");
 const term = @import("term.zig");
 const net = @import("net.zig");
 const abvindex = @import("abvindex.zig");
+const tui = @import("tui.zig");
 const archive = @import("archive.zig");
 const bloom = @import("bloom.zig");
 const wal = @import("wal.zig");
@@ -418,6 +419,13 @@ const commands = [_]Command{
         .example = "abv0 list --installed",
     },
     .{
+        .name = "browse",
+        .args = "",
+        .summary = "Pick packages from the catalog in a full-screen list and install them. Type to search, arrow keys to move, space to pick, enter to install, esc to quit.",
+        .flags = &.{ platform_flag, unverified_flag, suspicious_flag, force_flag },
+        .example = "abv0 browse",
+    },
+    .{
         .name = "search",
         .args = "<query>",
         .summary = "Find registry packages whose name or description contains <query>. With --online, then ask GitHub's repository search and list projects you can install with gh:owner/repo.",
@@ -656,6 +664,7 @@ fn renderUsage(w: anytype) !void {
         \\  upgrade [--all|pkg]...  Upgrade outdated packages (keeps the previous version for rollback)
         \\  outdated                List packages with a newer version available (pinned ones marked)
         \\  list [--installed]      List registry packages, or what is installed
+        \\  browse                  Pick packages to install from a full-screen list
         \\  search [--online] <q>   Search the registry (and GitHub repositories with --online)
         \\  info <pkg>              Show metadata, installed versions, size and linked bins
         \\  deps [--tree] <pkg>     List what a package depends on
@@ -1764,7 +1773,7 @@ pub fn main() u8 {
 
 /// Commands that can download packages. Only these pay for loading the CA store.
 fn installsPackages(cmd: []const u8) bool {
-    const names = [_][]const u8{ "install", "upgrade", "bundle", "run", "shell" };
+    const names = [_][]const u8{ "install", "upgrade", "bundle", "run", "shell", "browse" };
     for (names) |name| {
         if (std.mem.eql(u8, cmd, name)) return true;
     }
@@ -1932,6 +1941,7 @@ fn run(base: std.mem.Allocator, a: std.mem.Allocator) !u8 {
     if (std.mem.eql(u8, cmd, "home")) return cmdHome(a, &st, &reg, &args, platform_name);
     if (std.mem.eql(u8, cmd, "migrate")) return cmdMigrate(a, &st, &reg, &args, platform_name, opts, &timer);
     if (std.mem.eql(u8, cmd, "install")) return cmdInstall(a, &st, &reg, &args, platform_name, opts, &timer);
+    if (std.mem.eql(u8, cmd, "browse")) return cmdBrowse(a, &st, &reg, &args, platform_name, opts, &timer);
     if (std.mem.eql(u8, cmd, "uninstall")) return cmdUninstall(a, &st, &reg, args.rest.items, platform_name);
     if (std.mem.eql(u8, cmd, "outdated")) return cmdOutdated(a, &st, &reg, platform_name, args.json);
     if (std.mem.eql(u8, cmd, "upgrade")) return cmdUpgrade(a, &st, &reg, args.rest.items, args.all, platform_name, opts, args.jobs);
@@ -2607,6 +2617,40 @@ fn writeMigrateJson(w: anytype, matched: []const cmds_extra.Match, unmatched: []
         try writeJsonString(w, n);
     }
     try w.writeAll("]");
+}
+
+/// `abv0 browse`: pick packages in a full-screen list, then install them as
+/// `abv0 install` would.
+fn cmdBrowse(
+    a: std.mem.Allocator,
+    st: *store.Store,
+    reg: *const registry.Registry,
+    args: *Args,
+    platform_name: []const u8,
+    opts: store.InstallOptions,
+    timer: *std.time.Timer,
+) !u8 {
+    const Installed = struct {
+        st: *store.Store,
+        platform_name: []const u8,
+        pub fn check(self: @This(), p: registry.Package) bool {
+            return self.st.isInstalled(p, self.platform_name);
+        }
+    };
+    term.flush();
+    const picked = tui.browse(a, reg, platform_name, Installed{ .st = st, .platform_name = platform_name }, term.green.len > 0) catch |e| switch (e) {
+        error.NotATerminal => {
+            term.err("{s}error{s}: browse needs an interactive terminal; use `abv0 search` and `abv0 install` in scripts\n", .{ term.red, term.reset });
+            return 2;
+        },
+        else => return e,
+    } orelse return 0;
+    if (picked.len == 0) return 0;
+    args.rest.clearRetainingCapacity();
+    try args.rest.appendSlice(picked);
+    // Reset the clock so the summary times the install, not the browsing.
+    timer.reset();
+    return cmdInstall(a, st, reg, args, platform_name, opts, timer);
 }
 
 fn cmdInstall(
@@ -3744,6 +3788,7 @@ comptime {
     _ = @import("registry.zig");
     _ = @import("abvindex.zig");
     _ = @import("scan.zig");
+    _ = @import("tui.zig");
     _ = @import("net.zig");
     _ = @import("store.zig");
     _ = @import("cmds_extra.zig");
