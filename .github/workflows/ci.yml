@@ -12,9 +12,9 @@ jobs:
     name: Linux (test, check, smoke)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: mlugg/setup-zig@v1
+      - uses: mlugg/setup-zig@53fc45b17fe98b52f92ee5ea08ff48a85a3e7eb7 # v1
         with:
           version: 0.13.0
 
@@ -47,9 +47,9 @@ jobs:
         os: [macos-15, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: mlugg/setup-zig@v1
+      - uses: mlugg/setup-zig@53fc45b17fe98b52f92ee5ea08ff48a85a3e7eb7 # v1
         with:
           version: 0.13.0
 
@@ -81,9 +81,9 @@ jobs:
           echo "ABV0_HOME=${RUNNER_TEMP}/abv0-home" >> "$GITHUB_ENV"
           echo "ABV0_BIN_DIR=${RUNNER_TEMP}/abv0-bin" >> "$GITHUB_ENV"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: mlugg/setup-zig@v1
+      - uses: mlugg/setup-zig@53fc45b17fe98b52f92ee5ea08ff48a85a3e7eb7 # v1
         with:
           version: 0.13.0
 
@@ -285,9 +285,9 @@ jobs:
     # needs no signing secret. The output is unsigned and only read back here.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: mlugg/setup-zig@v1
+      - uses: mlugg/setup-zig@53fc45b17fe98b52f92ee5ea08ff48a85a3e7eb7 # v1
         with:
           version: 0.13.0
 

@@ -57,9 +57,9 @@ jobs:
     # Room for a 50 minute rate-limit wait plus the downloads and validation.
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: mlugg/setup-zig@v1
+      - uses: mlugg/setup-zig@53fc45b17fe98b52f92ee5ea08ff48a85a3e7eb7 # v1
         with:
           version: 0.13.0
 
@@ -88,7 +88,7 @@ jobs:
       - name: Restore the ETag cache
         # REST lookups send If-None-Match from this cache; a 304 is free. One
         # cache per ISO week keeps it from growing without bound.
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .cache/catalog-etag
           key: catalog-etag-${{ steps.week.outputs.week }}-${{ github.run_id }}
@@ -122,7 +122,7 @@ jobs:
 
       - name: Save the ETag cache
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .cache/catalog-etag
           key: catalog-etag-${{ steps.week.outputs.week }}-${{ github.run_id }}
@@ -230,7 +230,7 @@ jobs:
 
       - name: Keep the build outputs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: catalog-unsigned
           path: |

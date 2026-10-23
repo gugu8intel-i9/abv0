@@ -1936,7 +1936,7 @@ fn run(base: std.mem.Allocator, a: std.mem.Allocator) !u8 {
     }
     if (std.mem.eql(u8, cmd, "self-update")) {
         const extra: []const []const u8 = if (args.check) &.{"--check"} else &.{};
-        return cmds_extra.cmdSelfUpdate(a, &st, null, if (args.rest.items.len > 0) args.rest.items else extra);
+        return cmds_extra.cmdSelfUpdate(a, &st, version, if (args.rest.items.len > 0) args.rest.items else extra);
     }
     if (std.mem.eql(u8, cmd, "list") and args.installed) {
         return writeInstalled(term.writer(), a, &st, platform_name, args.json);
@@ -2734,6 +2734,9 @@ fn printBrewRemoval(a: std.mem.Allocator, matched: []const cmds_extra.Match, wan
     var formulae = std.ArrayList(u8).init(a);
     var casks = std.ArrayList(u8).init(a);
     for (matched) |m| {
+        // The line is meant to be pasted into a shell: a folder name with
+        // anything else in it is left out rather than quoted.
+        if (!cmds_extra.isShellWord(m.wanted)) continue;
         var is_cask = false;
         for (wanted) |x| {
             if (std.mem.eql(u8, x.name, m.wanted)) is_cask = x.cask;
@@ -3088,7 +3091,7 @@ fn cmdMaintain(
     auto.markDone(a, st.root, "gc");
     if (cleared > 0) say("  {s}cleaned{s}  {d} temporary items\n", .{ term.dim, term.reset, cleared });
     if (auto.enabled("ABV0_AUTO_SELF_UPDATE")) {
-        if ((cmds_extra.cmdSelfUpdate(a, st, null, &.{}) catch 1) != 0) bad = 1;
+        if ((cmds_extra.cmdSelfUpdate(a, st, version, &.{}) catch 1) != 0) bad = 1;
     }
     auto.markDone(a, st.root, "maintain");
     return bad;
@@ -3143,6 +3146,13 @@ fn cmdAutoupdate(base: std.mem.Allocator, st: *store.Store, rest: []const []cons
 
     if (std.mem.eql(u8, sub, "on")) {
         const exe = try std.fs.selfExePathAlloc(a);
+        for ([_]?[]const u8{ exe, log, env.home, env.bin_dir }) |maybe| {
+            const path = maybe orelse continue;
+            if (!auto.isSafeJobPath(path)) {
+                term.err("{s}error{s}: cannot schedule with the path {}: it holds a control character, % or \"\n", .{ term.red, term.reset, safe(path) });
+                return 1;
+            }
+        }
         try std.fs.cwd().makePath(logs);
         const how = scheduleOn(a, st, exe, log, interval, env) catch |e| {
             const why: []const u8 = switch (e) {
