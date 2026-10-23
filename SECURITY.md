@@ -27,7 +27,7 @@ Everything derived from those inputs is validated before it reaches the filesyst
 
 ## Findings
 
-Findings 1 to 13 were fixed in 2.0.0. Findings 14 to 26 are in the Unreleased section of
+Findings 1 to 13 were fixed in 2.0.0. Findings 14 to 26 were fixed in 2.5.0 and are listed in the 2.5.0 section of
 [CHANGELOG.md](CHANGELOG.md). Findings 27 onward are in this file.
 
 The audit covered the whole tree. Severities are the author's assessment for a user
