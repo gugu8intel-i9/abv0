@@ -512,6 +512,10 @@ pub const Client = struct {
                 const next = try resolveRedirect(s.a, s.target, location);
                 s.a.free(s.target);
                 s.target = next;
+                // A request released with its body unread closes its
+                // connection; reading the (tiny) redirect body keeps it for
+                // the next download from the same host.
+                drainSmallBody(&s.req);
                 s.req.deinit();
                 s.have_req = false;
                 continue;
@@ -548,6 +552,30 @@ pub const Client = struct {
         const c = self.clientFor(host);
         const conn = try c.connect(host, 443, .tls);
         c.connection_pool.release(c.allocator, conn);
+    }
+
+    /// Send `HEAD /` to `host` and leave the connection idle in the pool. Unlike
+    /// `warm`, a request goes through, which proves the path works (some
+    /// proxies finish the handshake and reset the first request). A HEAD
+    /// response has no body, so the connection stays reusable; a GET whose
+    /// body is left unread would be closed when the request is released.
+    pub fn probe(self: *Client, host: []const u8, recv_timeout_s: u32) !void {
+        if (host.len == 0 or host.len > 253) return error.UnsafeUrl;
+        for (host) |c| {
+            if (c <= 0x20 or c == 0x7f or c == '/' or c == '@' or c == '\\' or c == '?' or c == '#' or c == ':') return error.UnsafeUrl;
+        }
+        var url_buf: [300]u8 = undefined;
+        const url = std.fmt.bufPrint(&url_buf, "https://{s}/", .{host}) catch return error.UnsafeUrl;
+        const uri = std.Uri.parse(url) catch return error.UnsafeUrl;
+        var header_buf: [16 * 1024]u8 = undefined;
+        var req = try self.clientFor(host).open(.HEAD, uri, .{
+            .server_header_buffer = &header_buf,
+            .redirect_behavior = .unhandled,
+            .headers = .{ .accept_encoding = .omit, .user_agent = .{ .override = user_agent } },
+        });
+        defer req.deinit();
+        if (req.connection) |conn| setSocketTimeouts(conn.stream.handle, recv_timeout_s);
+        try sendAndWait(&req);
     }
 
     /// Stream a GET response into `sink`, anything with `writeAll([]const u8)`.
@@ -625,6 +653,20 @@ pub const Stream = struct {
         a.destroy(self);
     }
 };
+
+/// Read and discard a response body of at most 64 KiB, so the connection can go
+/// back to the pool. A larger or failing body is left alone and the connection
+/// is closed as before.
+fn drainSmallBody(req: *std.http.Client.Request) void {
+    if (req.response.content_length) |n| if (n > 64 * 1024) return;
+    var buf: [4096]u8 = undefined;
+    var total: usize = 0;
+    while (total <= 64 * 1024) {
+        const n = req.read(&buf) catch return;
+        if (n == 0) return;
+        total += n;
+    }
+}
 
 fn sendAndWait(req: *std.http.Client.Request) !void {
     try req.send();
