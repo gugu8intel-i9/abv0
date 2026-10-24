@@ -22,6 +22,11 @@ on:
         type: boolean
         required: false
         default: false
+      discover:
+        description: "Search GitHub for new popular projects first (done every Monday anyway)"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write
@@ -35,7 +40,8 @@ jobs:
   catalog:
     name: Rebuild, sign and publish
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # Discovery and a rate-limit wait can each take most of an hour.
+    timeout-minutes: 170
     steps:
       - name: Require the signing key
         env:
@@ -68,6 +74,25 @@ jobs:
             catalog-etag-${{ steps.week.outputs.week }}-
             catalog-etag-
 
+      - name: Discover popular projects
+        # Weekly (and on request): a GraphQL search for popular projects with
+        # release downloads, written to catalog/auto-sources.txt. An incomplete
+        # search keeps the old file.
+        if: >-
+          (github.event_name == 'schedule' && startsWith(github.event.schedule, '17 3'))
+          || inputs.discover
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "schedule" ] && [ "$(date -u +%u)" != "1" ] && [ -f catalog/auto-sources.txt ]; then
+            echo "Not Monday; using the committed catalog/auto-sources.txt."
+            exit 0
+          fi
+          ./zig-out/bin/build-catalog discover --out catalog/auto-sources.txt --max-wait-min 40 \
+            || echo "::warning title=Discovery incomplete::the search stopped early; the previous list is used"
+          grep -vc '^#' catalog/auto-sources.txt || true
+
       - name: Build the catalog from upstream releases
         env:
           # 1,000 requests an hour per repository, shared with the other
@@ -82,6 +107,7 @@ jobs:
           set -euo pipefail
           mkdir -p .cache/catalog-etag
           args=(--sources catalog/sources.txt --manual catalog/manual.json
+                --auto-sources catalog/auto-sources.txt --rejects catalog/auto-rejects.txt
                 --out packages/index.json --previous packages/index.json
                 --max-wait-min 50 --etag-cache .cache/catalog-etag/etag.json
                 --summary "${RUNNER_TEMP}/catalog-summary.md")
@@ -128,12 +154,16 @@ jobs:
       - name: Commit and push if changed
         run: |
           set -euo pipefail
-          if git diff --quiet -- packages/index.json packages/index.json.sig; then
+          git add -N catalog/auto-sources.txt catalog/auto-rejects.txt 2>/dev/null || true
+          if git diff --quiet -- packages/index.json packages/index.json.sig catalog/auto-sources.txt catalog/auto-rejects.txt; then
             echo "Catalog unchanged; nothing to commit."
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add packages/index.json packages/index.json.sig
+          for f in catalog/auto-sources.txt catalog/auto-rejects.txt; do
+            if [ -f "$f" ]; then git add "$f"; fi
+          done
           git commit -m "chore(catalog): refresh packages from upstream releases"
           git push

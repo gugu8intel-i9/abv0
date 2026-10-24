@@ -23,6 +23,13 @@ hostile:
 Everything derived from those inputs is validated before it reaches the filesystem or a
 `exec` call.
 
+Packages that `build-catalog discover` finds are chosen by rules, not by a person: at
+least 500 stars, not a fork, mirror or archive, active, and at least six months old,
+which makes fake stars costly. They go through the same pipeline as hand-written
+sources: a pinned SHA-256 in the signed catalog, plus the malware scan both when the
+catalog is built and when the package is installed. Trust in such a package rests on its
+upstream project.
+
 ---
 
 ## Findings

@@ -2011,7 +2011,7 @@ pub const Store = struct {
         _ = self;
         std.fs.cwd().deleteFile(db_path) catch {};
 
-        const sql = std.fs.cwd().readFileAlloc(a, sql_path, 16 * 1024 * 1024) catch return false;
+        const sql = std.fs.cwd().readFileAlloc(a, sql_path, 64 * 1024 * 1024) catch return false;
         defer a.free(sql);
 
         var child = std.process.Child.init(&.{ "sqlite3", db_path }, a);

@@ -15,3 +15,4 @@ pub const net = @import("src/net.zig");
 pub const bindetect = @import("src/bindetect.zig");
 pub const ghverify = @import("src/ghverify.zig");
 pub const winapp = @import("src/winapp.zig");
+pub const scan = @import("src/scan.zig");

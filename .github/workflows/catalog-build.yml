@@ -34,6 +34,7 @@ on:
       - "catalog/**"
       - "tools/build-catalog.zig"
       - "tools/catalog_api.zig"
+      - "tools/discover.zig"
       - "src/bindetect.zig"
       - ".github/workflows/catalog-build.yml"
 
@@ -55,7 +56,7 @@ jobs:
     name: Build, validate and publish unsigned
     runs-on: ubuntu-latest
     # Room for a 50 minute rate-limit wait plus the downloads and validation.
-    timeout-minutes: 90
+    timeout-minutes: 170
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -96,6 +97,25 @@ jobs:
             catalog-etag-${{ steps.week.outputs.week }}-
             catalog-etag-
 
+      - name: Discover popular projects
+        # The same search the daily Catalog workflow runs weekly. A partial
+        # search falls back to the committed list, if any.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          auto="${RUNNER_TEMP}/auto-sources.txt"
+          rejects="${RUNNER_TEMP}/auto-rejects.txt"
+          if [ -f catalog/auto-rejects.txt ]; then cp catalog/auto-rejects.txt "${rejects}"; fi
+          if ! ./zig-out/bin/build-catalog discover --out "${auto}" --max-wait-min 40 2>&1 | tee "${RUNNER_TEMP}/discover.log"; then
+            echo "::warning title=Discovery incomplete::the search stopped early"
+            if [ -f catalog/auto-sources.txt ]; then cp catalog/auto-sources.txt "${auto}"; fi
+          fi
+          touch "${auto}"
+          echo "discovered: $(grep -vc '^#' "${auto}" || true) projects"
+          echo "AUTO=${auto}" >> "${GITHUB_ENV}"
+          echo "REJECTS=${rejects}" >> "${GITHUB_ENV}"
+
       - name: Build the full catalog from upstream releases
         id: build
         env:
@@ -106,6 +126,7 @@ jobs:
           out="${RUNNER_TEMP}/catalog-out"
           mkdir -p "${out}" .cache/catalog-etag
           args=(--sources catalog/sources.txt --manual catalog/manual.json
+                --auto-sources "${AUTO}" --rejects "${REJECTS}"
                 --out "${out}/index.json" --previous "${PREVIOUS}"
                 --jobs "${CATALOG_JOBS}" --allow-failures
                 --max-wait-min 50 --etag-cache .cache/catalog-etag/etag.json
@@ -237,5 +258,8 @@ jobs:
             ${{ runner.temp }}/catalog-out/index.json
             ${{ runner.temp }}/build-summary.md
             ${{ runner.temp }}/build.log
+            ${{ runner.temp }}/auto-sources.txt
+            ${{ runner.temp }}/auto-rejects.txt
+            ${{ runner.temp }}/discover.log
           if-no-files-found: ignore
           retention-days: 14

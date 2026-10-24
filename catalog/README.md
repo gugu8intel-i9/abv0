@@ -7,6 +7,8 @@ hand. This directory holds its inputs.
 | :--- | :--- |
 | `sources.txt` | One upstream project per line. Each becomes a package built from that project's GitHub releases. |
 | `manual.json` | Hand-written entries for software that is not published as GitHub release assets (currently `zig` and `neofetch`). Copied through unchanged. |
+| `auto-sources.txt` | Written by `build-catalog discover` (every Monday): popular GitHub projects with release downloads, most stars first. Do not edit; a line in `sources.txt` with the same name or repository wins. |
+| `auto-rejects.txt` | Discovered repositories that had no usable download, with the day they were tried. Skipped for 30 days, then tried again. Written by the builder. |
 | `fixtures/` | Recorded GitHub API responses and assets for offline runs of the builder (ripgrep, fd and fzf). |
 
 ## How a project becomes a package
