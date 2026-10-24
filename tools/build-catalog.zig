@@ -53,6 +53,7 @@ const net = deps.net;
 const bindetect = deps.bindetect;
 const ghverify = deps.ghverify;
 const api = @import("catalog_api.zig");
+const discover = @import("discover.zig");
 
 const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -134,6 +135,11 @@ pub const Source = struct {
     win: []const []const u8 = &.{},
     /// `deps=a,b`: catalog packages this one needs; installed with it.
     deps: []const []const u8 = &.{},
+    /// Found by `discover` (catalog/auto-sources.txt), not written by hand.
+    /// Such a source is refreshed weekly, may be added at most
+    /// `max_new_auto` at a time, and a failure is remembered instead of
+    /// reported.
+    auto: bool = false,
     line: usize = 0,
 };
 
@@ -1631,6 +1637,18 @@ pub const Options = struct {
     use_graphql: bool = true,
     /// Repositories per GraphQL query.
     batch_size: usize = default_batch_size,
+    /// catalog/auto-sources.txt: sources found by `discover`. A name or
+    /// repository that is also in `sources_path` or the manual entries is
+    /// left out; the hand-written one wins.
+    auto_sources_path: ?[]const u8 = null,
+    /// Repositories that turned out unusable (`owner/repo day` lines), skipped
+    /// for `reject_days` and updated after the run.
+    rejects_path: ?[]const u8 = null,
+    /// Discovered packages added per run; the rest wait for the next run.
+    max_new_auto: usize = 500,
+    /// A discovered package is looked at again once in this many days.
+    auto_refresh_days: u32 = 7,
+    reject_days: u32 = 30,
     /// Test hooks: stand in for the network and the clock.
     transport: ?Transport = null,
     clock: ?api.Clock = null,
@@ -1645,7 +1663,54 @@ const Result = struct {
     status: Status = .skipped,
     entry: ?Entry = null,
     note: []const u8 = "",
+    /// A new discovered package whose programs are named after its owner,
+    /// not its repository: published as `owner-repo` (see `nameCheck`).
+    rename_to_owner: bool = false,
 };
+
+/// Lower-case letters and digits only.
+fn squash(buf: []u8, s: []const u8) []const u8 {
+    var n: usize = 0;
+    for (s) |c| {
+        if (n == buf.len) break;
+        if (std.ascii.isAlphanumeric(c)) {
+            buf[n] = std.ascii.toLower(c);
+            n += 1;
+        }
+    }
+    return buf[0..n];
+}
+
+/// A program name that belongs to `word` (a repository or owner name): one
+/// contains the other, ignoring case and punctuation, with at least three
+/// characters in common. `fd` and `fd-find`, `gitea` and `gitea`, `zen` and
+/// `zen-browser`; not `chrome-sandbox` and `react-native`.
+pub fn relatedName(bin: []const u8, word: []const u8) bool {
+    var b1: [128]u8 = undefined;
+    var b2: [128]u8 = undefined;
+    const b = squash(&b1, bin);
+    const w = squash(&b2, word);
+    const short = @min(b.len, w.len);
+    if (short < 2) return false;
+    if (short < 3 and !std.mem.eql(u8, b, w)) return false;
+    return std.mem.indexOf(u8, w, b) != null or std.mem.indexOf(u8, b, w) != null;
+}
+
+pub const NameCheck = enum { repo, owner, none };
+
+/// Whether a discovered project's programs are named after it. One that
+/// ships only helpers (`chrome-sandbox`, `updater`) is not the tool its name
+/// promises; one whose programs carry only the owner's name gets `owner-repo`
+/// so a generic repository name (`desktop`) is not taken.
+pub fn nameCheck(bins: []const []const u8, owner: []const u8, repo: []const u8) NameCheck {
+    for (bins) |b| {
+        if (relatedName(b, repo)) return .repo;
+    }
+    for (bins) |b| {
+        if (relatedName(b, owner)) return .owner;
+    }
+    return .none;
+}
 
 const Outcome = union(enum) {
     built: Entry,
@@ -1678,8 +1743,22 @@ const Ctx = struct {
     results: []Result,
     arenas: []std.heap.ArenaAllocator,
     tmp_root: []const u8,
+    /// Sources this run leaves alone (discovered ones outside today's slice or
+    /// beyond the per-run limit). Empty means none.
+    deferred: []const bool = &.{},
     done: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
 };
+
+fn isDeferred(ctx: *const Ctx, i: usize) bool {
+    return i < ctx.deferred.len and ctx.deferred[i];
+}
+
+/// Which day of the refresh cycle a discovered package is looked at: a stable
+/// hash of its name, so the work is spread evenly over the week.
+pub fn refreshSlot(name: []const u8, days: u32) u32 {
+    if (days <= 1) return 0;
+    return @intCast(std.hash.Fnv1a_32.hash(name) % days);
+}
 
 const Local = struct { asset: usize, path: []const u8, sha: [64]u8 };
 
@@ -1948,6 +2027,18 @@ fn buildEntry(ctx: *Ctx, a: Allocator, src: Source, prev: ?Entry, index: usize) 
             detect_error = try std.fmt.allocPrint(a, "cannot unpack {s}: {s}", .{ asset.name, @errorName(e) });
             continue;
         };
+        // The same scan abv0 runs at install time: a package it would refuse
+        // never gets into the catalog.
+        const scanned = deps.scan.scanTree(a, x_dir) catch |e| {
+            detect_error = try std.fmt.allocPrint(a, "cannot scan {s}: {s}", .{ asset.name, @errorName(e) });
+            continue;
+        };
+        if (scanned.blocked) {
+            for (scanned.findings) |f| {
+                if (f.strong) return failf(a, "malware scan: {s} ({s})", .{ f.reason, f.file });
+            }
+            return failf(a, "malware scan blocked {s}", .{asset.name});
+        }
         var root = try std.fs.cwd().openDir(x_dir, .{ .iterate = true });
         defer root.close();
         const found = try bindetect.findExecutables(a, root, stdOs(osOfPlatform(pi)));
@@ -2476,7 +2567,8 @@ fn collectLookups(arena: Allocator, ctx: *Ctx) ![]api.RepoRequest {
     var accs = std.ArrayList(Acc).init(arena);
     var index = std.StringHashMap(usize).init(arena);
 
-    for (ctx.sources) |src| {
+    for (ctx.sources, 0..) |src, si| {
+        if (isDeferred(ctx, si)) continue;
         if (ctx.only) |only| {
             if (!only.contains(src.name)) continue;
         }
@@ -2518,18 +2610,35 @@ fn processSource(ctx: *Ctx, a: Allocator, res: Allocator, i: usize) Result {
         }
     }
 
+    if (isDeferred(ctx, i)) {
+        if (prev) |p| return .{ .status = .kept, .entry = p, .note = "checked weekly" };
+        return .{ .status = .not_selected };
+    }
+
     const outcome = buildEntry(ctx, a, src, prev, i) catch |e|
         failf(a, "unexpected error: {s}", .{@errorName(e)});
 
     switch (outcome) {
         .reuse => return .{ .status = .kept, .entry = prev.?, .note = "unchanged" },
         .built => |e| {
+            var rename = false;
+            if (src.auto and prev == null) {
+                switch (nameCheck(e.bin, src.owner, src.repo)) {
+                    .repo => {},
+                    .owner => rename = true,
+                    .none => {
+                        var names = std.ArrayList(u8).init(res);
+                        for (e.bin, 0..) |b, k| names.writer().print("{s}{s}", .{ if (k != 0) ", " else "", b }) catch {};
+                        return .{ .status = .skipped, .note = std.fmt.allocPrint(res, "none of its programs ({s}) is named after {s}/{s}", .{ names.items, src.owner, src.repo }) catch "no program named after the project" };
+                    },
+                }
+            }
             const cloned = cloneEntry(res, e) catch @panic("out of memory");
             const note: []const u8 = if (prev) |p|
                 std.fmt.allocPrint(res, "was {s}", .{p.version}) catch ""
             else
                 "";
-            return .{ .status = if (prev == null) .new else .updated, .entry = cloned, .note = note };
+            return .{ .status = if (prev == null) .new else .updated, .entry = cloned, .note = note, .rename_to_owner = rename };
         },
         .fail => |msg| {
             const m = res.dupe(u8, msg) catch "failed";
@@ -2589,6 +2698,12 @@ pub const Report = struct {
     rate_waited_s: u64 = 0,
     bytes: u64 = 0,
     changed: bool = false,
+    /// Discovered sources: in the run, new this run, failed (remembered in
+    /// the rejects file), and left for a later run.
+    auto_sources: usize = 0,
+    auto_new: usize = 0,
+    auto_rejected: usize = 0,
+    auto_waiting: usize = 0,
 };
 
 pub fn formatUtc(buf: *[20]u8, epoch: i64) []const u8 {
@@ -2608,7 +2723,7 @@ pub fn formatUtc(buf: *[20]u8, epoch: i64) []const u8 {
 }
 
 fn readOptional(arena: Allocator, path: []const u8) !?[]u8 {
-    return std.fs.cwd().readFileAlloc(arena, path, 32 * 1024 * 1024) catch |e| switch (e) {
+    return std.fs.cwd().readFileAlloc(arena, path, 64 * 1024 * 1024) catch |e| switch (e) {
         error.FileNotFound => null,
         else => e,
     };
@@ -2626,6 +2741,42 @@ fn tempRoot(arena: Allocator) ![]u8 {
 }
 
 const status_order = [_]Status{ .new, .updated, .stale, .skipped, .limited, .kept };
+
+/// `owner/repo day` lines (day = days since the epoch), lower-cased keys.
+pub fn parseRejects(arena: Allocator, text: []const u8) !std.StringHashMap(i64) {
+    var map = std.StringHashMap(i64).init(arena);
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+        var it = std.mem.tokenizeAny(u8, line, " \t");
+        const repo = it.next() orelse continue;
+        const day = std.fmt.parseInt(i64, it.next() orelse continue, 10) catch continue;
+        if (ghrelease.parseSpec(repo) == null) continue;
+        try map.put(try std.ascii.allocLowerString(arena, repo), day);
+    }
+    return map;
+}
+
+pub fn renderRejects(a: Allocator, map: *const std.StringHashMap(i64)) ![]u8 {
+    var keys = std.ArrayList([]const u8).init(a);
+    var it = map.keyIterator();
+    while (it.next()) |k| try keys.append(k.*);
+    std.mem.sort([]const u8, keys.items, {}, struct {
+        fn lt(_: void, x: []const u8, y: []const u8) bool {
+            return std.mem.order(u8, x, y) == .lt;
+        }
+    }.lt);
+    var out = std.ArrayList(u8).init(a);
+    try out.appendSlice("# Discovered repositories without a usable download, retried after a while.\n# owner/repo  day-since-1970\n");
+    for (keys.items) |k| try out.writer().print("{s} {d}\n", .{ k, map.get(k).? });
+    return out.toOwnedSlice();
+}
+
+fn repoKey(a: Allocator, src: Source) ![]u8 {
+    const k = try std.fmt.allocPrint(a, "{s}/{s}", .{ src.owner, src.repo });
+    return std.ascii.lowerString(k, k);
+}
 
 pub fn execute(gpa: Allocator, opts: Options, out: anytype) !Report {
     var timer = try std.time.Timer.start();
@@ -2667,6 +2818,64 @@ pub fn execute(gpa: Allocator, opts: Options, out: anytype) !Report {
     var only_set = std.StringHashMap(void).init(arena);
     for (opts.only) |n| try only_set.put(n, {});
 
+    // ---- discovered sources ------------------------------------------------
+    const today: i64 = @divFloor(opts.now_epoch orelse std.time.timestamp(), 86400);
+    var rejects = std.StringHashMap(i64).init(arena);
+    if (opts.rejects_path) |rp| {
+        if (try readOptional(arena, rp)) |bytes| rejects = try parseRejects(arena, bytes);
+    }
+    var all_sources = std.ArrayList(Source).init(arena);
+    try all_sources.appendSlice(parsed.sources);
+    if (opts.auto_sources_path) |ap| {
+        if (try readOptional(arena, ap)) |bytes| {
+            const auto_parsed = try parseSources(arena, bytes);
+            var names = std.StringHashMap(void).init(arena);
+            var repos = std.StringHashMap(void).init(arena);
+            for (parsed.sources) |src| {
+                try names.put(src.name, {});
+                try repos.put(try repoKey(arena, src), {});
+            }
+            for (auto_parsed.sources) |src_in| {
+                var src = src_in;
+                if (src.kind != .cli) continue;
+                if (names.contains(src.name) or manual.contains(src.name)) continue;
+                const key = try repoKey(arena, src);
+                if (repos.contains(key)) continue;
+                if (rejects.get(key)) |day| {
+                    // Still in the catalog from before: keep refreshing it.
+                    if (today - day < opts.reject_days and !prev_loaded.entries.contains(src.name)) continue;
+                }
+                try names.put(src.name, {});
+                try repos.put(key, {});
+                src.auto = true;
+                try all_sources.append(src);
+            }
+        }
+    }
+    const sources = all_sources.items;
+
+    // Discovered packages: those already in the catalog are looked at on their
+    // day of the week; new ones are added `max_new_auto` per run, in file
+    // order (the most popular first).
+    const deferred = try arena.alloc(bool, sources.len);
+    @memset(deferred, false);
+    var report = Report{};
+    {
+        var new_budget = opts.max_new_auto;
+        const slot: u32 = @intCast(@mod(today, @as(i64, @max(opts.auto_refresh_days, 1))));
+        for (sources, 0..) |src, si| {
+            if (!src.auto) continue;
+            report.auto_sources += 1;
+            if (opts.only.len != 0) continue;
+            if (prev_loaded.entries.contains(src.name)) {
+                if (!opts.force and refreshSlot(src.name, opts.auto_refresh_days) != slot) deferred[si] = true;
+            } else if (new_budget == 0) {
+                deferred[si] = true;
+                report.auto_waiting += 1;
+            } else new_budget -= 1;
+        }
+    }
+
     const tmp_root = try tempRoot(arena);
     defer std.fs.cwd().deleteTree(tmp_root) catch {};
 
@@ -2685,9 +2894,9 @@ pub fn execute(gpa: Allocator, opts: Options, out: anytype) !Report {
         }
     }
 
-    const results = try arena.alloc(Result, parsed.sources.len);
+    const results = try arena.alloc(Result, sources.len);
     @memset(results, .{});
-    const arenas = try arena.alloc(std.heap.ArenaAllocator, parsed.sources.len);
+    const arenas = try arena.alloc(std.heap.ArenaAllocator, sources.len);
     for (arenas) |*x| x.* = std.heap.ArenaAllocator.init(gpa);
     defer for (arenas) |*x| x.deinit();
 
@@ -2695,12 +2904,13 @@ pub fn execute(gpa: Allocator, opts: Options, out: anytype) !Report {
         .gpa = gpa,
         .opts = opts,
         .net = &network,
-        .sources = parsed.sources,
+        .sources = sources,
         .prev = &prev_loaded.entries,
         .only = if (opts.only.len != 0) &only_set else null,
         .results = results,
         .arenas = arenas,
         .tmp_root = tmp_root,
+        .deferred = deferred,
     };
 
     // One GraphQL query per batch of repositories replaces two REST calls per
@@ -2717,14 +2927,14 @@ pub fn execute(gpa: Allocator, opts: Options, out: anytype) !Report {
         }
     }
 
-    if (opts.jobs <= 1 or parsed.sources.len <= 1) {
-        for (0..parsed.sources.len) |i| runTask(&ctx, i);
+    if (opts.jobs <= 1 or sources.len <= 1) {
+        for (0..sources.len) |i| runTask(&ctx, i);
     } else {
         var pool: std.Thread.Pool = undefined;
-        try pool.init(.{ .allocator = gpa, .n_jobs = @intCast(@min(opts.jobs, parsed.sources.len)) });
+        try pool.init(.{ .allocator = gpa, .n_jobs = @intCast(@min(opts.jobs, sources.len)) });
         defer pool.deinit();
         var wg: std.Thread.WaitGroup = .{};
-        for (0..parsed.sources.len) |i| pool.spawnWg(&wg, runTask, .{ &ctx, i });
+        for (0..sources.len) |i| pool.spawnWg(&wg, runTask, .{ &ctx, i });
         wg.wait();
     }
 
@@ -2733,11 +2943,34 @@ pub fn execute(gpa: Allocator, opts: Options, out: anytype) !Report {
     };
 
     // ---- assemble ----------------------------------------------------------
-    var report = Report{};
     var entries = std.ArrayList(Entry).init(arena);
     var in_sources = std.StringHashMap(void).init(arena);
-    for (parsed.sources, results) |src, r| {
-        try in_sources.put(src.name, {});
+    // Discovered packages that take `owner-repo` instead of the repository
+    // name; written back into the auto-sources file so the name sticks.
+    var used = std.StringHashMap(void).init(arena);
+    for (sources) |src| try used.put(src.name, {});
+    var mk = manual.keyIterator();
+    while (mk.next()) |k| try used.put(k.*, {});
+    const Rename = struct { old: []const u8, new: []const u8, repo: []const u8 };
+    var renames = std.ArrayList(Rename).init(arena);
+    for (sources, results) |src, *r| {
+        if (!r.rename_to_owner or r.entry == null) continue;
+        const long = try std.fmt.allocPrint(arena, "{s}-{s}", .{ src.owner, src.repo });
+        const new = std.ascii.lowerString(long, long);
+        if (!safepath.isValidId(new) or used.contains(new)) continue;
+        try used.put(new, {});
+        r.entry.?.name = new;
+        try renames.append(.{ .old = src.name, .new = new, .repo = try std.fmt.allocPrint(arena, "{s}/{s}", .{ src.owner, src.repo }) });
+    }
+    for (sources, results) |src, r| {
+        try in_sources.put(if (r.entry) |e| e.name else src.name, {});
+        if (src.auto) {
+            if (r.status == .new) report.auto_new += 1;
+            if (r.status == .skipped) {
+                report.auto_rejected += 1;
+                try rejects.put(try repoKey(arena, src), today);
+            }
+        }
         switch (r.status) {
             .new => report.new += 1,
             .updated => report.updated += 1,
@@ -2760,7 +2993,7 @@ pub fn execute(gpa: Allocator, opts: Options, out: anytype) !Report {
         report.manual += 1;
     }
 
-    try printSummary(out, parsed.sources, results, opts.only.len != 0);
+    try printSummary(out, sources, results, opts.only.len != 0);
 
     var removed = std.ArrayList([]const u8).init(arena);
     var pit = prev_loaded.entries.keyIterator();
@@ -2790,7 +3023,7 @@ pub fn execute(gpa: Allocator, opts: Options, out: anytype) !Report {
     if (opts.summary_path) |sp| {
         var md = std.ArrayList(u8).init(arena);
         const fetch_secs = @as(f64, @floatFromInt(timer.read())) / 1e9;
-        writeSummaryMarkdown(md.writer(), entries.items, parsed.sources, results, report, fetch_secs, opts.jobs) catch {};
+        writeSummaryMarkdown(md.writer(), entries.items, sources, results, report, fetch_secs, opts.jobs) catch {};
         std.fs.cwd().writeFile(.{ .sub_path = sp, .data = md.items }) catch |e| {
             try out.print("warning: cannot write {s}: {s}\n", .{ sp, @errorName(e) });
         };
@@ -2805,9 +3038,23 @@ pub fn execute(gpa: Allocator, opts: Options, out: anytype) !Report {
     // survive as "stale", but a green run that updated nothing would hide the
     // problem, so it is an error instead. A rate limit is not counted here:
     // those sources are carried forward and reported on their own.
-    const attempted = report.new + report.updated + report.kept + report.stale + report.skipped;
-    if (!opts.allow_failures and attempted >= 10 and (report.stale + report.skipped) * 2 > attempted) {
-        try out.print("error: {d} of {d} sources failed (network?); not writing {s} (use --allow-failures)\n", .{ report.stale + report.skipped, attempted, opts.out_path });
+    // Discovered sources are left out: many of them fail by nature (no
+    // download for any platform), which says nothing about the network.
+    var attempted: usize = 0;
+    var failed: usize = 0;
+    for (sources, results) |src, r| {
+        if (src.auto) continue;
+        switch (r.status) {
+            .new, .updated, .kept => attempted += 1,
+            .stale, .skipped => {
+                attempted += 1;
+                failed += 1;
+            },
+            else => {},
+        }
+    }
+    if (!opts.allow_failures and attempted >= 10 and failed * 2 > attempted) {
+        try out.print("error: {d} of {d} sources failed (network?); not writing {s} (use --allow-failures)\n", .{ failed, attempted, opts.out_path });
         return error.TooManyFailures;
     }
     if (!opts.allow_shrink and prev_loaded.entries.count() >= 10 and entries.items.len * 2 < prev_loaded.entries.count()) {
@@ -2849,21 +3096,70 @@ pub fn execute(gpa: Allocator, opts: Options, out: anytype) !Report {
     }
     try std.fs.cwd().rename(tmp_out, opts.out_path);
 
+    if (renames.items.len != 0) {
+        if (opts.auto_sources_path) |ap| {
+            const text_in = try std.fs.cwd().readFileAlloc(arena, ap, 64 * 1024 * 1024);
+            var rewritten = std.ArrayList(u8).init(arena);
+            var lit = std.mem.splitScalar(u8, text_in, '\n');
+            var first_line = true;
+            while (lit.next()) |line| {
+                if (!first_line) try rewritten.append('\n');
+                first_line = false;
+                var toks = std.mem.tokenizeAny(u8, line, " \t");
+                const n0 = toks.next() orelse "";
+                const r0 = toks.next() orelse "";
+                var replaced = false;
+                for (renames.items) |rn| {
+                    if (std.mem.eql(u8, n0, rn.old) and std.mem.eql(u8, r0, rn.repo)) {
+                        try rewritten.writer().print("{s} {s}", .{ rn.new, rn.repo });
+                        replaced = true;
+                        break;
+                    }
+                }
+                if (!replaced) try rewritten.appendSlice(line);
+            }
+            std.fs.cwd().writeFile(.{ .sub_path = ap, .data = rewritten.items }) catch |e| {
+                try out.print("warning: cannot write {s}: {s}\n", .{ ap, @errorName(e) });
+            };
+        }
+        for (renames.items) |rn| try out.print("named {s} for {s}: its programs carry the owner's name\n", .{ rn.new, rn.repo });
+    }
+    if (opts.rejects_path) |rp| {
+        // Old rejects expire, so a project that starts publishing builds is
+        // found again; one that is in the catalog now is no longer a reject.
+        var keep = std.StringHashMap(i64).init(arena);
+        var rit = rejects.iterator();
+        while (rit.next()) |kv| {
+            if (today - kv.value_ptr.* < opts.reject_days) try keep.put(kv.key_ptr.*, kv.value_ptr.*);
+        }
+        for (sources, results) |src, r| {
+            if (r.entry != null) _ = keep.remove(try repoKey(arena, src));
+        }
+        std.fs.cwd().writeFile(.{ .sub_path = rp, .data = try renderRejects(arena, &keep) }) catch |e| {
+            try out.print("warning: cannot write {s}: {s}\n", .{ rp, @errorName(e) });
+        };
+    }
+    if (report.auto_sources != 0) {
+        try out.print("discovered: {d} sources, {d} added this run, {d} without a usable download (remembered for {d} days), {d} waiting for a later run\n", .{
+            report.auto_sources, report.auto_new, report.auto_rejected, opts.reject_days, report.auto_waiting,
+        });
+    }
+
     const secs = @as(f64, @floatFromInt(timer.read())) / 1e9;
     try out.print(
         "\n{d} packages in {s} ({s}): {d} new, {d} updated, {d} kept, {d} carried, {d} stale, {d} skipped, {d} rate limited, {d} manual\n" ++
             "API calls: {d} ({d} GraphQL, {d} REST, {d} not modified)   waited for rate limits: {d} s   downloaded: {d:.1} MB   time: {d:.1}s ({d} jobs)   registry check: 0 rejected\n",
         .{
-            report.packages,                                                                           opts.out_path,
-            if (report.changed) "changed" else "unchanged",                                            report.new,
-            report.updated,                                                                            report.kept,
-            report.carried,                                                                            report.stale,
-            report.skipped,                                                                            report.limited,
-            report.manual,                                                                             report.api_calls,
-            report.graphql_calls,                                                                      report.api_calls -| report.graphql_calls,
-            report.etag_hits,                                                                          report.rate_waited_s,
-            @as(f64, @floatFromInt(report.bytes)) / 1048576.0,                                         secs,
-            if (opts.jobs <= 1 or parsed.sources.len <= 1) 1 else @min(opts.jobs, parsed.sources.len),
+            report.packages,                                                             opts.out_path,
+            if (report.changed) "changed" else "unchanged",                              report.new,
+            report.updated,                                                              report.kept,
+            report.carried,                                                              report.stale,
+            report.skipped,                                                              report.limited,
+            report.manual,                                                               report.api_calls,
+            report.graphql_calls,                                                        report.api_calls -| report.graphql_calls,
+            report.etag_hits,                                                            report.rate_waited_s,
+            @as(f64, @floatFromInt(report.bytes)) / 1048576.0,                           secs,
+            if (opts.jobs <= 1 or sources.len <= 1) 1 else @min(opts.jobs, sources.len),
         },
     );
     if (report.limited != 0) {
@@ -2921,13 +3217,20 @@ fn writeSummaryMarkdown(
         try w.writeAll("\n");
     }
 
-    if (report.stale + report.skipped == 0) {
+    if (report.auto_sources != 0) {
+        try w.print("#### Discovered projects\n\n{d} in the run, {d} added, {d} without a usable download (retried later), {d} waiting for a later run.\n\n", .{
+            report.auto_sources, report.auto_new, report.auto_rejected, report.auto_waiting,
+        });
+    }
+    const listed = report.stale + report.skipped -| report.auto_rejected;
+    if (listed == 0) {
         try w.writeAll("No source failed.\n");
         return;
     }
-    try w.print("#### Failures ({d})\n\n| Package | Source | Outcome | Reason |\n| :--- | :--- | :--- | :--- |\n", .{report.stale + report.skipped});
+    try w.print("#### Failures ({d})\n\n| Package | Source | Outcome | Reason |\n| :--- | :--- | :--- | :--- |\n", .{listed});
     for (sources, results) |src, r| {
         if (r.status != .stale and r.status != .skipped) continue;
+        if (src.auto and r.status == .skipped) continue;
         try w.print("| {s} | {s}/{s} | {s} | ", .{ src.name, src.owner, src.repo, if (r.status == .stale) "stale" else "skipped" });
         try mdCell(w, r.note);
         try w.writeAll(" |\n");
@@ -2941,6 +3244,8 @@ fn printSummary(out: anytype, sources: []const Source, results: []const Result, 
             if (r.status != st) continue;
             // An unchanged package is the common case; list it only on request.
             if (st == .kept and !selective and sources.len > 40) continue;
+            // Discovered projects without a build are normal; they are counted.
+            if (src.auto and (st == .skipped or st == .not_selected)) continue;
             const ver = if (r.entry) |e| e.version else "-";
             const np = if (r.entry) |e| e.plats.len else 0;
             try out.print("{s:<8} {s:<24} {s:<16} {d}/6    {s}\n", .{ @tagName(st), src.name, ver, np, r.note });
@@ -2954,6 +3259,7 @@ fn printSummary(out: anytype, sources: []const Source, results: []const Result, 
 
 const usage =
     \\usage: build-catalog --sources FILE --out FILE [options]
+    \\       build-catalog discover --out catalog/auto-sources.txt [--min-stars 500]
     \\
     \\  --sources FILE          catalog/sources.txt: `name owner/repo [key=value ...]`
     \\  --out FILE              the registry to write (packages/index.json)
@@ -2977,6 +3283,12 @@ const usage =
     \\  --max-download-mb N     skip assets larger than this when they must be fetched
     \\  --allow-shrink          allow the catalog to lose more than half its packages
     \\  --allow-failures        write the catalog even when most sources failed
+    \\  --auto-sources FILE     also build the projects `discover` found (catalog/auto-sources.txt);
+    \\                          a hand-written source with the same name or repository wins
+    \\  --rejects FILE          discovered repositories with no usable download, skipped for
+    \\                          30 days; updated after the run
+    \\  --max-new-auto N        discovered packages added per run (default 500); each one
+    \\                          already in the catalog is looked at once a week
     \\
     \\Reads GITHUB_TOKEN from the environment: it raises the REST limit and enables
     \\the batched GraphQL lookups, which need a token.
@@ -2994,6 +3306,7 @@ pub fn main() !void {
     const gpa = gpa_state.allocator();
 
     const argv = try std.process.argsAlloc(gpa);
+    if (argv.len > 1 and std.mem.eql(u8, argv[1], "discover")) return discover.main(gpa, argv[2..]);
     var sources: ?[]const u8 = null;
     var out_path: ?[]const u8 = null;
     var opts = Options{ .sources_path = "", .out_path = "" };
@@ -3002,7 +3315,7 @@ pub fn main() !void {
     var i: usize = 1;
     while (i < argv.len) : (i += 1) {
         const arg = argv[i];
-        const value_opts = [_][]const u8{ "--sources", "--out", "--previous", "--manual", "--only", "--offline-fixtures", "--jobs", "--max-download-mb", "--summary", "--max-wait-min", "--etag-cache", "--batch" };
+        const value_opts = [_][]const u8{ "--sources", "--out", "--previous", "--manual", "--only", "--offline-fixtures", "--jobs", "--max-download-mb", "--summary", "--max-wait-min", "--etag-cache", "--batch", "--auto-sources", "--rejects", "--max-new-auto" };
         var needs_value = false;
         for (value_opts) |o| {
             if (std.mem.eql(u8, arg, o)) needs_value = true;
@@ -3019,6 +3332,12 @@ pub fn main() !void {
             out_path = value;
         } else if (std.mem.eql(u8, arg, "--previous")) {
             opts.previous_path = value;
+        } else if (std.mem.eql(u8, arg, "--auto-sources")) {
+            opts.auto_sources_path = value;
+        } else if (std.mem.eql(u8, arg, "--rejects")) {
+            opts.rejects_path = value;
+        } else if (std.mem.eql(u8, arg, "--max-new-auto")) {
+            opts.max_new_auto = std.fmt.parseInt(usize, value, 10) catch die("--max-new-auto wants a number", .{});
         } else if (std.mem.eql(u8, arg, "--manual")) {
             opts.manual_path = value;
         } else if (std.mem.eql(u8, arg, "--only")) {
@@ -3643,6 +3962,151 @@ test "when most sources fail nothing is written" {
     try testing.expectEqual(@as(usize, 12), r.skipped);
     try testing.expectEqual(@as(usize, 1), r.packages);
     try testing.expectEqual(@as(usize, 1), r.manual);
+}
+
+test "discovered sources: hand-written wins, a daily limit, failures remembered" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    var env = try TestEnv.init(a);
+    defer env.tmp.cleanup();
+
+    const bytes = "binary";
+    const h = hexOf(bytes);
+    for ([_][]const u8{ "widget", "gizmo" }) |n| {
+        try writeTestFile(env.tmp.dir, try std.fmt.allocPrint(a, "fx/acme__{s}.release.json", .{n}), try std.fmt.allocPrint(a,
+            \\{{"tag_name":"v1.0.0","assets":[{{"name":"{s}-linux-amd64","browser_download_url":"https://github.com/acme/{s}/releases/download/v1.0.0/{s}-linux-amd64","size":6,"digest":"sha256:{s}"}}]}}
+        , .{ n, n, n, &h }));
+        try writeTestFile(env.tmp.dir, try std.fmt.allocPrint(a, "fx/acme__{s}.repo.json", .{n}), widget_repo_json);
+        try writeTestFile(env.tmp.dir, try std.fmt.allocPrint(a, "fx/acme__{s}/{s}-linux-amd64", .{ n, n }), bytes);
+    }
+    try writeTestFile(env.tmp.dir, "sources.txt", "widget acme/widget bin=widget\n");
+    // A name clash and a repository clash with sources.txt are dropped;
+    // gizmo builds; twelve projects without a release fail.
+    var auto = std.ArrayList(u8).init(a);
+    try auto.appendSlice("widget someone/widget\nwidget2 acme/widget\ngizmo acme/gizmo\n");
+    for (0..12) |i| try auto.writer().print("dud{d} acme/dud{d}\n", .{ i, i });
+    try writeTestFile(env.tmp.dir, "auto.txt", auto.items);
+    const auto_path = try std.fs.path.join(a, &.{ env.root, "auto.txt" });
+    const rejects_path = try std.fs.path.join(a, &.{ env.root, "rejects.txt" });
+
+    var sink = std.ArrayList(u8).init(a);
+    var opts = Options{ .sources_path = env.sources, .out_path = env.out, .fixtures_dir = env.fixtures, .jobs = 1, .now_epoch = 1781740800, .quiet = true };
+    opts.auto_sources_path = auto_path;
+    opts.rejects_path = rejects_path;
+
+    // One new discovered package per run: only gizmo is tried.
+    opts.max_new_auto = 1;
+    const r1 = try execute(testing.allocator, opts, sink.writer());
+    try testing.expectEqual(@as(usize, 13), r1.auto_sources);
+    try testing.expectEqual(@as(usize, 1), r1.auto_new);
+    try testing.expectEqual(@as(usize, 12), r1.auto_waiting);
+    try testing.expectEqual(@as(usize, 2), r1.packages);
+
+    // With room for all, the twelve failures do not stop the run (they say
+    // nothing about the network) and are written to the rejects file.
+    opts.max_new_auto = 100;
+    opts.previous_path = env.out;
+    opts.out_path = try std.fs.path.join(a, &.{ env.root, "second.json" });
+    const r2 = try execute(testing.allocator, opts, sink.writer());
+    try testing.expectEqual(@as(usize, 12), r2.auto_rejected);
+    try testing.expectEqual(@as(usize, 2), r2.packages);
+    const rejects = try std.fs.cwd().readFileAlloc(a, rejects_path, 1 << 20);
+    try testing.expect(std.mem.indexOf(u8, rejects, "acme/dud0 ") != null);
+    try testing.expect(std.mem.indexOf(u8, rejects, "acme/gizmo") == null);
+
+    // The next run leaves them alone, and gizmo stays in the catalog.
+    opts.previous_path = opts.out_path;
+    opts.out_path = try std.fs.path.join(a, &.{ env.root, "third.json" });
+    const r3 = try execute(testing.allocator, opts, sink.writer());
+    try testing.expectEqual(@as(usize, 1), r3.auto_sources);
+    try testing.expectEqual(@as(usize, 0), r3.auto_rejected);
+    var reg = try registry.loadFromJsonFile(testing.allocator, opts.out_path, null);
+    defer reg.deinit();
+    try testing.expect(reg.get("gizmo") != null);
+    try testing.expect(reg.get("widget2") == null);
+
+    // A month later they are tried again.
+    opts.now_epoch = 1781740800 + 31 * 86400;
+    opts.previous_path = opts.out_path;
+    opts.out_path = try std.fs.path.join(a, &.{ env.root, "fourth.json" });
+    const r4 = try execute(testing.allocator, opts, sink.writer());
+    try testing.expectEqual(@as(usize, 13), r4.auto_sources);
+}
+
+test "a discovered package named after its owner's program becomes owner-repo, and the name sticks" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    var env = try TestEnv.init(a);
+    defer env.tmp.cleanup();
+    try env.tmp.dir.makePath("fx/zen__desktop");
+    try env.tmp.dir.makePath("fx/facebook__native");
+
+    // zen/desktop ships `zen`; facebook/native ships only a sandbox helper.
+    const Pkg = struct { owner: []const u8, repo: []const u8, member: []const u8 };
+    for ([_]Pkg{ .{ .owner = "zen", .repo = "desktop", .member = "zen-1.0/zen" }, .{ .owner = "facebook", .repo = "native", .member = "native-1.0/chrome-sandbox" } }) |pk| {
+        var tar = std.ArrayList(u8).init(a);
+        try tarMember(&tar, pk.member, 0o755, "\x7fELF program");
+        try tar.appendNTimes(0, 1024);
+        const h = hexOf(tar.items);
+        const asset = try std.fmt.allocPrint(a, "{s}-1.0-x86_64-unknown-linux-gnu.tar", .{pk.repo});
+        try writeTestFile(env.tmp.dir, try std.fmt.allocPrint(a, "fx/{s}__{s}.release.json", .{ pk.owner, pk.repo }), try std.fmt.allocPrint(a,
+            \\{{"tag_name":"v1.0.0","assets":[{{"name":"{s}","browser_download_url":"https://github.com/{s}/{s}/releases/download/v1.0.0/{s}","size":{d},"digest":"sha256:{s}"}}]}}
+        , .{ asset, pk.owner, pk.repo, asset, tar.items.len, &h }));
+        try writeTestFile(env.tmp.dir, try std.fmt.allocPrint(a, "fx/{s}__{s}.repo.json", .{ pk.owner, pk.repo }), widget_repo_json);
+        try writeTestFile(env.tmp.dir, try std.fmt.allocPrint(a, "fx/{s}__{s}/{s}", .{ pk.owner, pk.repo, asset }), tar.items);
+    }
+    try writeTestFile(env.tmp.dir, "sources.txt", "");
+    try writeTestFile(env.tmp.dir, "auto.txt", "# list\ndesktop zen/desktop\nnative facebook/native\n");
+
+    var sink = std.ArrayList(u8).init(a);
+    var opts = Options{ .sources_path = env.sources, .out_path = env.out, .fixtures_dir = env.fixtures, .jobs = 1, .now_epoch = 1781740800, .quiet = true };
+    opts.auto_sources_path = try std.fs.path.join(a, &.{ env.root, "auto.txt" });
+    opts.rejects_path = try std.fs.path.join(a, &.{ env.root, "rejects.txt" });
+    const r = try execute(testing.allocator, opts, sink.writer());
+    try testing.expectEqual(@as(usize, 1), r.packages);
+    try testing.expectEqual(@as(usize, 1), r.auto_rejected);
+
+    var reg = try registry.loadFromJsonFile(testing.allocator, env.out, null);
+    defer reg.deinit();
+    try testing.expect(reg.get("zen-desktop") != null);
+    try testing.expect(reg.get("desktop") == null);
+    // The list now carries the new name, so the next run finds the entry.
+    const list = try std.fs.cwd().readFileAlloc(a, opts.auto_sources_path.?, 1 << 20);
+    try testing.expectEqualStrings("# list\nzen-desktop zen/desktop\nnative facebook/native\n", list);
+    const rejects = try std.fs.cwd().readFileAlloc(a, opts.rejects_path.?, 1 << 20);
+    try testing.expect(std.mem.indexOf(u8, rejects, "facebook/native ") != null);
+
+    opts.previous_path = env.out;
+    opts.out_path = try std.fs.path.join(a, &.{ env.root, "second.json" });
+    const r2 = try execute(testing.allocator, opts, sink.writer());
+    try testing.expectEqual(@as(usize, 0), r2.auto_new);
+    try testing.expectEqual(@as(usize, 1), r2.packages);
+}
+
+test "nameCheck: programs must be named after the project" {
+    try testing.expectEqual(NameCheck.repo, nameCheck(&.{"gitea"}, "go-gitea", "gitea"));
+    try testing.expectEqual(NameCheck.repo, nameCheck(&.{ "rg", "ripgrep" }, "BurntSushi", "ripgrep"));
+    try testing.expectEqual(NameCheck.repo, nameCheck(&.{"fd"}, "sharkdp", "fd"));
+    try testing.expectEqual(NameCheck.owner, nameCheck(&.{ "zen", "updater" }, "zen-browser", "desktop"));
+    try testing.expectEqual(NameCheck.none, nameCheck(&.{ "chrome-sandbox", "chrome_crashpad_handler" }, "facebook", "react-native"));
+    try testing.expectEqual(NameCheck.none, nameCheck(&.{"forc"}, "FuelLabs", "sway"));
+    try testing.expect(!relatedName("a", "abc"));
+    try testing.expect(!relatedName("go", "gogs"));
+    try testing.expect(relatedName("gh", "gh"));
+}
+
+test "refreshSlot spreads names over the week" {
+    var seen = [_]bool{false} ** 7;
+    for (0..200) |i| {
+        var buf: [16]u8 = undefined;
+        seen[refreshSlot(std.fmt.bufPrint(&buf, "pkg{d}", .{i}) catch unreachable, 7)] = true;
+    }
+    for (seen) |x| try testing.expect(x);
+    try testing.expectEqual(@as(u32, 0), refreshSlot("x", 1));
 }
 
 // ---- GUI apps: parsing, picking, zip listing --------------------------------
@@ -4607,4 +5071,8 @@ test "an unchanged version is rebuilt when the line adds deps or win" {
     try testing.expect(!prevMatchesSource(.{ .name = "x", .owner = "o", .repo = "x", .win = &.{"X.exe"} }, prev));
     const prev_win = Entry{ .name = "x", .version = "1", .app_bundles = &.{ "X.app", "X=X.exe" }, .deps = &.{"y"} };
     try testing.expect(prevMatchesSource(.{ .name = "x", .owner = "o", .repo = "x", .deps = &.{"y"}, .win = &.{"X.exe"} }, prev_win));
+}
+
+test {
+    _ = discover;
 }

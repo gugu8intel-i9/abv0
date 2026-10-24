@@ -819,7 +819,7 @@ fn registryCached(a: std.mem.Allocator, st: *const store.Store) bool {
 // `<registry dir>/last-updated-at`. Without this an attacker could serve an
 // old, correctly signed manifest that still lists a vulnerable version.
 
-const max_manifest_bytes = 16 * 1024 * 1024;
+const max_manifest_bytes = 64 * 1024 * 1024;
 const max_sig_bytes = 4 * 1024;
 const stored_updated_at_name = "last-updated-at";
 

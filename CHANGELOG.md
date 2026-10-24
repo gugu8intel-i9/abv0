@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### New
+
+- **Thousands more packages, found automatically.** `build-catalog discover` searches
+  GitHub every week for popular projects (500+ stars, compiled languages, active, at least
+  six months old) whose latest release has downloads, and writes them to
+  `catalog/auto-sources.txt`. The first search found about 6,200 candidates; the daily
+  catalog build adds up to 500 of them per run (about 70% pass all checks). A project
+  must ship a program named after it or its owner (one named only after its owner is
+  published as `owner-repo`), and keeps its package name from then on. Each one gets the same checks as a
+  hand-written source: a pinned SHA-256 per platform, executables found by unpacking, and
+  now the malware scan as well. Each is re-checked weekly; projects without a usable
+  download are skipped for 30 days (`catalog/auto-rejects.txt`). Hand-written lines
+  always win.
+- The catalog builder runs abv0's malware scan on every download it unpacks, so a
+  package abv0 would refuse at install time never gets into the catalog.
+- abv0 reads catalogs up to 64 MB (was 16 MB), enough for tens of thousands of packages.
+
 ## 2.6.1 (2026-10-23)
 
 ### Security

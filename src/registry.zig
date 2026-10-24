@@ -320,7 +320,7 @@ pub const Manifest = struct {
         defer file.close();
         const st = try file.stat();
 
-        const bytes = try file.readToEndAlloc(arena.allocator(), 16 * 1024 * 1024);
+        const bytes = try file.readToEndAlloc(arena.allocator(), 64 * 1024 * 1024);
         if (bytes.len == 0) return error.EmptyManifest;
 
         return .{
