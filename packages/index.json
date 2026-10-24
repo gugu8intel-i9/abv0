@@ -1,6 +1,6 @@
 {
   "registry_version": 1,
-  "updated_at": "2026-10-23T08:31:52Z",
+  "updated_at": "2026-10-24T08:08:43Z",
   "packages": {
     "act": {
       "name": "act",
@@ -344,7 +344,7 @@
     },
     "alt-tab": {
       "name": "alt-tab",
-      "version": "11.10.0",
+      "version": "11.10.1",
       "description": "Windows alt-tab on macOS",
       "homepage": "https://alt-tab.app",
       "license": "GPL-3.0",
@@ -352,14 +352,14 @@
       "app_bundles": ["AltTab.app"],
       "platforms": {
         "aarch64-macos": {
-          "url": "https://github.com/lwouis/alt-tab-macos/releases/download/v11.10.0/AltTab-11.10.0.zip",
-          "sha256": "579a68222ab181bf56c64d1154aa47c9d623a921e5b13da9398b24e209892e23",
+          "url": "https://github.com/lwouis/alt-tab-macos/releases/download/v11.10.1/AltTab-11.10.1.zip",
+          "sha256": "aa353197537ccfd378dd4a7ff43030561ce7c62267dd0b31b385691b0e7f594c",
           "archive_type": "zip",
           "bin_path": ""
         },
         "x86_64-macos": {
-          "url": "https://github.com/lwouis/alt-tab-macos/releases/download/v11.10.0/AltTab-11.10.0.zip",
-          "sha256": "579a68222ab181bf56c64d1154aa47c9d623a921e5b13da9398b24e209892e23",
+          "url": "https://github.com/lwouis/alt-tab-macos/releases/download/v11.10.1/AltTab-11.10.1.zip",
+          "sha256": "aa353197537ccfd378dd4a7ff43030561ce7c62267dd0b31b385691b0e7f594c",
           "archive_type": "zip",
           "bin_path": ""
         }
@@ -4314,7 +4314,7 @@
     },
     "flyctl": {
       "name": "flyctl",
-      "version": "0.4.121",
+      "version": "0.4.122",
       "description": "Command line tools for fly.io services",
       "homepage": "https://fly.io",
       "license": "Apache-2.0",
@@ -4322,38 +4322,38 @@
       "app_bundles": [],
       "platforms": {
         "aarch64-linux": {
-          "url": "https://github.com/superfly/flyctl/releases/download/v0.4.121/flyctl_0.4.121_Linux_arm64.tar.gz",
-          "sha256": "78333a45431ae9e18a9230f11a1f9f86ee490a32a1b4b0ef6677e572a0282479",
+          "url": "https://github.com/superfly/flyctl/releases/download/v0.4.122/flyctl_0.4.122_Linux_arm64.tar.gz",
+          "sha256": "4abe70bae363e2257b7402439112b513b36bd779bf6c2514791e4a25a7b34e5f",
           "archive_type": "tar.gz",
           "bin_path": "flyctl"
         },
         "aarch64-macos": {
-          "url": "https://github.com/superfly/flyctl/releases/download/v0.4.121/flyctl_0.4.121_macOS_arm64.tar.gz",
-          "sha256": "5fa7b476f1f8d24f89126b03f1b97ffbbe6059a3c6bf33e9fa27ba99fa4d81a1",
+          "url": "https://github.com/superfly/flyctl/releases/download/v0.4.122/flyctl_0.4.122_macOS_arm64.tar.gz",
+          "sha256": "f352531d4a8fa78d20f2b1b9d53c47208e9f6d04e49bc0dc4a6b258fd817956d",
           "archive_type": "tar.gz",
           "bin_path": "flyctl"
         },
         "aarch64-windows": {
-          "url": "https://github.com/superfly/flyctl/releases/download/v0.4.121/flyctl_0.4.121_Windows_arm64.zip",
-          "sha256": "a77af892fa7922af13695698218a0181a1f05e16b00371801d389cbd783f360e",
+          "url": "https://github.com/superfly/flyctl/releases/download/v0.4.122/flyctl_0.4.122_Windows_arm64.zip",
+          "sha256": "c11feb5a167b97453a8a96cb3b976a7e69ee28ddaf0ce04b7b487b3793926af9",
           "archive_type": "zip",
           "bin_path": "flyctl.exe"
         },
         "x86_64-linux": {
-          "url": "https://github.com/superfly/flyctl/releases/download/v0.4.121/flyctl_0.4.121_Linux_x86_64.tar.gz",
-          "sha256": "cb17b6baddaf70791c47579cde416ef033caa991d63d8f4c7dc46c74f268d72f",
+          "url": "https://github.com/superfly/flyctl/releases/download/v0.4.122/flyctl_0.4.122_Linux_x86_64.tar.gz",
+          "sha256": "3d6ae2e2e24df47b46132e8920eebb7aec4ed0930dae2074369e59db89493cf2",
           "archive_type": "tar.gz",
           "bin_path": "flyctl"
         },
         "x86_64-macos": {
-          "url": "https://github.com/superfly/flyctl/releases/download/v0.4.121/flyctl_0.4.121_macOS_x86_64.tar.gz",
-          "sha256": "dff52d6a8522abed4fd2882eac7a71ece88cf09f71d6ef1f9338613db82ba891",
+          "url": "https://github.com/superfly/flyctl/releases/download/v0.4.122/flyctl_0.4.122_macOS_x86_64.tar.gz",
+          "sha256": "cc14a8e6f7c29eeee8ce85e50e70df74b16c8f516a05aaf85765ceb5c1accb31",
           "archive_type": "tar.gz",
           "bin_path": "flyctl"
         },
         "x86_64-windows": {
-          "url": "https://github.com/superfly/flyctl/releases/download/v0.4.121/flyctl_0.4.121_Windows_x86_64.zip",
-          "sha256": "30721469fa07304aac84950ccfcfaeb6277f858902fe2800eb1427cc4bb44a30",
+          "url": "https://github.com/superfly/flyctl/releases/download/v0.4.122/flyctl_0.4.122_Windows_x86_64.zip",
+          "sha256": "e96e1568f6f22f6f5248538918dae7a542d319fc36ba6d8e362e16ca5714549b",
           "archive_type": "zip",
           "bin_path": "flyctl.exe"
         }
@@ -4631,7 +4631,7 @@
     },
     "gh": {
       "name": "gh",
-      "version": "2.103.0",
+      "version": "2.103.2",
       "description": "GitHub’s official command line tool",
       "homepage": "https://cli.github.com",
       "license": "MIT",
@@ -4639,40 +4639,40 @@
       "app_bundles": [],
       "platforms": {
         "aarch64-linux": {
-          "url": "https://github.com/cli/cli/releases/download/v2.103.0/gh_2.103.0_linux_arm64.tar.gz",
-          "sha256": "7f322df34e624d14f5ec0c4acb121fd6dfa14392fdbbd1066aa8e0a05ac3721e",
+          "url": "https://github.com/cli/cli/releases/download/v2.103.2/gh_2.103.2_linux_arm64.tar.gz",
+          "sha256": "4c3e99a50bd8b181a3fe9d69b25dd978bac768148d88f01507c6b4d1ef61a443",
           "archive_type": "tar.gz",
-          "bin_path": "gh_2.103.0_linux_arm64/bin/gh"
+          "bin_path": "gh_2.103.2_linux_arm64/bin/gh"
         },
         "aarch64-macos": {
-          "url": "https://github.com/cli/cli/releases/download/v2.103.0/gh_2.103.0_macOS_arm64.zip",
-          "sha256": "54be566e9f614bea5de8021e95b9ad33dfee3b9d2ea120c9c294c00defaa5014",
+          "url": "https://github.com/cli/cli/releases/download/v2.103.2/gh_2.103.2_macOS_arm64.zip",
+          "sha256": "5416000f5d17580a187339e0c4068a01ca5c87f7d4fe6ca64933696f967bc418",
           "archive_type": "zip",
-          "bin_path": "gh_2.103.0_macOS_arm64/bin/gh"
+          "bin_path": "gh_2.103.2_macOS_arm64/bin/gh"
         },
         "aarch64-windows": {
-          "url": "https://github.com/cli/cli/releases/download/v2.103.0/gh_2.103.0_windows_arm64.zip",
-          "sha256": "bc8c27c396c683a7a823446fd0c16b923e60ec3fac5d26a875c646865d513a48",
+          "url": "https://github.com/cli/cli/releases/download/v2.103.2/gh_2.103.2_windows_arm64.zip",
+          "sha256": "cefaaa3efcd110ef7bf71071a2242b85fd3d2ac26d7d62e1082de6a1e60a81d6",
           "archive_type": "zip",
-          "bin_path": "gh_2.103.0_windows_arm64/bin/gh.exe"
+          "bin_path": "gh_2.103.2_windows_arm64/bin/gh.exe"
         },
         "x86_64-linux": {
-          "url": "https://github.com/cli/cli/releases/download/v2.103.0/gh_2.103.0_linux_amd64.tar.gz",
-          "sha256": "fdd768eb70f6409f80fcfa9f3a1c0adf0fc98d827ab3ce0bed2ac22762c5d786",
+          "url": "https://github.com/cli/cli/releases/download/v2.103.2/gh_2.103.2_linux_amd64.tar.gz",
+          "sha256": "62ccf747115ddc61237efffdde66a3c8f70ba249433dc64f70801089b59c59c8",
           "archive_type": "tar.gz",
-          "bin_path": "gh_2.103.0_linux_amd64/bin/gh"
+          "bin_path": "gh_2.103.2_linux_amd64/bin/gh"
         },
         "x86_64-macos": {
-          "url": "https://github.com/cli/cli/releases/download/v2.103.0/gh_2.103.0_macOS_amd64.zip",
-          "sha256": "64d1734941f104f996271c820daa50e96902c2618f9b4c1e63c41519517a9c6b",
+          "url": "https://github.com/cli/cli/releases/download/v2.103.2/gh_2.103.2_macOS_amd64.zip",
+          "sha256": "2dc7f1fc4761f96732995f6e4f4c6b4d705f2635da4126620c8b30eaa67b9c98",
           "archive_type": "zip",
-          "bin_path": "gh_2.103.0_macOS_amd64/bin/gh"
+          "bin_path": "gh_2.103.2_macOS_amd64/bin/gh"
         },
         "x86_64-windows": {
-          "url": "https://github.com/cli/cli/releases/download/v2.103.0/gh_2.103.0_windows_amd64.zip",
-          "sha256": "80c846a5b8432672ca6373b34ce9de998c9686aaa1885c845f2e1ee81f713726",
+          "url": "https://github.com/cli/cli/releases/download/v2.103.2/gh_2.103.2_windows_amd64.zip",
+          "sha256": "fef9fcdd8fdabd0501ab8b3d99eac976f504ab55d01bef9e8ef428a5d900ddda",
           "archive_type": "zip",
-          "bin_path": "gh_2.103.0_windows_amd64/bin/gh.exe"
+          "bin_path": "gh_2.103.2_windows_amd64/bin/gh.exe"
         }
       }
     },
@@ -5474,7 +5474,7 @@
     },
     "gosec": {
       "name": "gosec",
-      "version": "2.29.0",
+      "version": "2.30.0",
       "description": "Go security checker",
       "homepage": "https://securego.io",
       "license": "Apache-2.0",
@@ -5482,38 +5482,38 @@
       "app_bundles": [],
       "platforms": {
         "aarch64-linux": {
-          "url": "https://github.com/securego/gosec/releases/download/v2.29.0/gosec_2.29.0_linux_arm64.tar.gz",
-          "sha256": "c71244ec8d37488fd479d0d26990968fee03ece48b305d8224ac0c1ebd66e87c",
+          "url": "https://github.com/securego/gosec/releases/download/v2.30.0/gosec_2.30.0_linux_arm64.tar.gz",
+          "sha256": "0867994920453070a5d6a713e35921a3058473e5c3bf777fdd5a2d6f95313fda",
           "archive_type": "tar.gz",
           "bin_path": "gosec"
         },
         "aarch64-macos": {
-          "url": "https://github.com/securego/gosec/releases/download/v2.29.0/gosec_2.29.0_darwin_arm64.tar.gz",
-          "sha256": "7ab6a92c1983b7cb9df12b3ac20fb270afa43cfa12a143c354edae3109c763e5",
+          "url": "https://github.com/securego/gosec/releases/download/v2.30.0/gosec_2.30.0_darwin_arm64.tar.gz",
+          "sha256": "cac8c480673fc179798402b6d86efc12b6bcf11c18bcf377fda02cc55846dd97",
           "archive_type": "tar.gz",
           "bin_path": "gosec"
         },
         "aarch64-windows": {
-          "url": "https://github.com/securego/gosec/releases/download/v2.29.0/gosec_2.29.0_windows_arm64.tar.gz",
-          "sha256": "6165a36fe42ec5cbab06c1b42c1e26abb5d0b6dc789fb8661e6fe911cd30d460",
+          "url": "https://github.com/securego/gosec/releases/download/v2.30.0/gosec_2.30.0_windows_arm64.tar.gz",
+          "sha256": "836d13d37d53356d6214cdee7dae3fb2a3f9d5baf2b2ee38f6d2329c7c62e5aa",
           "archive_type": "tar.gz",
           "bin_path": "gosec.exe"
         },
         "x86_64-linux": {
-          "url": "https://github.com/securego/gosec/releases/download/v2.29.0/gosec_2.29.0_linux_amd64.tar.gz",
-          "sha256": "6431b119741c1f4a50fdfcf94e782e16b9e642afc8c7fa9b5d39d48bf3003095",
+          "url": "https://github.com/securego/gosec/releases/download/v2.30.0/gosec_2.30.0_linux_amd64.tar.gz",
+          "sha256": "3fcce2c4e802ff4169217874602a7df355e9a37bcb6ffaa34b08f3d5f336cdfb",
           "archive_type": "tar.gz",
           "bin_path": "gosec"
         },
         "x86_64-macos": {
-          "url": "https://github.com/securego/gosec/releases/download/v2.29.0/gosec_2.29.0_darwin_amd64.tar.gz",
-          "sha256": "a48152c3c009988f1750b6508316339c8b55076d24b1a958789e30ea2a21794c",
+          "url": "https://github.com/securego/gosec/releases/download/v2.30.0/gosec_2.30.0_darwin_amd64.tar.gz",
+          "sha256": "1b10b496954791f4b57448722f0cb93c0fa4aba24e9d286c0459dfde593e0898",
           "archive_type": "tar.gz",
           "bin_path": "gosec"
         },
         "x86_64-windows": {
-          "url": "https://github.com/securego/gosec/releases/download/v2.29.0/gosec_2.29.0_windows_amd64.tar.gz",
-          "sha256": "67cd5ca3a80280b27102a8d6482e7124e8a47bda240412a0fcd1bb7f1be96faf",
+          "url": "https://github.com/securego/gosec/releases/download/v2.30.0/gosec_2.30.0_windows_amd64.tar.gz",
+          "sha256": "503bdfe6155584f2497ef855846b66406bce5b574ce1a9c7a7bb171aff2caa02",
           "archive_type": "tar.gz",
           "bin_path": "gosec.exe"
         }
@@ -6013,7 +6013,7 @@
     },
     "hcloud": {
       "name": "hcloud",
-      "version": "1.70.1",
+      "version": "1.70.2",
       "description": "A command-line interface for Hetzner Cloud",
       "homepage": "https://github.com/hetznercloud/cli",
       "license": "MIT",
@@ -6021,38 +6021,38 @@
       "app_bundles": [],
       "platforms": {
         "aarch64-linux": {
-          "url": "https://github.com/hetznercloud/cli/releases/download/v1.70.1/hcloud-linux-arm64.tar.gz",
-          "sha256": "c9dbc00158d31131527e9ac5cb59b835fe8275ab7922f627d81b4e9bc2a2cebb",
+          "url": "https://github.com/hetznercloud/cli/releases/download/v1.70.2/hcloud-linux-arm64.tar.gz",
+          "sha256": "05820ba0e3141b212c7cff036d1bd7cd35843e96d7033c2036ffe76253ebbea8",
           "archive_type": "tar.gz",
           "bin_path": "hcloud"
         },
         "aarch64-macos": {
-          "url": "https://github.com/hetznercloud/cli/releases/download/v1.70.1/hcloud-darwin-arm64.tar.gz",
-          "sha256": "8b6f86e5f344acde2f127b96c32f39b95731c98ecef67c69e69fe4614a674e8a",
+          "url": "https://github.com/hetznercloud/cli/releases/download/v1.70.2/hcloud-darwin-arm64.tar.gz",
+          "sha256": "bdf2dd7e199a30f9096c0b5b2c7d4f6c4d5d6c9599bbe1f3a067cbf9c007634f",
           "archive_type": "tar.gz",
           "bin_path": "hcloud"
         },
         "aarch64-windows": {
-          "url": "https://github.com/hetznercloud/cli/releases/download/v1.70.1/hcloud-windows-arm64.zip",
-          "sha256": "ca092514b564a37360097c9417822a5175b157ad4b192c9060ee2c3991255a12",
+          "url": "https://github.com/hetznercloud/cli/releases/download/v1.70.2/hcloud-windows-arm64.zip",
+          "sha256": "470fbc1b1692475d31280bb7ce2a07f74bb01ea26e65bddfb4c399aee9fea57f",
           "archive_type": "zip",
           "bin_path": "hcloud.exe"
         },
         "x86_64-linux": {
-          "url": "https://github.com/hetznercloud/cli/releases/download/v1.70.1/hcloud-linux-amd64.tar.gz",
-          "sha256": "85182e0d51f9a26abeefd79b37de8a7fb51215d54c59ee290c3c9141e8aa887e",
+          "url": "https://github.com/hetznercloud/cli/releases/download/v1.70.2/hcloud-linux-amd64.tar.gz",
+          "sha256": "b844bd28240112b0254183ba5266d0a0f59a6167c196636936459755efb88050",
           "archive_type": "tar.gz",
           "bin_path": "hcloud"
         },
         "x86_64-macos": {
-          "url": "https://github.com/hetznercloud/cli/releases/download/v1.70.1/hcloud-darwin-amd64.tar.gz",
-          "sha256": "c1d131b59c57d1ceba650637e0f1635214f78429cb0d98d502087b88caa50ff4",
+          "url": "https://github.com/hetznercloud/cli/releases/download/v1.70.2/hcloud-darwin-amd64.tar.gz",
+          "sha256": "80e16dceafc20b68e3f42579ab6d1b2614f76bb3eaefc14943400e2473c6c46d",
           "archive_type": "tar.gz",
           "bin_path": "hcloud"
         },
         "x86_64-windows": {
-          "url": "https://github.com/hetznercloud/cli/releases/download/v1.70.1/hcloud-windows-amd64.zip",
-          "sha256": "a8c7325062f14aa882260d23d00d0d222d61cf4096471deaa507409bc455782a",
+          "url": "https://github.com/hetznercloud/cli/releases/download/v1.70.2/hcloud-windows-amd64.zip",
+          "sha256": "b513ff648f690f34183a085a9c40fa1908f083733835ceaead4162a9533d9c9b",
           "archive_type": "zip",
           "bin_path": "hcloud.exe"
         }
@@ -7603,7 +7603,7 @@
     },
     "kubeseal": {
       "name": "kubeseal",
-      "version": "0.40.0",
+      "version": "0.41.1",
       "description": "A Kubernetes controller and tool for one-way encrypted Secrets",
       "homepage": "https://github.com/bitnami-labs/sealed-secrets",
       "license": "Apache-2.0",
@@ -7611,32 +7611,32 @@
       "app_bundles": [],
       "platforms": {
         "aarch64-linux": {
-          "url": "https://github.com/bitnami/sealed-secrets/releases/download/v0.40.0/kubeseal-0.40.0-linux-arm64.tar.gz",
-          "sha256": "d82f01e9226d194ca7ebc13e3619edefd596b5b433582bcec3d5a8e8b1a03123",
+          "url": "https://github.com/bitnami/sealed-secrets/releases/download/v0.41.1/kubeseal-0.41.1-linux-arm64.tar.gz",
+          "sha256": "7dca73dbf926a7885201676b77cc266d13a77098462ca2bd32a80caad4642649",
           "archive_type": "tar.gz",
           "bin_path": "kubeseal"
         },
         "aarch64-macos": {
-          "url": "https://github.com/bitnami/sealed-secrets/releases/download/v0.40.0/kubeseal-0.40.0-darwin-arm64.tar.gz",
-          "sha256": "ec8a34b19ff8f1c1dee6fa09e13111b3007aa9ad08de1da28bd65cdc1eaecf93",
+          "url": "https://github.com/bitnami/sealed-secrets/releases/download/v0.41.1/kubeseal-0.41.1-darwin-arm64.tar.gz",
+          "sha256": "32f9bf892b327ba6671fc967c0809d48267300afb7402758dd36f0f7d71e636d",
           "archive_type": "tar.gz",
           "bin_path": "kubeseal"
         },
         "x86_64-linux": {
-          "url": "https://github.com/bitnami/sealed-secrets/releases/download/v0.40.0/kubeseal-0.40.0-linux-amd64.tar.gz",
-          "sha256": "9314c35916646e9d59c8f06b1314574b4e79c4d76f079433607ed7b697bb5eb7",
+          "url": "https://github.com/bitnami/sealed-secrets/releases/download/v0.41.1/kubeseal-0.41.1-linux-amd64.tar.gz",
+          "sha256": "f981491f7fe60eff263596be2b73e7c03367362d236701f8e35d09c827abb274",
           "archive_type": "tar.gz",
           "bin_path": "kubeseal"
         },
         "x86_64-macos": {
-          "url": "https://github.com/bitnami/sealed-secrets/releases/download/v0.40.0/kubeseal-0.40.0-darwin-amd64.tar.gz",
-          "sha256": "e165574e647029a562de2471caff444e06b33119f9546679e69492cdc3c6137f",
+          "url": "https://github.com/bitnami/sealed-secrets/releases/download/v0.41.1/kubeseal-0.41.1-darwin-amd64.tar.gz",
+          "sha256": "faaa3a7da5a8d8d46755be1add839f698041968178beb6348e6ab6508935b6a6",
           "archive_type": "tar.gz",
           "bin_path": "kubeseal"
         },
         "x86_64-windows": {
-          "url": "https://github.com/bitnami/sealed-secrets/releases/download/v0.40.0/kubeseal-0.40.0-windows-amd64.tar.gz",
-          "sha256": "e43f3208b41709f69eea03059fcfe5688152543184ee0d7454f0e6d709466821",
+          "url": "https://github.com/bitnami/sealed-secrets/releases/download/v0.41.1/kubeseal-0.41.1-windows-amd64.tar.gz",
+          "sha256": "1a79a5c5cfc9a1d8d623ba90db98147b6ab233e2d3bfaf5258760ecdd89225d9",
           "archive_type": "tar.gz",
           "bin_path": "kubeseal.exe"
         }
@@ -8830,7 +8830,7 @@
     },
     "mise": {
       "name": "mise",
-      "version": "2026.10.17",
+      "version": "2026.10.18",
       "description": "dev tools, env vars, task runner",
       "homepage": "https://mise.jdx.dev",
       "license": "MIT",
@@ -8838,38 +8838,38 @@
       "app_bundles": [],
       "platforms": {
         "aarch64-linux": {
-          "url": "https://github.com/jdx/mise/releases/download/v2026.10.17/mise-v2026.10.17-linux-arm64-musl.tar.zst",
-          "sha256": "3c46253e49924b0b47125c5c2ce92a9f705e1a49880801983e71150409f9028a",
+          "url": "https://github.com/jdx/mise/releases/download/v2026.10.18/mise-v2026.10.18-linux-arm64-musl.tar.zst",
+          "sha256": "bd9bbbc03cb07bc69fd62d34ab8e3d2ac6abf69c90c3dd9994ae792addb44b15",
           "archive_type": "tar.zst",
           "bin_path": "mise/bin/mise"
         },
         "aarch64-macos": {
-          "url": "https://github.com/jdx/mise/releases/download/v2026.10.17/mise-v2026.10.17-macos-arm64.tar.zst",
-          "sha256": "1c9b099c0eac519901dc3d35c161846a220c16ddbaa5fdc7cb7a696870184bc3",
+          "url": "https://github.com/jdx/mise/releases/download/v2026.10.18/mise-v2026.10.18-macos-arm64.tar.zst",
+          "sha256": "d141bc1b221f42f7b4d793d883a0cabf5ec8ec09faa2af9f5334c198b1ec835f",
           "archive_type": "tar.zst",
           "bin_path": "mise/bin/mise"
         },
         "aarch64-windows": {
-          "url": "https://github.com/jdx/mise/releases/download/v2026.10.17/mise-v2026.10.17-windows-arm64.zip",
-          "sha256": "d9fb396fa2a1f41b7c68275b6e0e6af4126c2ce138c61b19b819d502cfbf0f43",
+          "url": "https://github.com/jdx/mise/releases/download/v2026.10.18/mise-v2026.10.18-windows-arm64.zip",
+          "sha256": "5c5a74880527a7812214755588ad6c1d4bc27dbc3e4e4c5cc6d10b5aaafa17d9",
           "archive_type": "zip",
           "bin_path": "mise/bin/mise.exe"
         },
         "x86_64-linux": {
-          "url": "https://github.com/jdx/mise/releases/download/v2026.10.17/mise-v2026.10.17-linux-x64-musl.tar.zst",
-          "sha256": "6bd8587e46abb72627f45ba2852823fe4c4f83eb06fd00f80988624f444f3e26",
+          "url": "https://github.com/jdx/mise/releases/download/v2026.10.18/mise-v2026.10.18-linux-x64-musl.tar.zst",
+          "sha256": "9a7b9605b7a7f76b98d835322251229567e28c3e1de4be1bd6c3772ab1020c28",
           "archive_type": "tar.zst",
           "bin_path": "mise/bin/mise"
         },
         "x86_64-macos": {
-          "url": "https://github.com/jdx/mise/releases/download/v2026.10.17/mise-v2026.10.17-macos-x64.tar.zst",
-          "sha256": "7622d2eba3f886215b79803d9f806a8685fefee984b1c9d2eaabb6aae377e4ef",
+          "url": "https://github.com/jdx/mise/releases/download/v2026.10.18/mise-v2026.10.18-macos-x64.tar.zst",
+          "sha256": "206f2d9fbcd0667afebd4dda01f7274d284593d9f815ab02d440aee3dcc8b7fe",
           "archive_type": "tar.zst",
           "bin_path": "mise/bin/mise"
         },
         "x86_64-windows": {
-          "url": "https://github.com/jdx/mise/releases/download/v2026.10.17/mise-v2026.10.17-windows-x64.zip",
-          "sha256": "32bcfda5f72bf7cb189e18ba93c2798bffcb4a678fd004e3127780363f2d8c8c",
+          "url": "https://github.com/jdx/mise/releases/download/v2026.10.18/mise-v2026.10.18-windows-x64.zip",
+          "sha256": "2d1b8d8f36445ead743fd021ffef4c78e211226d129847553e22e4a83c1be946",
           "archive_type": "zip",
           "bin_path": "mise/bin/mise.exe"
         }
@@ -9070,7 +9070,7 @@
     },
     "moon": {
       "name": "moon",
-      "version": "2.6.3",
+      "version": "2.6.4",
       "description": "A build system and monorepo management tool for the web ecosystem, written in Rust.",
       "homepage": "https://moonrepo.dev/moon",
       "license": "MIT",
@@ -9078,32 +9078,32 @@
       "app_bundles": [],
       "platforms": {
         "aarch64-linux": {
-          "url": "https://github.com/moonrepo/moon/releases/download/v2.6.3/moon_cli-aarch64-unknown-linux-musl.tar.xz",
-          "sha256": "f008ab6470709f5c1bb4c4d13ba905d3d8463879579f372cb1424c65cc96c421",
+          "url": "https://github.com/moonrepo/moon/releases/download/v2.6.4/moon_cli-aarch64-unknown-linux-musl.tar.xz",
+          "sha256": "80b4cb713d48c81a2e1f86c0e3089ada71877523a1909bbc1b32a1505004d8e0",
           "archive_type": "tar.xz",
           "bin_path": "moon_cli-aarch64-unknown-linux-musl/moon"
         },
         "aarch64-macos": {
-          "url": "https://github.com/moonrepo/moon/releases/download/v2.6.3/moon_cli-aarch64-apple-darwin.tar.xz",
-          "sha256": "5ee67b1c0c734cf7998d7b8ac119624ed65af7fbde37de9c55d4cce99532ddf7",
+          "url": "https://github.com/moonrepo/moon/releases/download/v2.6.4/moon_cli-aarch64-apple-darwin.tar.xz",
+          "sha256": "3f2283247a723e26fc8462323ad48bfac01ac31b9f8b48cf210418bc1d8fec73",
           "archive_type": "tar.xz",
           "bin_path": "moon_cli-aarch64-apple-darwin/moon"
         },
         "x86_64-linux": {
-          "url": "https://github.com/moonrepo/moon/releases/download/v2.6.3/moon_cli-x86_64-unknown-linux-musl.tar.xz",
-          "sha256": "3255a69012eca5b7b79a2d1cfa45ec0d9bf9cdce132cd00bfd18d20a8b2d0591",
+          "url": "https://github.com/moonrepo/moon/releases/download/v2.6.4/moon_cli-x86_64-unknown-linux-musl.tar.xz",
+          "sha256": "690a561180de834befc7dcd855e6758db04aa148b8e8a3838f70e7ee955fded6",
           "archive_type": "tar.xz",
           "bin_path": "moon_cli-x86_64-unknown-linux-musl/moon"
         },
         "x86_64-macos": {
-          "url": "https://github.com/moonrepo/moon/releases/download/v2.6.3/moon_cli-x86_64-apple-darwin.tar.xz",
-          "sha256": "b25ce6afdedbf59561d48fcafa1098e9a970a54517180a32287b7f56610e4f50",
+          "url": "https://github.com/moonrepo/moon/releases/download/v2.6.4/moon_cli-x86_64-apple-darwin.tar.xz",
+          "sha256": "8e2353e208a77a41494dd0f9efcad5bfa9c0126332365f8e418ee0ca3c60e47f",
           "archive_type": "tar.xz",
           "bin_path": "moon_cli-x86_64-apple-darwin/moon"
         },
         "x86_64-windows": {
-          "url": "https://github.com/moonrepo/moon/releases/download/v2.6.3/moon_cli-x86_64-pc-windows-msvc.zip",
-          "sha256": "47ac01e8e28bfbcd2c65e515c294e935add0495902b29ab2874f1e6a3f9f5271",
+          "url": "https://github.com/moonrepo/moon/releases/download/v2.6.4/moon_cli-x86_64-pc-windows-msvc.zip",
+          "sha256": "6cad1b7f3d10473da1d719da82f320ef2635b4a242873e01a16e73b7ef6c1b59",
           "archive_type": "zip",
           "bin_path": "moon_cli-x86_64-pc-windows-msvc/moon.exe"
         }
@@ -9111,7 +9111,7 @@
     },
     "motrix": {
       "name": "motrix",
-      "version": "1.8.19",
+      "version": "2.0.0",
       "description": "A full-featured download manager.",
       "homepage": "https://motrix.app",
       "license": "",
@@ -9119,20 +9119,26 @@
       "app_bundles": ["Motrix.app", "Motrix=Motrix.exe"],
       "platforms": {
         "aarch64-macos": {
-          "url": "https://github.com/agalwood/Motrix/releases/download/v1.8.19/Motrix-1.8.19-arm64.dmg",
-          "sha256": "d73f4d69f3597ad8f98b821aa0fb58ba964bf85061b4a13f00edcb3618001c0e",
+          "url": "https://github.com/agalwood/Motrix/releases/download/v2.0.0/Motrix-2.0.0-arm64.dmg",
+          "sha256": "cdf86d35886f41ed8b95c84f033e8fbff23b441cccaa07dc402eb8837e343874",
           "archive_type": "dmg",
           "bin_path": ""
         },
+        "aarch64-windows": {
+          "url": "https://github.com/agalwood/Motrix/releases/download/v2.0.0/Motrix-2.0.0-win-arm64.zip",
+          "sha256": "6da2aea63def0d7676a69cec2cd6aba30c49f1edff262aadb786696d1ad1a942",
+          "archive_type": "zip",
+          "bin_path": ""
+        },
         "x86_64-macos": {
-          "url": "https://github.com/agalwood/Motrix/releases/download/v1.8.19/Motrix-1.8.19.dmg",
-          "sha256": "b644cc83aa98224147ef2942fd49ecfc8cdcebfce9616550fa35caa6850c4178",
+          "url": "https://github.com/agalwood/Motrix/releases/download/v2.0.0/Motrix-2.0.0-x64.dmg",
+          "sha256": "560b04adf535c9b8461f5504a1a7571c9634c9f9ea995b00d40097f383cf852d",
           "archive_type": "dmg",
           "bin_path": ""
         },
         "x86_64-windows": {
-          "url": "https://github.com/agalwood/Motrix/releases/download/v1.8.19/Motrix-1.8.19-win.zip",
-          "sha256": "5238865630e99dc4981bcc6082ba2b8221c4a543f35b41c0205a34984fd8f3b5",
+          "url": "https://github.com/agalwood/Motrix/releases/download/v2.0.0/Motrix-2.0.0-win.zip",
+          "sha256": "35f841ae31d35f6abfe07c5900d630e989fbb205154b1865e7d5a35faa394578",
           "archive_type": "zip",
           "bin_path": ""
         }
@@ -9747,7 +9753,7 @@
     },
     "obs-studio": {
       "name": "obs-studio",
-      "version": "32.2.2",
+      "version": "33.0.0",
       "description": "OBS Studio - Free and open source software for live streaming and screen recording",
       "homepage": "https://obsproject.com",
       "license": "GPL-2.0",
@@ -9755,26 +9761,26 @@
       "app_bundles": ["OBS.app", "OBS Studio=obs64.exe"],
       "platforms": {
         "aarch64-macos": {
-          "url": "https://github.com/obsproject/obs-studio/releases/download/32.2.2/OBS-Studio-32.2.2-macOS-Apple.dmg",
-          "sha256": "920d6f26703d2df6e4085bd3c1cbed30488325084136c7a6e9e37021fbd6aaf7",
+          "url": "https://github.com/obsproject/obs-studio/releases/download/33.0.0/OBS-Studio-33.0.0-macOS-Apple.dmg",
+          "sha256": "b36f4e9da5f2f17c733ba711c8fe0656d6b0cd573cfe96eeb3e68325cffef739",
           "archive_type": "dmg",
           "bin_path": ""
         },
         "aarch64-windows": {
-          "url": "https://github.com/obsproject/obs-studio/releases/download/32.2.2/OBS-Studio-32.2.2-Windows-arm64.zip",
-          "sha256": "b16b41c3cf89b8a919738359a46acb25d207ec1e488563139d7c276cfffb0906",
+          "url": "https://github.com/obsproject/obs-studio/releases/download/33.0.0/OBS-Studio-33.0.0-Windows-arm64.zip",
+          "sha256": "02c53d7bff3f9c159401da79fc375d7b75b00c9ca62d2b4ec5fc05a575d2fa1f",
           "archive_type": "zip",
           "bin_path": ""
         },
         "x86_64-macos": {
-          "url": "https://github.com/obsproject/obs-studio/releases/download/32.2.2/OBS-Studio-32.2.2-macOS-Intel.dmg",
-          "sha256": "f8d8afe3dffdc86efa0698c02ff0c997866bac3e6208ddaf56d37108baacf197",
+          "url": "https://github.com/obsproject/obs-studio/releases/download/33.0.0/OBS-Studio-33.0.0-macOS-Intel.dmg",
+          "sha256": "8524ff428f038573f8905a206841081d3da9ec607063906f7bbfe38d55810c1c",
           "archive_type": "dmg",
           "bin_path": ""
         },
         "x86_64-windows": {
-          "url": "https://github.com/obsproject/obs-studio/releases/download/32.2.2/OBS-Studio-32.2.2-Windows-x64.zip",
-          "sha256": "4d6e40e3ab155f56b30de517380566a206d74b63cdf5ad49aa596924768f97e1",
+          "url": "https://github.com/obsproject/obs-studio/releases/download/33.0.0/OBS-Studio-33.0.0-Windows-x64.zip",
+          "sha256": "3369a3ecd67b5669a8a08d77357f87cc786d1fba42fbbd1054d841a69f6271a7",
           "archive_type": "zip",
           "bin_path": ""
         }
@@ -9916,7 +9922,7 @@
     },
     "ollama": {
       "name": "ollama",
-      "version": "0.40.9",
+      "version": "0.40.10",
       "description": "Get up and running with Kimi, GLM, MiniMax, DeepSeek, gpt-oss, Qwen, Gemma and other models.",
       "homepage": "https://ollama.com",
       "license": "MIT",
@@ -9924,14 +9930,14 @@
       "app_bundles": ["Ollama.app"],
       "platforms": {
         "aarch64-macos": {
-          "url": "https://github.com/ollama/ollama/releases/download/v0.40.9/Ollama-darwin.zip",
-          "sha256": "33e883981a06b846952e15c329a33e80ddd16386514d0f5b06798f94f9aba871",
+          "url": "https://github.com/ollama/ollama/releases/download/v0.40.10/Ollama-darwin.zip",
+          "sha256": "0c8ac7dc394a7b6171d8531bdaba60dd8dd2d8ed525ebc6c4526a91497a029ee",
           "archive_type": "zip",
           "bin_path": ""
         },
         "x86_64-macos": {
-          "url": "https://github.com/ollama/ollama/releases/download/v0.40.9/Ollama-darwin.zip",
-          "sha256": "33e883981a06b846952e15c329a33e80ddd16386514d0f5b06798f94f9aba871",
+          "url": "https://github.com/ollama/ollama/releases/download/v0.40.10/Ollama-darwin.zip",
+          "sha256": "0c8ac7dc394a7b6171d8531bdaba60dd8dd2d8ed525ebc6c4526a91497a029ee",
           "archive_type": "zip",
           "bin_path": ""
         }
@@ -9939,7 +9945,7 @@
     },
     "ollama-portable": {
       "name": "ollama-portable",
-      "version": "0.40.9",
+      "version": "0.40.10",
       "description": "Get up and running with Kimi, GLM, MiniMax, DeepSeek, gpt-oss, Qwen, Gemma and other models.",
       "homepage": "https://ollama.com",
       "license": "MIT",
@@ -9947,26 +9953,26 @@
       "app_bundles": [],
       "platforms": {
         "aarch64-linux": {
-          "url": "https://github.com/ollama/ollama/releases/download/v0.40.9/ollama-linux-arm64.tar.zst",
-          "sha256": "2a328795709135fcf0c011b9e2634431ab6f2fcab57ca11264725446cf4894b0",
+          "url": "https://github.com/ollama/ollama/releases/download/v0.40.10/ollama-linux-arm64.tar.zst",
+          "sha256": "57dca26f51efc050112b733a65dea6f6c8e68da7a2946afd7c1eb8834d9eeb92",
           "archive_type": "tar.zst",
           "bin_path": "ollama"
         },
         "aarch64-windows": {
-          "url": "https://github.com/ollama/ollama/releases/download/v0.40.9/ollama-windows-arm64.zip",
-          "sha256": "0b003e97381a0cf809976d98bd30e956d09694618e216c0655674c2e986e1139",
+          "url": "https://github.com/ollama/ollama/releases/download/v0.40.10/ollama-windows-arm64.zip",
+          "sha256": "31f3d5b3ed9f291e99f3f2df2430e261da72deb522f7b14978933588936daf0f",
           "archive_type": "zip",
           "bin_path": "ollama.exe"
         },
         "x86_64-linux": {
-          "url": "https://github.com/ollama/ollama/releases/download/v0.40.9/ollama-linux-amd64.tar.zst",
-          "sha256": "01f0d0ae50cad3295a79a165033a65cf324f8ae5f7be64679464d29ecf28d67c",
+          "url": "https://github.com/ollama/ollama/releases/download/v0.40.10/ollama-linux-amd64.tar.zst",
+          "sha256": "1e8ad2d2a394efdd235bee74deec237badd95142ffba77588140ab2a9ecec227",
           "archive_type": "tar.zst",
           "bin_path": "ollama"
         },
         "x86_64-windows": {
-          "url": "https://github.com/ollama/ollama/releases/download/v0.40.9/ollama-windows-amd64.zip",
-          "sha256": "c35019c95679eae1cb28fda4732a7c97978b9fbcbd8adfb5cbcc8fe7c161ea0b",
+          "url": "https://github.com/ollama/ollama/releases/download/v0.40.10/ollama-windows-amd64.zip",
+          "sha256": "d52aea2d323bdd324bf66a4b1226844aa5fb665cc5974fbcceceda1ce3d934eb",
           "archive_type": "zip",
           "bin_path": "ollama.exe"
         }
@@ -10003,7 +10009,7 @@
     },
     "opa": {
       "name": "opa",
-      "version": "1.21.3",
+      "version": "1.21.4",
       "description": "Open Policy Agent (OPA) is an open source, general-purpose policy engine.",
       "homepage": "https://www.openpolicyagent.org",
       "license": "Apache-2.0",
@@ -10011,32 +10017,32 @@
       "app_bundles": [],
       "platforms": {
         "aarch64-linux": {
-          "url": "https://github.com/open-policy-agent/opa/releases/download/v1.21.3/opa_linux_arm64",
-          "sha256": "ac1c4158b20e0979092791415c7931e02268160804f01870d71a3e2365b9e888",
+          "url": "https://github.com/open-policy-agent/opa/releases/download/v1.21.4/opa_linux_arm64",
+          "sha256": "327e9bdd754972b2eb604fd52ebfd6c01af3596700d1d0a060f3b9cd09e0bc2e",
           "archive_type": "raw",
           "bin_path": "opa"
         },
         "aarch64-macos": {
-          "url": "https://github.com/open-policy-agent/opa/releases/download/v1.21.3/opa_darwin_arm64",
-          "sha256": "ee96aae344f45dd63044be2bedcba6391ca78402760b204a747331f421db74fe",
+          "url": "https://github.com/open-policy-agent/opa/releases/download/v1.21.4/opa_darwin_arm64",
+          "sha256": "4c105208a9282f590385bccbe600875c011f0894ccf9431782dfe855e1f99aa6",
           "archive_type": "raw",
           "bin_path": "opa"
         },
         "x86_64-linux": {
-          "url": "https://github.com/open-policy-agent/opa/releases/download/v1.21.3/opa_linux_amd64",
-          "sha256": "91a59d5726b1952d98140f2d5edfaffa594375ee39a97e1876997cab7119c07e",
+          "url": "https://github.com/open-policy-agent/opa/releases/download/v1.21.4/opa_linux_amd64",
+          "sha256": "5ae411b3ae2cb093ac1f70cc20df4b372eead7be61f7de989b33a3dbd6cbe09b",
           "archive_type": "raw",
           "bin_path": "opa"
         },
         "x86_64-macos": {
-          "url": "https://github.com/open-policy-agent/opa/releases/download/v1.21.3/opa_darwin_amd64",
-          "sha256": "3ef285e7e2cf57e6cb05142c33002e07d6791580a4ac14bac0a4e0880dfe073d",
+          "url": "https://github.com/open-policy-agent/opa/releases/download/v1.21.4/opa_darwin_amd64",
+          "sha256": "8802bd39bc14b58a705e6b3d4f4dd14f7f24ee657f0362c737338be243190c7e",
           "archive_type": "raw",
           "bin_path": "opa"
         },
         "x86_64-windows": {
-          "url": "https://github.com/open-policy-agent/opa/releases/download/v1.21.3/opa_windows_amd64.exe",
-          "sha256": "c8f08ee67544be8ca47b063f6656091c1dcb4aba6434c2cd4c5b498b0dcfa115",
+          "url": "https://github.com/open-policy-agent/opa/releases/download/v1.21.4/opa_windows_amd64.exe",
+          "sha256": "efad1c0ee4e3150d213f7babdaff3440b18b93c7368b465fca42cda392947f7c",
           "archive_type": "raw",
           "bin_path": "opa.exe"
         }
@@ -10566,7 +10572,7 @@
     },
     "pocketbase": {
       "name": "pocketbase",
-      "version": "0.40.5",
+      "version": "0.40.6",
       "description": "Open Source realtime backend in 1 file",
       "homepage": "https://pocketbase.io",
       "license": "MIT",
@@ -10574,38 +10580,38 @@
       "app_bundles": [],
       "platforms": {
         "aarch64-linux": {
-          "url": "https://github.com/pocketbase/pocketbase/releases/download/v0.40.5/pocketbase_0.40.5_linux_arm64.zip",
-          "sha256": "570baa1c45d2fb92fc0073582b945ca0ece03cbf9837ccabf49a222f99dd02e3",
+          "url": "https://github.com/pocketbase/pocketbase/releases/download/v0.40.6/pocketbase_0.40.6_linux_arm64.zip",
+          "sha256": "d22c66ceb67ca92b7d767f36d826e848a276bcfa3c197ead20bf87c42208984f",
           "archive_type": "zip",
           "bin_path": "pocketbase"
         },
         "aarch64-macos": {
-          "url": "https://github.com/pocketbase/pocketbase/releases/download/v0.40.5/pocketbase_0.40.5_darwin_arm64.zip",
-          "sha256": "d9a176e0491bc825fff88c2a4edffb07307f785ac2bd9710e82c5d223669fc17",
+          "url": "https://github.com/pocketbase/pocketbase/releases/download/v0.40.6/pocketbase_0.40.6_darwin_arm64.zip",
+          "sha256": "7f2f7544e9ee5994ab69f84b22a4ab9a3bcfed58c1dad7206d05ebeb753f968b",
           "archive_type": "zip",
           "bin_path": "pocketbase"
         },
         "aarch64-windows": {
-          "url": "https://github.com/pocketbase/pocketbase/releases/download/v0.40.5/pocketbase_0.40.5_windows_arm64.zip",
-          "sha256": "7dd0d7c500812cac571e450525595b93556527161b1eb86493dabdfc31974ef5",
+          "url": "https://github.com/pocketbase/pocketbase/releases/download/v0.40.6/pocketbase_0.40.6_windows_arm64.zip",
+          "sha256": "7ca50a72b768965f0da194b907d2a1e8865e614cdbebb27fa64ca7ff1d7f5182",
           "archive_type": "zip",
           "bin_path": "pocketbase.exe"
         },
         "x86_64-linux": {
-          "url": "https://github.com/pocketbase/pocketbase/releases/download/v0.40.5/pocketbase_0.40.5_linux_amd64.zip",
-          "sha256": "1dbea1b01eb3dfe64953513859d01e759c96650c4e3264fa4eecd54b769382e4",
+          "url": "https://github.com/pocketbase/pocketbase/releases/download/v0.40.6/pocketbase_0.40.6_linux_amd64.zip",
+          "sha256": "0e1f609158ed945f809f8a02ae012aa0427129c66ebb63c1aee76f2c0309373f",
           "archive_type": "zip",
           "bin_path": "pocketbase"
         },
         "x86_64-macos": {
-          "url": "https://github.com/pocketbase/pocketbase/releases/download/v0.40.5/pocketbase_0.40.5_darwin_amd64.zip",
-          "sha256": "3640f0c4d9e0e5a47e321f10ddf6698508d4f20721bcf5dfb7c4192835e5105f",
+          "url": "https://github.com/pocketbase/pocketbase/releases/download/v0.40.6/pocketbase_0.40.6_darwin_amd64.zip",
+          "sha256": "970464cfdb8faf0ad57e0b6b806fd85e81f99cb78000a1c9f78cdcb1b36d4b7a",
           "archive_type": "zip",
           "bin_path": "pocketbase"
         },
         "x86_64-windows": {
-          "url": "https://github.com/pocketbase/pocketbase/releases/download/v0.40.5/pocketbase_0.40.5_windows_amd64.zip",
-          "sha256": "d0980d1f3a8097ff4c03a876e8c98f3008a83c0d42cc03b636bc92b2d4788d1c",
+          "url": "https://github.com/pocketbase/pocketbase/releases/download/v0.40.6/pocketbase_0.40.6_windows_amd64.zip",
+          "sha256": "33a2a1d255cadded77346fc7f5de37dca21ba4bad0d9cae0235a50b3b703d6d9",
           "archive_type": "zip",
           "bin_path": "pocketbase.exe"
         }
@@ -11840,7 +11846,7 @@
     },
     "sing-box": {
       "name": "sing-box",
-      "version": "1.14.3",
+      "version": "1.14.4",
       "description": "The universal proxy platform",
       "homepage": "https://sing-box.sagernet.org/",
       "license": "",
@@ -11848,40 +11854,40 @@
       "app_bundles": [],
       "platforms": {
         "aarch64-linux": {
-          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.3/sing-box-1.14.3-linux-arm64-musl.tar.gz",
-          "sha256": "12d6d67a4edf0dd54590865b1f4f79cd09ae043a02d648e9d1b5fccc8446ee07",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-linux-arm64-musl.tar.gz",
+          "sha256": "b95e25f921dc5e17a4cf13327243d1177642c7e35425bf5372862c477c359f56",
           "archive_type": "tar.gz",
-          "bin_path": "sing-box-1.14.3-linux-arm64-musl/sing-box"
+          "bin_path": "sing-box-1.14.4-linux-arm64-musl/sing-box"
         },
         "aarch64-macos": {
-          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.3/sing-box-1.14.3-darwin-arm64.tar.gz",
-          "sha256": "0360ce634a04c26a6b4fd957517987bb4f6c8950f63435ce3c5af2fcae5860c5",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-darwin-arm64.tar.gz",
+          "sha256": "0d8c7f5ed5d587b0f1a5e9772a708ec3bfa4ac4c9329604b01d8d9c2ba406838",
           "archive_type": "tar.gz",
-          "bin_path": "sing-box-1.14.3-darwin-arm64/sing-box"
+          "bin_path": "sing-box-1.14.4-darwin-arm64/sing-box"
         },
         "aarch64-windows": {
-          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.3/sing-box-1.14.3-windows-arm64.zip",
-          "sha256": "195b35424c6e3f5913954c7f08c5d8ba2d2199f6d18eb27a3972a5a29cdaa78c",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-windows-arm64.zip",
+          "sha256": "8cd0a4d0cd8cd480be5731ac31f17038969a42d12add9feb6e031fd43d85bbae",
           "archive_type": "zip",
-          "bin_path": "sing-box-1.14.3-windows-arm64/sing-box.exe"
+          "bin_path": "sing-box-1.14.4-windows-arm64/sing-box.exe"
         },
         "x86_64-linux": {
-          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.3/sing-box-1.14.3-linux-amd64-musl.tar.gz",
-          "sha256": "41fc81fd041134d4d7d850a928d7d2cde17a7d6563953f406b22d32a68bfab1f",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-linux-amd64-musl.tar.gz",
+          "sha256": "8f7c5f0651238850d96a0e488e5473cd77ec1a0098f63942e943f475a12057ca",
           "archive_type": "tar.gz",
-          "bin_path": "sing-box-1.14.3-linux-amd64-musl/sing-box"
+          "bin_path": "sing-box-1.14.4-linux-amd64-musl/sing-box"
         },
         "x86_64-macos": {
-          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.3/sing-box-1.14.3-darwin-amd64.tar.gz",
-          "sha256": "6d002b74d03b478547349cc10af89e007868596e5aa931816d45da9f544715a9",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-darwin-amd64.tar.gz",
+          "sha256": "eae86b9b033bba50b7c44ab719e4bfac0aca05efd28483390ed3aa510f32db25",
           "archive_type": "tar.gz",
-          "bin_path": "sing-box-1.14.3-darwin-amd64/sing-box"
+          "bin_path": "sing-box-1.14.4-darwin-amd64/sing-box"
         },
         "x86_64-windows": {
-          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.3/sing-box-1.14.3-windows-amd64.zip",
-          "sha256": "d8b86ef58936dba9230ec6a57ffa4243933f3c14ef4809828b6c553440ed1518",
+          "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-windows-amd64.zip",
+          "sha256": "99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991df",
           "archive_type": "zip",
-          "bin_path": "sing-box-1.14.3-windows-amd64/sing-box.exe"
+          "bin_path": "sing-box-1.14.4-windows-amd64/sing-box.exe"
         }
       }
     },
@@ -12584,7 +12590,7 @@
     },
     "supabase": {
       "name": "supabase",
-      "version": "2.121.0",
+      "version": "2.122.0",
       "description": "Supabase CLI. Manage postgres migrations, run Supabase locally, deploy edge functions. Postgres backups. Generating types from your database schema.",
       "homepage": "https://supabase.com/docs/reference/cli/about",
       "license": "",
@@ -12592,38 +12598,38 @@
       "app_bundles": [],
       "platforms": {
         "aarch64-linux": {
-          "url": "https://github.com/supabase/cli/releases/download/v2.121.0/supabase_linux_arm64.tar.gz",
-          "sha256": "896278173cd7c3632e9340e546129606a26e696e90bcaaa6f7b7490fe218efc7",
+          "url": "https://github.com/supabase/cli/releases/download/v2.122.0/supabase_linux_arm64.tar.gz",
+          "sha256": "8980b46044aba0863f26a1b4134a498d2c74df0dadf24289bb4faa86729511cc",
           "archive_type": "tar.gz",
           "bin_path": "supabase"
         },
         "aarch64-macos": {
-          "url": "https://github.com/supabase/cli/releases/download/v2.121.0/supabase_darwin_arm64.tar.gz",
-          "sha256": "a696418082800fea178d6efeadf66cbaa501f653657b525c95d570d7b2f47d67",
+          "url": "https://github.com/supabase/cli/releases/download/v2.122.0/supabase_darwin_arm64.tar.gz",
+          "sha256": "fe87a5f9781d5423dbd5ebba2d5a6e1a541d01754d14941c574952e5695eaab0",
           "archive_type": "tar.gz",
           "bin_path": "supabase"
         },
         "aarch64-windows": {
-          "url": "https://github.com/supabase/cli/releases/download/v2.121.0/supabase_2.121.0_windows_arm64.zip",
-          "sha256": "15effa255318d94f1a23957a9d160820c742c16d52f19800f33cf9b74a5b7ace",
+          "url": "https://github.com/supabase/cli/releases/download/v2.122.0/supabase_2.122.0_windows_arm64.zip",
+          "sha256": "dda0185f8b56a5c35c36fba7c08dbe6683b0f99180df7018ea2b863b73fb3775",
           "archive_type": "zip",
           "bin_path": "supabase.exe"
         },
         "x86_64-linux": {
-          "url": "https://github.com/supabase/cli/releases/download/v2.121.0/supabase_linux_amd64.tar.gz",
-          "sha256": "4b481189efbdc57cf2d37bdee5f1a0d29574314398564b32a6dfb76c0fcf275f",
+          "url": "https://github.com/supabase/cli/releases/download/v2.122.0/supabase_linux_amd64.tar.gz",
+          "sha256": "59ed066847b98d7461c60e9109d40cab6b9756177ce06ebb05b51338519f5136",
           "archive_type": "tar.gz",
           "bin_path": "supabase"
         },
         "x86_64-macos": {
-          "url": "https://github.com/supabase/cli/releases/download/v2.121.0/supabase_darwin_amd64.tar.gz",
-          "sha256": "8e6696259bc187e48ef2732669e1e45539a630a6486e91484dd60dc50b2a676f",
+          "url": "https://github.com/supabase/cli/releases/download/v2.122.0/supabase_darwin_amd64.tar.gz",
+          "sha256": "8be7d5bb00091e67618d12fb0a4a1bb10624c69435ecd5b9b95d91d571cc34d8",
           "archive_type": "tar.gz",
           "bin_path": "supabase"
         },
         "x86_64-windows": {
-          "url": "https://github.com/supabase/cli/releases/download/v2.121.0/supabase_2.121.0_windows_amd64.zip",
-          "sha256": "2606459be86e12e03fb6f6b9aa12a02aa00cfe21374857ec837a09c70b837eca",
+          "url": "https://github.com/supabase/cli/releases/download/v2.122.0/supabase_2.122.0_windows_amd64.zip",
+          "sha256": "60031fd5bf050fc12a0c6aef68997600d143870f944bf13109c7765dca329af8",
           "archive_type": "zip",
           "bin_path": "supabase.exe"
         }
@@ -13134,7 +13140,7 @@
     },
     "terragrunt": {
       "name": "terragrunt",
-      "version": "1.2.0",
+      "version": "1.2.1",
       "description": "Terragrunt is a flexible orchestration tool that allows Infrastructure as Code written in OpenTofu/Terraform to scale.",
       "homepage": "https://terragrunt.com",
       "license": "MIT",
@@ -13142,32 +13148,32 @@
       "app_bundles": [],
       "platforms": {
         "aarch64-linux": {
-          "url": "https://github.com/gruntwork-io/terragrunt/releases/download/v1.2.0/terragrunt_linux_arm64.tar.gz",
-          "sha256": "1e13b7f0646fa7962bc6c5bfba14a30d6a589325b82561e21b66be5981d86395",
+          "url": "https://github.com/gruntwork-io/terragrunt/releases/download/v1.2.1/terragrunt_linux_arm64.tar.gz",
+          "sha256": "8b92d56a20b2848365e22ef94f963fbfe25fedeebcacffacbc286cfcf9966066",
           "archive_type": "tar.gz",
           "bin_path": "terragrunt_linux_arm64"
         },
         "aarch64-macos": {
-          "url": "https://github.com/gruntwork-io/terragrunt/releases/download/v1.2.0/terragrunt_darwin_arm64.tar.gz",
-          "sha256": "79790d841ce71fe94c689fb6f5034afd31ad53d5904937c7a10934cca9d9734b",
+          "url": "https://github.com/gruntwork-io/terragrunt/releases/download/v1.2.1/terragrunt_darwin_arm64.tar.gz",
+          "sha256": "0aded323f844ce6567a15feb26393b67eff1400dc1722203fa4dd4e23b3bb182",
           "archive_type": "tar.gz",
           "bin_path": "terragrunt_darwin_arm64"
         },
         "x86_64-linux": {
-          "url": "https://github.com/gruntwork-io/terragrunt/releases/download/v1.2.0/terragrunt_linux_amd64.tar.gz",
-          "sha256": "23b5f2f9203d34919f7fd270a4b635b721b4903beca9762a1e4853b159bc9be8",
+          "url": "https://github.com/gruntwork-io/terragrunt/releases/download/v1.2.1/terragrunt_linux_amd64.tar.gz",
+          "sha256": "08c8844cc69e4f03451ebb8f347cb57d9bd6b8db7b16e437ae5ec6f001228ef9",
           "archive_type": "tar.gz",
           "bin_path": "terragrunt_linux_amd64"
         },
         "x86_64-macos": {
-          "url": "https://github.com/gruntwork-io/terragrunt/releases/download/v1.2.0/terragrunt_darwin_amd64.tar.gz",
-          "sha256": "0b0e63e80509eb1ffb4f89b892bc6fbf7728f27f0a73974400f1bd82a80b8627",
+          "url": "https://github.com/gruntwork-io/terragrunt/releases/download/v1.2.1/terragrunt_darwin_amd64.tar.gz",
+          "sha256": "29806d1708f5c54e54bc6adfcacfb710d4bb1f6f180efd751692e6fad5985640",
           "archive_type": "tar.gz",
           "bin_path": "terragrunt_darwin_amd64"
         },
         "x86_64-windows": {
-          "url": "https://github.com/gruntwork-io/terragrunt/releases/download/v1.2.0/terragrunt_windows_amd64.exe.zip",
-          "sha256": "372e69dd2e1d31d081c55b5f4ef8fe4a3f8ce1cd137a6a69713f605a3645befe",
+          "url": "https://github.com/gruntwork-io/terragrunt/releases/download/v1.2.1/terragrunt_windows_amd64.exe.zip",
+          "sha256": "022ee93a58d942e033798f42702fd3b847cc48a56fa26859791f7c3f7b3ab4cb",
           "archive_type": "zip",
           "bin_path": "terragrunt_windows_amd64.exe.exe"
         }
@@ -13345,7 +13351,7 @@
     },
     "transmission": {
       "name": "transmission",
-      "version": "4.1.3",
+      "version": "4.1.4",
       "description": "Official Transmission BitTorrent client repository",
       "homepage": "https://transmissionbt.com",
       "license": "",
@@ -13353,14 +13359,14 @@
       "app_bundles": ["Transmission.app"],
       "platforms": {
         "aarch64-macos": {
-          "url": "https://github.com/transmission/transmission/releases/download/4.1.3/Transmission-4.1.3.dmg",
-          "sha256": "d622736c19990262f2ab12183e1acaa5b0dad5777ddc7db0a187c06e035a7e1a",
+          "url": "https://github.com/transmission/transmission/releases/download/4.1.4/Transmission-4.1.4.dmg",
+          "sha256": "495c5d21d515c8deb859b0db6692fd5606644a1613c2cac87c1d3e7672755a59",
           "archive_type": "dmg",
           "bin_path": ""
         },
         "x86_64-macos": {
-          "url": "https://github.com/transmission/transmission/releases/download/4.1.3/Transmission-4.1.3.dmg",
-          "sha256": "d622736c19990262f2ab12183e1acaa5b0dad5777ddc7db0a187c06e035a7e1a",
+          "url": "https://github.com/transmission/transmission/releases/download/4.1.4/Transmission-4.1.4.dmg",
+          "sha256": "495c5d21d515c8deb859b0db6692fd5606644a1613c2cac87c1d3e7672755a59",
           "archive_type": "dmg",
           "bin_path": ""
         }
@@ -13456,7 +13462,7 @@
     },
     "trufflehog": {
       "name": "trufflehog",
-      "version": "3.99.4",
+      "version": "3.99.7",
       "description": "Find, verify, and analyze leaked credentials",
       "homepage": "https://trufflesecurity.com",
       "license": "AGPL-3.0",
@@ -13464,38 +13470,38 @@
       "app_bundles": [],
       "platforms": {
         "aarch64-linux": {
-          "url": "https://github.com/trufflesecurity/trufflehog/releases/download/v3.99.4/trufflehog_3.99.4_linux_arm64.tar.gz",
-          "sha256": "e6285aff62e692131255dca91ad300a62a479330e0b72e4eb1d60ae58908f8d5",
+          "url": "https://github.com/trufflesecurity/trufflehog/releases/download/v3.99.7/trufflehog_3.99.7_linux_arm64.tar.gz",
+          "sha256": "3060f7c9f18c70afdc432984cacabdd1e9103729b5d5fee7fb6755a90d1c59d4",
           "archive_type": "tar.gz",
           "bin_path": "trufflehog"
         },
         "aarch64-macos": {
-          "url": "https://github.com/trufflesecurity/trufflehog/releases/download/v3.99.4/trufflehog_3.99.4_darwin_arm64.tar.gz",
-          "sha256": "dc942daecb4a7795fd0a7421c66281bd4cc2ba29a265f3f6c63ecb684a6db291",
+          "url": "https://github.com/trufflesecurity/trufflehog/releases/download/v3.99.7/trufflehog_3.99.7_darwin_arm64.tar.gz",
+          "sha256": "5540ef352fc88b1f580e91603689782c0107ca7d4a96c1aeb2714b3a98c766ce",
           "archive_type": "tar.gz",
           "bin_path": "trufflehog"
         },
         "aarch64-windows": {
-          "url": "https://github.com/trufflesecurity/trufflehog/releases/download/v3.99.4/trufflehog_3.99.4_windows_arm64.tar.gz",
-          "sha256": "e56d8a6c60b69aa4d00753c202b3864a2d045bc1ee8538012b99c8f7352fcbc6",
+          "url": "https://github.com/trufflesecurity/trufflehog/releases/download/v3.99.7/trufflehog_3.99.7_windows_arm64.tar.gz",
+          "sha256": "7718dd78aabdbae63d534a88bdecdae0db92004f341395f540d6a03106c78099",
           "archive_type": "tar.gz",
           "bin_path": "trufflehog.exe"
         },
         "x86_64-linux": {
-          "url": "https://github.com/trufflesecurity/trufflehog/releases/download/v3.99.4/trufflehog_3.99.4_linux_amd64.tar.gz",
-          "sha256": "5ae9b313342d1bfa96404064c0f59e77a2cbd1824d797ca7b11e6655aa8fd9d1",
+          "url": "https://github.com/trufflesecurity/trufflehog/releases/download/v3.99.7/trufflehog_3.99.7_linux_amd64.tar.gz",
+          "sha256": "bdbea0508e439b144f49de14e775908de5f902f3d14ea7ae8354bae72b0b72ef",
           "archive_type": "tar.gz",
           "bin_path": "trufflehog"
         },
         "x86_64-macos": {
-          "url": "https://github.com/trufflesecurity/trufflehog/releases/download/v3.99.4/trufflehog_3.99.4_darwin_amd64.tar.gz",
-          "sha256": "c10e3ec17550e24081b9e045396cf78e494a86616736f0472024519b7416aa37",
+          "url": "https://github.com/trufflesecurity/trufflehog/releases/download/v3.99.7/trufflehog_3.99.7_darwin_amd64.tar.gz",
+          "sha256": "6bdbc7b0aaeefcb50275036b49be1a3561b3c2e5902879300339abf9c64914c0",
           "archive_type": "tar.gz",
           "bin_path": "trufflehog"
         },
         "x86_64-windows": {
-          "url": "https://github.com/trufflesecurity/trufflehog/releases/download/v3.99.4/trufflehog_3.99.4_windows_amd64.tar.gz",
-          "sha256": "97749c11ec76ef93ca50a3a50bd2a40f25fb92dfee4366d4bff0ba0d951307a8",
+          "url": "https://github.com/trufflesecurity/trufflehog/releases/download/v3.99.7/trufflehog_3.99.7_windows_amd64.tar.gz",
+          "sha256": "16e85ace8d7724774559d418e1bd876ae410a684321c1c44a34c499b03703d9d",
           "archive_type": "tar.gz",
           "bin_path": "trufflehog.exe"
         }
@@ -14584,7 +14590,7 @@
     },
     "xplr": {
       "name": "xplr",
-      "version": "1.1.3",
+      "version": "1.2.1",
       "description": "A hackable, minimal, fast TUI file explorer",
       "homepage": "https://xplr.dev",
       "license": "MIT",
@@ -14592,14 +14598,14 @@
       "app_bundles": [],
       "platforms": {
         "aarch64-linux": {
-          "url": "https://github.com/sayanarijit/xplr/releases/download/v1.1.3/xplr-linux-aarch64.tar.gz",
-          "sha256": "1e562aa8d77baaeea87da1a3b90f088da9f09916bae7b25f3bcc5e55add9bf60",
+          "url": "https://github.com/sayanarijit/xplr/releases/download/v1.2.1/xplr-linux-aarch64.tar.gz",
+          "sha256": "ea2abf9b06117006d40c14e177d625a00b8e6f548b2ea51c013843c33d1ca434",
           "archive_type": "tar.gz",
           "bin_path": "xplr"
         },
         "aarch64-macos": {
-          "url": "https://github.com/sayanarijit/xplr/releases/download/v1.1.3/xplr-macos-aarch64.tar.gz",
-          "sha256": "5735c8025f73753bcaab1328b0ae6838bbefcd78d1b51d2abddb6500c4368efb",
+          "url": "https://github.com/sayanarijit/xplr/releases/download/v1.2.1/xplr-macos-aarch64.tar.gz",
+          "sha256": "8834773041c11b3f215499c070eab825f3e84d230775c85ed436526cd8f7566a",
           "archive_type": "tar.gz",
           "bin_path": "xplr"
         }
@@ -14824,7 +14830,7 @@
     },
     "zed": {
       "name": "zed",
-      "version": "1.25.2",
+      "version": "1.25.3",
       "description": "Code at the speed of thought – Zed is a high-performance, multiplayer code editor from the creators of Atom and Tree-sitter.",
       "homepage": "https://zed.dev",
       "license": "",
@@ -14832,14 +14838,14 @@
       "app_bundles": ["Zed.app"],
       "platforms": {
         "aarch64-macos": {
-          "url": "https://github.com/zed-industries/zed/releases/download/v1.25.2/Zed-aarch64.dmg",
-          "sha256": "c427b19bb0d55f5bd99391b21e7bda0dcf892abd80dbc020ef645c9d86457940",
+          "url": "https://github.com/zed-industries/zed/releases/download/v1.25.3/Zed-aarch64.dmg",
+          "sha256": "f33e0aa688452284fe6e05386a0408b09920e7d18125ab4d83353628b75f33da",
           "archive_type": "dmg",
           "bin_path": ""
         },
         "x86_64-macos": {
-          "url": "https://github.com/zed-industries/zed/releases/download/v1.25.2/Zed-x86_64.dmg",
-          "sha256": "03d82136a68e13edbe3e624433de28af0c25ca86b9e35dab276379bd521519cc",
+          "url": "https://github.com/zed-industries/zed/releases/download/v1.25.3/Zed-x86_64.dmg",
+          "sha256": "3159fb77e143c155762510100e765e8399fb6f74419898e3a4812eb2edd17cee",
           "archive_type": "dmg",
           "bin_path": ""
         }
@@ -14847,7 +14853,7 @@
     },
     "zed-portable": {
       "name": "zed-portable",
-      "version": "1.25.2",
+      "version": "1.25.3",
       "description": "Code at the speed of thought – Zed is a high-performance, multiplayer code editor from the creators of Atom and Tree-sitter.",
       "homepage": "https://zed.dev",
       "license": "",
@@ -14855,14 +14861,14 @@
       "app_bundles": [],
       "platforms": {
         "aarch64-linux": {
-          "url": "https://github.com/zed-industries/zed/releases/download/v1.25.2/zed-linux-aarch64.tar.gz",
-          "sha256": "5cc192ea154b273efd9a090b76ec5fe482647cbc9aea27a41fb9b42d8c95d63c",
+          "url": "https://github.com/zed-industries/zed/releases/download/v1.25.3/zed-linux-aarch64.tar.gz",
+          "sha256": "776b3a5e39f1218eacabe1e9fa3859b7a6dda2653522d8a3992a9ab0f2184058",
           "archive_type": "tar.gz",
           "bin_path": "zed.app/bin/zed"
         },
         "x86_64-linux": {
-          "url": "https://github.com/zed-industries/zed/releases/download/v1.25.2/zed-linux-x86_64.tar.gz",
-          "sha256": "b405ebea810c82ff84854631e7b2853ae1f22dd1b7e306cb57726471c6617508",
+          "url": "https://github.com/zed-industries/zed/releases/download/v1.25.3/zed-linux-x86_64.tar.gz",
+          "sha256": "35f9115acd8b4c3bea6ed20f7c9b6ec8f1d2c2dd5a1cc438d552167b5ed4b342",
           "archive_type": "tar.gz",
           "bin_path": "zed.app/bin/zed"
         }
