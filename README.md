@@ -494,9 +494,12 @@ project, and `tools/build-catalog.zig` reads that project's GitHub releases to w
 
   The list goes to `catalog/auto-sources.txt`, and those projects get the same checks as
   hand-picked ones: one verified download per platform, the executables found inside, and
-  the malware scan. Up to 200 new ones are added a day, each is re-checked weekly, and a
-  project with no usable download is skipped for 30 days (`catalog/auto-rejects.txt`). A
-  line in `sources.txt` always wins over a discovered one.
+  the malware scan. A found project also needs at least one program named after it, so
+  a repository that ships only helper programs is left out. If its programs carry only
+  the owner's name, the package is called `owner-repo`, so `zen-browser/desktop` becomes
+  `zen-browser-desktop` rather than `desktop`. Up to 500 new ones are added a day, each is
+  re-checked weekly, and a project with no usable download is skipped for 30 days
+  (`catalog/auto-rejects.txt`). A line in `sources.txt` always wins over a discovered one.
 
 See [catalog/README.md](catalog/README.md) for the line format and the commands.
 

@@ -7,8 +7,10 @@
 - **Thousands more packages, found automatically.** `build-catalog discover` searches
   GitHub every week for popular projects (500+ stars, compiled languages, active, at least
   six months old) whose latest release has downloads, and writes them to
-  `catalog/auto-sources.txt`. The daily catalog build adds up to 200 of them per run, so
-  the catalog grows by about that much a day. Each one gets the same checks as a
+  `catalog/auto-sources.txt`. The first search found about 6,200 candidates; the daily
+  catalog build adds up to 500 of them per run (about 70% pass all checks). A project
+  must ship a program named after it or its owner (one named only after its owner is
+  published as `owner-repo`), and keeps its package name from then on. Each one gets the same checks as a
   hand-written source: a pinned SHA-256 per platform, executables found by unpacking, and
   now the malware scan as well. Each is re-checked weekly; projects without a usable
   download are skipped for 30 days (`catalog/auto-rejects.txt`). Hand-written lines

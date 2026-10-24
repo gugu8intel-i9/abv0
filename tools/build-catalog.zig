@@ -1645,7 +1645,7 @@ pub const Options = struct {
     /// for `reject_days` and updated after the run.
     rejects_path: ?[]const u8 = null,
     /// Discovered packages added per run; the rest wait for the next run.
-    max_new_auto: usize = 200,
+    max_new_auto: usize = 500,
     /// A discovered package is looked at again once in this many days.
     auto_refresh_days: u32 = 7,
     reject_days: u32 = 30,
@@ -1663,7 +1663,54 @@ const Result = struct {
     status: Status = .skipped,
     entry: ?Entry = null,
     note: []const u8 = "",
+    /// A new discovered package whose programs are named after its owner,
+    /// not its repository: published as `owner-repo` (see `nameCheck`).
+    rename_to_owner: bool = false,
 };
+
+/// Lower-case letters and digits only.
+fn squash(buf: []u8, s: []const u8) []const u8 {
+    var n: usize = 0;
+    for (s) |c| {
+        if (n == buf.len) break;
+        if (std.ascii.isAlphanumeric(c)) {
+            buf[n] = std.ascii.toLower(c);
+            n += 1;
+        }
+    }
+    return buf[0..n];
+}
+
+/// A program name that belongs to `word` (a repository or owner name): one
+/// contains the other, ignoring case and punctuation, with at least three
+/// characters in common. `fd` and `fd-find`, `gitea` and `gitea`, `zen` and
+/// `zen-browser`; not `chrome-sandbox` and `react-native`.
+pub fn relatedName(bin: []const u8, word: []const u8) bool {
+    var b1: [128]u8 = undefined;
+    var b2: [128]u8 = undefined;
+    const b = squash(&b1, bin);
+    const w = squash(&b2, word);
+    const short = @min(b.len, w.len);
+    if (short < 2) return false;
+    if (short < 3 and !std.mem.eql(u8, b, w)) return false;
+    return std.mem.indexOf(u8, w, b) != null or std.mem.indexOf(u8, b, w) != null;
+}
+
+pub const NameCheck = enum { repo, owner, none };
+
+/// Whether a discovered project's programs are named after it. One that
+/// ships only helpers (`chrome-sandbox`, `updater`) is not the tool its name
+/// promises; one whose programs carry only the owner's name gets `owner-repo`
+/// so a generic repository name (`desktop`) is not taken.
+pub fn nameCheck(bins: []const []const u8, owner: []const u8, repo: []const u8) NameCheck {
+    for (bins) |b| {
+        if (relatedName(b, repo)) return .repo;
+    }
+    for (bins) |b| {
+        if (relatedName(b, owner)) return .owner;
+    }
+    return .none;
+}
 
 const Outcome = union(enum) {
     built: Entry,
@@ -2574,12 +2621,24 @@ fn processSource(ctx: *Ctx, a: Allocator, res: Allocator, i: usize) Result {
     switch (outcome) {
         .reuse => return .{ .status = .kept, .entry = prev.?, .note = "unchanged" },
         .built => |e| {
+            var rename = false;
+            if (src.auto and prev == null) {
+                switch (nameCheck(e.bin, src.owner, src.repo)) {
+                    .repo => {},
+                    .owner => rename = true,
+                    .none => {
+                        var names = std.ArrayList(u8).init(res);
+                        for (e.bin, 0..) |b, k| names.writer().print("{s}{s}", .{ if (k != 0) ", " else "", b }) catch {};
+                        return .{ .status = .skipped, .note = std.fmt.allocPrint(res, "none of its programs ({s}) is named after {s}/{s}", .{ names.items, src.owner, src.repo }) catch "no program named after the project" };
+                    },
+                }
+            }
             const cloned = cloneEntry(res, e) catch @panic("out of memory");
             const note: []const u8 = if (prev) |p|
                 std.fmt.allocPrint(res, "was {s}", .{p.version}) catch ""
             else
                 "";
-            return .{ .status = if (prev == null) .new else .updated, .entry = cloned, .note = note };
+            return .{ .status = if (prev == null) .new else .updated, .entry = cloned, .note = note, .rename_to_owner = rename };
         },
         .fail => |msg| {
             const m = res.dupe(u8, msg) catch "failed";
@@ -2886,8 +2945,25 @@ pub fn execute(gpa: Allocator, opts: Options, out: anytype) !Report {
     // ---- assemble ----------------------------------------------------------
     var entries = std.ArrayList(Entry).init(arena);
     var in_sources = std.StringHashMap(void).init(arena);
+    // Discovered packages that take `owner-repo` instead of the repository
+    // name; written back into the auto-sources file so the name sticks.
+    var used = std.StringHashMap(void).init(arena);
+    for (sources) |src| try used.put(src.name, {});
+    var mk = manual.keyIterator();
+    while (mk.next()) |k| try used.put(k.*, {});
+    const Rename = struct { old: []const u8, new: []const u8, repo: []const u8 };
+    var renames = std.ArrayList(Rename).init(arena);
+    for (sources, results) |src, *r| {
+        if (!r.rename_to_owner or r.entry == null) continue;
+        const long = try std.fmt.allocPrint(arena, "{s}-{s}", .{ src.owner, src.repo });
+        const new = std.ascii.lowerString(long, long);
+        if (!safepath.isValidId(new) or used.contains(new)) continue;
+        try used.put(new, {});
+        r.entry.?.name = new;
+        try renames.append(.{ .old = src.name, .new = new, .repo = try std.fmt.allocPrint(arena, "{s}/{s}", .{ src.owner, src.repo }) });
+    }
     for (sources, results) |src, r| {
-        try in_sources.put(src.name, {});
+        try in_sources.put(if (r.entry) |e| e.name else src.name, {});
         if (src.auto) {
             if (r.status == .new) report.auto_new += 1;
             if (r.status == .skipped) {
@@ -3020,6 +3096,34 @@ pub fn execute(gpa: Allocator, opts: Options, out: anytype) !Report {
     }
     try std.fs.cwd().rename(tmp_out, opts.out_path);
 
+    if (renames.items.len != 0) {
+        if (opts.auto_sources_path) |ap| {
+            const text_in = try std.fs.cwd().readFileAlloc(arena, ap, 64 * 1024 * 1024);
+            var rewritten = std.ArrayList(u8).init(arena);
+            var lit = std.mem.splitScalar(u8, text_in, '\n');
+            var first_line = true;
+            while (lit.next()) |line| {
+                if (!first_line) try rewritten.append('\n');
+                first_line = false;
+                var toks = std.mem.tokenizeAny(u8, line, " \t");
+                const n0 = toks.next() orelse "";
+                const r0 = toks.next() orelse "";
+                var replaced = false;
+                for (renames.items) |rn| {
+                    if (std.mem.eql(u8, n0, rn.old) and std.mem.eql(u8, r0, rn.repo)) {
+                        try rewritten.writer().print("{s} {s}", .{ rn.new, rn.repo });
+                        replaced = true;
+                        break;
+                    }
+                }
+                if (!replaced) try rewritten.appendSlice(line);
+            }
+            std.fs.cwd().writeFile(.{ .sub_path = ap, .data = rewritten.items }) catch |e| {
+                try out.print("warning: cannot write {s}: {s}\n", .{ ap, @errorName(e) });
+            };
+        }
+        for (renames.items) |rn| try out.print("named {s} for {s}: its programs carry the owner's name\n", .{ rn.new, rn.repo });
+    }
     if (opts.rejects_path) |rp| {
         // Old rejects expire, so a project that starts publishing builds is
         // found again; one that is in the catalog now is no longer a reject.
@@ -3183,7 +3287,7 @@ const usage =
     \\                          a hand-written source with the same name or repository wins
     \\  --rejects FILE          discovered repositories with no usable download, skipped for
     \\                          30 days; updated after the run
-    \\  --max-new-auto N        discovered packages added per run (default 200); each one
+    \\  --max-new-auto N        discovered packages added per run (default 500); each one
     \\                          already in the catalog is looked at once a week
     \\
     \\Reads GITHUB_TOKEN from the environment: it raises the REST limit and enables
@@ -3929,6 +4033,70 @@ test "discovered sources: hand-written wins, a daily limit, failures remembered"
     opts.out_path = try std.fs.path.join(a, &.{ env.root, "fourth.json" });
     const r4 = try execute(testing.allocator, opts, sink.writer());
     try testing.expectEqual(@as(usize, 13), r4.auto_sources);
+}
+
+test "a discovered package named after its owner's program becomes owner-repo, and the name sticks" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    var env = try TestEnv.init(a);
+    defer env.tmp.cleanup();
+    try env.tmp.dir.makePath("fx/zen__desktop");
+    try env.tmp.dir.makePath("fx/facebook__native");
+
+    // zen/desktop ships `zen`; facebook/native ships only a sandbox helper.
+    const Pkg = struct { owner: []const u8, repo: []const u8, member: []const u8 };
+    for ([_]Pkg{ .{ .owner = "zen", .repo = "desktop", .member = "zen-1.0/zen" }, .{ .owner = "facebook", .repo = "native", .member = "native-1.0/chrome-sandbox" } }) |pk| {
+        var tar = std.ArrayList(u8).init(a);
+        try tarMember(&tar, pk.member, 0o755, "\x7fELF program");
+        try tar.appendNTimes(0, 1024);
+        const h = hexOf(tar.items);
+        const asset = try std.fmt.allocPrint(a, "{s}-1.0-x86_64-unknown-linux-gnu.tar", .{pk.repo});
+        try writeTestFile(env.tmp.dir, try std.fmt.allocPrint(a, "fx/{s}__{s}.release.json", .{ pk.owner, pk.repo }), try std.fmt.allocPrint(a,
+            \\{{"tag_name":"v1.0.0","assets":[{{"name":"{s}","browser_download_url":"https://github.com/{s}/{s}/releases/download/v1.0.0/{s}","size":{d},"digest":"sha256:{s}"}}]}}
+        , .{ asset, pk.owner, pk.repo, asset, tar.items.len, &h }));
+        try writeTestFile(env.tmp.dir, try std.fmt.allocPrint(a, "fx/{s}__{s}.repo.json", .{ pk.owner, pk.repo }), widget_repo_json);
+        try writeTestFile(env.tmp.dir, try std.fmt.allocPrint(a, "fx/{s}__{s}/{s}", .{ pk.owner, pk.repo, asset }), tar.items);
+    }
+    try writeTestFile(env.tmp.dir, "sources.txt", "");
+    try writeTestFile(env.tmp.dir, "auto.txt", "# list\ndesktop zen/desktop\nnative facebook/native\n");
+
+    var sink = std.ArrayList(u8).init(a);
+    var opts = Options{ .sources_path = env.sources, .out_path = env.out, .fixtures_dir = env.fixtures, .jobs = 1, .now_epoch = 1781740800, .quiet = true };
+    opts.auto_sources_path = try std.fs.path.join(a, &.{ env.root, "auto.txt" });
+    opts.rejects_path = try std.fs.path.join(a, &.{ env.root, "rejects.txt" });
+    const r = try execute(testing.allocator, opts, sink.writer());
+    try testing.expectEqual(@as(usize, 1), r.packages);
+    try testing.expectEqual(@as(usize, 1), r.auto_rejected);
+
+    var reg = try registry.loadFromJsonFile(testing.allocator, env.out, null);
+    defer reg.deinit();
+    try testing.expect(reg.get("zen-desktop") != null);
+    try testing.expect(reg.get("desktop") == null);
+    // The list now carries the new name, so the next run finds the entry.
+    const list = try std.fs.cwd().readFileAlloc(a, opts.auto_sources_path.?, 1 << 20);
+    try testing.expectEqualStrings("# list\nzen-desktop zen/desktop\nnative facebook/native\n", list);
+    const rejects = try std.fs.cwd().readFileAlloc(a, opts.rejects_path.?, 1 << 20);
+    try testing.expect(std.mem.indexOf(u8, rejects, "facebook/native ") != null);
+
+    opts.previous_path = env.out;
+    opts.out_path = try std.fs.path.join(a, &.{ env.root, "second.json" });
+    const r2 = try execute(testing.allocator, opts, sink.writer());
+    try testing.expectEqual(@as(usize, 0), r2.auto_new);
+    try testing.expectEqual(@as(usize, 1), r2.packages);
+}
+
+test "nameCheck: programs must be named after the project" {
+    try testing.expectEqual(NameCheck.repo, nameCheck(&.{"gitea"}, "go-gitea", "gitea"));
+    try testing.expectEqual(NameCheck.repo, nameCheck(&.{ "rg", "ripgrep" }, "BurntSushi", "ripgrep"));
+    try testing.expectEqual(NameCheck.repo, nameCheck(&.{"fd"}, "sharkdp", "fd"));
+    try testing.expectEqual(NameCheck.owner, nameCheck(&.{ "zen", "updater" }, "zen-browser", "desktop"));
+    try testing.expectEqual(NameCheck.none, nameCheck(&.{ "chrome-sandbox", "chrome_crashpad_handler" }, "facebook", "react-native"));
+    try testing.expectEqual(NameCheck.none, nameCheck(&.{"forc"}, "FuelLabs", "sway"));
+    try testing.expect(!relatedName("a", "abc"));
+    try testing.expect(!relatedName("go", "gogs"));
+    try testing.expect(relatedName("gh", "gh"));
 }
 
 test "refreshSlot spreads names over the week" {
