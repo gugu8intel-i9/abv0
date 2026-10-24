@@ -90,7 +90,7 @@ jobs:
             exit 0
           fi
           ./zig-out/bin/build-catalog discover --out catalog/auto-sources.txt --max-wait-min 40 \
-            || echo "::warning title=Discovery incomplete::the search stopped early; the previous list is used"
+            || echo "::warning title=Discovery incomplete::the search stopped early; what it found is added to last week's list"
           grep -vc '^#' catalog/auto-sources.txt || true
 
       - name: Build the catalog from upstream releases

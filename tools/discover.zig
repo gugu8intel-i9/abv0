@@ -214,14 +214,58 @@ fn moreStars(_: void, x: Repo, y: Repo) bool {
     return std.mem.order(u8, x.name, y.name) == .lt;
 }
 
+/// The previous list: lower-cased `owner/repo` to the package name it had.
+pub fn parsePrevious(a: Allocator, text: []const u8) !std.StringHashMap([]const u8) {
+    var map = std.StringHashMap([]const u8).init(a);
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+        var it = std.mem.tokenizeAny(u8, line, " \t");
+        const name = it.next() orelse continue;
+        const repo = it.next() orelse continue;
+        if (!safepath.isValidId(name) or ghrelease.parseSpec(repo) == null) continue;
+        try map.put(try std.ascii.allocLowerString(a, repo), try a.dupe(u8, name));
+    }
+    return map;
+}
+
+/// The previous list's repositories, for a search that stopped early: they
+/// stay in the list (after everything found this time) so nothing drops out.
+pub fn previousRepos(a: Allocator, previous: *const std.StringHashMap([]const u8), text: []const u8) ![]Repo {
+    _ = previous;
+    var out = std.ArrayList(Repo).init(a);
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0 or line[0] == '#') continue;
+        var it = std.mem.tokenizeAny(u8, line, " \t");
+        _ = it.next() orelse continue;
+        const spec = ghrelease.parseSpec(it.next() orelse continue) orelse continue;
+        try out.append(.{ .owner = try a.dupe(u8, spec.owner), .name = try a.dupe(u8, spec.repo), .stars = 0 });
+    }
+    return out.toOwnedSlice();
+}
+
 /// The auto-sources file: most stars first, each repository once, none that
-/// the hand-written sources already list (by repository or by name).
-pub fn render(a: Allocator, found: []Repo, hand_names: []const []const u8, hand_repos: []const []const u8, generated: []const u8) ![]u8 {
+/// the hand-written sources already list (by repository or by name). A
+/// repository keeps the package name it had in `previous`, so a package is
+/// never renamed under the people who installed it.
+pub fn render(a: Allocator, found: []Repo, hand_names: []const []const u8, hand_repos: []const []const u8, previous: *const std.StringHashMap([]const u8), generated: []const u8) ![]u8 {
     std.mem.sort(Repo, found, {}, moreStars);
     var taken = std.StringHashMap(void).init(a);
     for (hand_names) |n| try taken.put(n, {});
     var repos = std.StringHashMap(void).init(a);
     for (hand_repos) |r| try repos.put(try std.ascii.allocLowerString(a, r), {});
+    // Names already given out are reserved for their repositories.
+    var reserved = std.StringHashMap(void).init(a);
+    for (found) |r| {
+        const key = try std.ascii.allocLowerString(a, try std.fmt.allocPrint(a, "{s}/{s}", .{ r.owner, r.name }));
+        if (repos.contains(key)) continue;
+        if (previous.get(key)) |n| {
+            if (!taken.contains(n)) try reserved.put(n, {});
+        }
+    }
 
     var lines = std.ArrayList(u8).init(a);
     var count: usize = 0;
@@ -229,7 +273,16 @@ pub fn render(a: Allocator, found: []Repo, hand_names: []const []const u8, hand_
         const key = try std.ascii.allocLowerString(a, try std.fmt.allocPrint(a, "{s}/{s}", .{ r.owner, r.name }));
         if (repos.contains(key)) continue;
         try repos.put(key, {});
-        const name = (try packageName(a, r, &taken)) orelse continue;
+        const kept: ?[]const u8 = if (previous.get(key)) |n| (if (!taken.contains(n)) n else null) else null;
+        const name = kept orelse blk: {
+            // A new repository may not take a name another one already has.
+            var blocked = std.StringHashMap(void).init(a);
+            var it = taken.keyIterator();
+            while (it.next()) |k| try blocked.put(k.*, {});
+            var rit = reserved.keyIterator();
+            while (rit.next()) |k| try blocked.put(k.*, {});
+            break :blk (try packageName(a, r, &blocked)) orelse continue;
+        };
         try taken.put(name, {});
         try lines.writer().print("{s} {s}/{s}\n", .{ name, r.owner, r.name });
         count += 1;
@@ -257,13 +310,46 @@ const Client = struct {
     waited_s: u64 = 0,
     max_wait_s: u64,
     calls: usize = 0,
+    server_errors: u64 = 0,
 
     /// POST one query. Rate limits are waited out while the budget lasts;
-    /// a server error is retried a few times.
+    /// a server error or a dropped connection (a pooled one goes stale during
+    /// a long wait) is retried a few times on a new connection.
     fn post(self: *Client, a: Allocator, body: []const u8) ![]u8 {
-        const auth = try std.fmt.allocPrint(a, "Bearer {s}", .{self.token});
         var attempt: usize = 0;
         while (true) : (attempt += 1) {
+            // GitHub's secondary limits punish bursts of search queries.
+            std.time.sleep(1500 * std.time.ns_per_ms);
+            if (self.exchange(a, body)) |resp| return resp else |e| switch (e) {
+                error.RateLimited, error.HttpError, error.OutOfMemory => return e,
+                error.Retry => {
+                    // After a long wait the pooled connection is likely dead.
+                    self.resetPool(a);
+                    continue;
+                },
+                else => {
+                    if (attempt >= 4) return e;
+                    std.debug.print("discover: {s}; retrying on a new connection\n", .{@errorName(e)});
+                    self.resetPool(a);
+                    std.time.sleep((attempt + 1) * 5 * std.time.ns_per_s);
+                },
+            }
+        }
+    }
+
+    /// Drop every pooled connection; the next request opens a fresh one.
+    fn resetPool(self: *Client, a: Allocator) void {
+        const gpa = self.http.allocator;
+        self.http.deinit();
+        self.http = .{ .allocator = gpa };
+        self.http.initDefaultProxies(a) catch {};
+    }
+
+    /// One request. `error.Retry` means "waited for a rate limit or a server
+    /// error; send it again".
+    fn exchange(self: *Client, a: Allocator, body: []const u8) ![]u8 {
+        const auth = try std.fmt.allocPrint(a, "Bearer {s}", .{self.token});
+        {
             var hbuf: [16 * 1024]u8 = undefined;
             var req = try self.http.open(.POST, try std.Uri.parse(graphql_url), .{
                 .server_header_buffer = &hbuf,
@@ -304,11 +390,12 @@ const Client = struct {
                 std.debug.print("discover: rate limited; waiting {d} s\n", .{wait});
                 std.time.sleep(wait * std.time.ns_per_s);
                 self.waited_s += wait;
-                continue;
+                return error.Retry;
             }
-            if (status >= 500 and attempt < 3) {
-                std.time.sleep((attempt + 1) * 5 * std.time.ns_per_s);
-                continue;
+            if (status >= 500 and self.server_errors < 6) {
+                self.server_errors += 1;
+                std.time.sleep(self.server_errors * 5 * std.time.ns_per_s);
+                return error.Retry;
             }
             std.debug.print("discover: HTTP {d}: {s}\n", .{ status, resp[0..@min(resp.len, 300)] });
             return error.HttpError;
@@ -328,6 +415,7 @@ pub fn main(gpa: Allocator, args: []const []const u8) !void {
     const a = arena_state.allocator();
 
     var out_path: ?[]const u8 = null;
+    var previous_path: ?[]const u8 = null;
     var sources_path: []const u8 = "catalog/sources.txt";
     var min_stars: u32 = 500;
     var max_wait_s: u64 = 50 * 60;
@@ -341,6 +429,8 @@ pub fn main(gpa: Allocator, args: []const []const u8) !void {
             out_path = v;
         } else if (std.mem.eql(u8, arg, "--sources")) {
             sources_path = v;
+        } else if (std.mem.eql(u8, arg, "--previous")) {
+            previous_path = v;
         } else if (std.mem.eql(u8, arg, "--min-stars")) {
             min_stars = std.fmt.parseInt(u32, v, 10) catch die("--min-stars wants a number", .{});
         } else if (std.mem.eql(u8, arg, "--max-wait-min")) {
@@ -348,6 +438,9 @@ pub fn main(gpa: Allocator, args: []const []const u8) !void {
         } else die("unknown option '{s}'", .{arg});
     }
     const out = out_path orelse die("--out is required", .{});
+    // The last list keeps package names stable; by default the file being replaced.
+    const prev_text: []const u8 = std.fs.cwd().readFileAlloc(a, previous_path orelse out, 16 * 1024 * 1024) catch "";
+    const previous = try parsePrevious(a, prev_text);
     const token = std.process.getEnvVarOwned(a, "GITHUB_TOKEN") catch die("GITHUB_TOKEN must be set (GraphQL search needs a token)", .{});
 
     // What is written by hand already.
@@ -401,6 +494,7 @@ pub fn main(gpa: Allocator, args: []const []const u8) !void {
                     std.debug.print("discover: unreadable answer for {s}: {s}\n", .{ search, @errorName(e) });
                     break;
                 };
+                if (first) std.debug.print("discover: {s} {d}..{?d}: {d} repositories\n", .{ lang, range.lo, range.hi, page.count });
                 if (first and page.count > 1000) {
                     if (split(range)) |halves| {
                         try stack.append(halves[1]);
@@ -417,15 +511,16 @@ pub fn main(gpa: Allocator, args: []const []const u8) !void {
         std.debug.print("discover: {s}: {d} candidates so far ({d} queries)\n", .{ lang, found.items.len, client.calls });
     }
 
-    // A partial search would drop packages that are in the catalog today, so
-    // the old file is kept.
-    if (stopped) {
-        std.debug.print("discover: search incomplete; {s} left as it is\n", .{out});
-        std.process.exit(1);
-    }
-    const rendered = try render(a, found.items, hand_names.items, hand_repos.items, generated);
+    // A search that stopped early keeps the last list's projects as well
+    // (after the ones found now), so nothing drops out of the catalog because
+    // of a rate limit; the next run picks up where this one could not.
+    if (stopped) try found.appendSlice(try previousRepos(a, &previous, prev_text));
+    const rendered = try render(a, found.items, hand_names.items, hand_repos.items, &previous, generated);
     try std.fs.cwd().writeFile(.{ .sub_path = out, .data = rendered });
-    std.debug.print("discover: wrote {s} ({d} queries)\n", .{ out, client.calls });
+    std.debug.print("discover: wrote {s} ({d} queries, {d} s waiting for rate limits){s}\n", .{
+        out, client.calls, client.waited_s, if (stopped) "; the search stopped early, so last week's list was kept too" else "",
+    });
+    if (stopped) std.process.exit(1);
 }
 
 /// YYYY-MM-DD for days since the epoch.
@@ -514,7 +609,27 @@ test "render: most stars first, hand-written sources win, names never clash" {
         .{ .owner = "carol", .name = "jq", .stars = 900 },
         .{ .owner = "bob", .name = "tool", .stars = 5000 },
     };
-    const out = try render(a, &found, &.{ "ripgrep", "jq" }, &.{"BurntSushi/ripgrep"}, "2026-10-24");
+    var none = std.StringHashMap([]const u8).init(a);
+    const out = try render(a, &found, &.{ "ripgrep", "jq" }, &.{"BurntSushi/ripgrep"}, &none, "2026-10-24");
     const body = out[std.mem.indexOf(u8, out, "\ntool ").? + 1 ..];
     try testing.expectEqualStrings("tool bob/tool\ncarol-jq carol/jq\nalice-tool alice/Tool\n", body);
+}
+
+test "render keeps last week's names, even when a more popular namesake appears" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const previous = try parsePrevious(a, "# old\ntool alice/Tool\nother carol/other\n");
+    var found = [_]Repo{
+        .{ .owner = "alice", .name = "Tool", .stars = 800 },
+        .{ .owner = "bob", .name = "tool", .stars = 5000 },
+    };
+    const out = try render(a, &found, &.{}, &.{}, &previous, "2026-10-24");
+    const body = out[std.mem.indexOf(u8, out, "\nbob-tool ").? + 1 ..];
+    try testing.expectEqualStrings("bob-tool bob/tool\ntool alice/Tool\n", body);
+
+    // A search that stopped early keeps the old projects, after the new ones.
+    const old = try previousRepos(a, &previous, "tool alice/Tool\nother carol/other\n");
+    try testing.expectEqual(@as(usize, 2), old.len);
+    try testing.expectEqualStrings("carol", old[1].owner);
 }
