@@ -569,7 +569,7 @@ microsandbox superradcompany/microsandbox
 gorush appleboy/gorush
 connect redpanda-data/connect
 dlx OwO-Network/DLX
-origin openshift/origin
+openshift-origin openshift/origin
 openbao openbao/openbao
 prek j178/prek
 alertmanager prometheus/alertmanager
