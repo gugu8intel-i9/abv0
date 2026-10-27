@@ -1687,7 +1687,7 @@ pack buildpacks/pack
 strongswan strongswan/strongswan
 llvm-mingw mstorsjo/llvm-mingw
 autocli nashsu/AutoCLI
-panel acepanel/panel
+acepanel-panel acepanel/panel
 steam-audio ValveSoftware/steam-audio
 lotus filecoin-project/lotus
 userver userver-framework/userver
