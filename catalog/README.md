@@ -186,7 +186,7 @@ the public half, compiled into every abv0 binary.
 
 `.github/workflows/catalog-build.yml` builds the whole catalog and publishes it
 without a signature, for review. It runs on manual dispatch (optional input `force`)
-and on a push to a `claude/**` branch that changes `catalog/**`,
+and on a push to any branch other than `main` that changes `catalog/**`,
 `tools/build-catalog.zig` or the workflow itself. It needs no secrets:
 
 1. Build `abv0` and `build-catalog`.
