@@ -6,8 +6,10 @@ name: Benchmark
 on:
   workflow_dispatch:
   push:
-    branches:
-      - "claude/**"
+    # Work branches only; main has its own scheduled runs.
+    branches-ignore:
+      - main
+      - catalog-unsigned
     paths:
       - "src/**"
       - "build.zig"

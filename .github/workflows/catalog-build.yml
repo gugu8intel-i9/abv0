@@ -28,8 +28,10 @@ on:
         required: false
         default: false
   push:
-    branches:
-      - "claude/**"
+    # Work branches only; main has its own scheduled runs.
+    branches-ignore:
+      - main
+      - catalog-unsigned
     paths:
       - "catalog/**"
       - "tools/build-catalog.zig"

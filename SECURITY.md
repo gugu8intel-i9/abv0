@@ -23,6 +23,12 @@ hostile:
 Everything derived from those inputs is validated before it reaches the filesystem or a
 `exec` call.
 
+Packages from `catalog/vendor.txt` come from their makers' own servers, which publish no
+checksum abv0 can check. The builder downloads each file over https, pins its SHA-256 in
+the signed catalog and scans it. A file swapped behind the same link afterwards no
+longer matches, and abv0 refuses it. Trust in such a package rests on the vendor and on
+the https connection the builder used.
+
 Packages that `build-catalog discover` finds are chosen by rules, not by a person: at
 least 500 stars, not a fork, mirror or archive, active, and at least six months old,
 which makes fake stars costly. They go through the same pipeline as hand-written

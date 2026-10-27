@@ -483,6 +483,19 @@ project, and `tools/build-catalog.zig` reads that project's GitHub releases to w
 - A GitHub workflow runs it daily, signs the result with the maintainer's key, and commits
   it only when it changed.
 - Software that is not on GitHub releases is listed in `catalog/manual.json`.
+- **Proprietary software** comes from its maker's own download links, listed in
+  `catalog/vendor.txt`. Included so far:
+  - apps: Chrome, VS Code, Slack, Discord, Docker Desktop, Notion, Postman, Steam,
+    Raycast, Warp, Arc and ChatGPT, plus Firefox and Signal (open source, but published
+    only on their makers' sites);
+  - command-line tools: Terraform, Vault, Packer, Consul, Nomad and the 1Password CLI.
+
+  The builder follows each link, reads the version from the vendor's update feed or the
+  file name, downloads the file once, pins its SHA-256 in the signed catalog and runs the
+  malware scan. Mac apps must be a `.dmg` or `.zip` (`.pkg` installers such as Zoom's
+  are not supported), and Windows needs a portable `.zip` build. A few vendors (Chrome,
+  Docker, Steam, Postman) replace the file behind one fixed link. Until the next daily
+  build, abv0 then refuses that download, because its checksum no longer matches.
 - **Discovered packages.** Every Monday the workflow also searches GitHub for popular
   projects that publish ready-made downloads (`build-catalog discover`). It searches
   compiled languages such as Go, Rust, C, C++ and Zig, and keeps projects that meet all
