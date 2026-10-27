@@ -4,6 +4,20 @@
 
 ### New
 
+- **Hugging Face models and datasets.** `abv0 install hf:owner/model`,
+  `hf:datasets/owner/name`, with an optional `@revision`. Files go into the Hugging Face
+  cache in `huggingface_hub`'s layout (blobs, snapshot links, refs), so Python tools find
+  them offline.
+  - Every file is checked against the Hub's SHA-256 (large files) or git blob id
+    (small ones), all from one pinned commit.
+  - Pickle files are scanned for dangerous imports, and refused unless
+    `--allow-suspicious`.
+  - Copies in other weight formats are skipped next to `.safetensors` (`--all-files`
+    takes them).
+  - `--include` and `--exclude` pick files; a download over 25 GB needs `--include` or
+    `--force`; files already cached are reused.
+  - Tokens come from `HF_TOKEN` or the `huggingface-cli login` file.
+  - `abv0 hf list | path | search | search-datasets`, and `abv0 uninstall hf:...`.
 - **Proprietary software.** `catalog/vendor.txt` lists software published on its maker's
   own site. Each line gives a homepage instead of `owner/repo`, plus `url.<platform>=` for
   each download link (`url.macos=` for a universal Mac build). `{version}` in a link is

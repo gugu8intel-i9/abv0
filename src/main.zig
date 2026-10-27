@@ -18,6 +18,7 @@ const bloom = @import("bloom.zig");
 const wal = @import("wal.zig");
 const sign = @import("sign.zig");
 const cmds_extra = @import("cmds_extra.zig");
+const hf = @import("hf.zig");
 const ghrelease = @import("ghrelease.zig");
 const ghverify = @import("ghverify.zig");
 
@@ -82,8 +83,16 @@ const Args = struct {
     from_brew_list: ?[]const u8 = null,
     /// `migrate --brewfile FILE`: names from a Brewfile's `brew "x"` lines.
     brewfile: ?[]const u8 = null,
+    /// `install hf:...`: only the files matching these patterns (comma lists, repeatable).
+    include: std.ArrayListUnmanaged([]const u8) = .{},
+    /// `install hf:...`: leave out the files matching these.
+    exclude: std.ArrayListUnmanaged([]const u8) = .{},
+    /// `install hf:...`: also take the duplicate weight formats.
+    all_files: bool = false,
 
     fn deinit(self: *Args) void {
+        self.include.deinit(self.rest.allocator);
+        self.exclude.deinit(self.rest.allocator);
         self.rest.deinit();
     }
 };
@@ -183,6 +192,16 @@ fn parseArgsDiag(allocator: std.mem.Allocator, argv: []const []const u8, diag: *
             args.install = true;
         } else if (std.mem.eql(u8, arg, "--all")) {
             args.all = true;
+        } else if (std.mem.eql(u8, arg, "--include") or std.mem.eql(u8, arg, "--exclude")) {
+            i += 1;
+            if (i >= argv.len) return failArg(diag, arg, "", error.MissingOptionValue);
+            const list = if (arg[2] == 'i') &args.include else &args.exclude;
+            var it = std.mem.splitScalar(u8, argv[i], ',');
+            while (it.next()) |p| {
+                if (p.len != 0) try list.append(allocator, p);
+            }
+        } else if (std.mem.eql(u8, arg, "--all-files")) {
+            args.all_files = true;
         } else if (std.mem.eql(u8, arg, "--from-brew-list")) {
             i += 1;
             if (i >= argv.len) return failArg(diag, arg, "", error.MissingOptionValue);
@@ -380,14 +399,21 @@ const malware_flag = Flag{ .name = "--malware", .help = "Report a suspicious pac
 const commands = [_]Command{
     .{
         .name = "install",
-        .args = "<pkg|gh:owner/repo[@tag]>...",
-        .summary = "Install packages and their dependencies, verified, in parallel. A gh:owner/repo spec installs that project's own GitHub release (no recipe needed), checked against GitHub's sha256 digest or the release's checksums file.",
+        .args = "<pkg|gh:owner/repo[@tag]|hf:owner/model|hf:datasets/owner/name>...",
+        .summary = "Install packages and their dependencies, verified, in parallel. A gh:owner/repo spec installs that project's own GitHub release (no recipe needed), checked against GitHub's sha256 digest or the release's checksums file. An hf: spec downloads a Hugging Face model or dataset into the Hugging Face cache, every file checked against the Hub's hashes and pickles scanned.",
         .flags = &.{
-            dry_run_flag,    json_flag,                                                                         jobs_flag,  platform_flag,
-            unverified_flag, suspicious_flag,                                                                   force_flag, quiet_flag,
-            verbose_flag,    .{ .name = "--micro-split", .help = "Parallel ranged download for large assets" },
+            dry_run_flag,                                                                      json_flag,                                                                         jobs_flag,                                                                                             platform_flag,
+            unverified_flag,                                                                   suspicious_flag,                                                                   force_flag,                                                                                            quiet_flag,
+            verbose_flag,                                                                      .{ .name = "--micro-split", .help = "Parallel ranged download for large assets" }, .{ .name = "--include <glob,...>", .help = "hf: only these files (\"*.safetensors\", \"*Q4_K_M*\")" }, .{ .name = "--exclude <glob,...>", .help = "hf: leave these files out" },
+            .{ .name = "--all-files", .help = "hf: also the copies in other weight formats" },
         },
         .example = "abv0 install jq gh:BurntSushi/ripgrep",
+    },
+    .{
+        .name = "hf",
+        .args = "list | path <hf:spec> | search <words> | search-datasets <words>",
+        .summary = "Hugging Face models and datasets: list what is in the Hugging Face cache, print where one is, or search the Hub (most downloaded first). Install with `abv0 install hf:owner/model`.",
+        .example = "abv0 hf search llama 3.2 gguf",
     },
     .{
         .name = "uninstall",
@@ -679,6 +705,9 @@ fn renderUsage(w: anytype) !void {
     try w.writeAll(
         \\  install <pkg>...        Install packages and their dependencies (verified, in parallel)
         \\  install gh:owner/repo   Install any GitHub project's release, verified (no recipe needed)
+        \\  install hf:owner/model  Download a Hugging Face model (hf:datasets/owner/name for a dataset),
+        \\                          verified, into the Hugging Face cache; --include "*.gguf" picks files
+        \\  hf list|path|search     Hugging Face models and datasets in the cache, or on the Hub
         \\  uninstall <pkg>...      Remove packages and the links they created
         \\  upgrade [--all|pkg]...  Upgrade outdated packages (keeps the previous version for rollback)
         \\  outdated                List packages with a newer version available (pinned ones marked)
@@ -750,6 +779,8 @@ fn renderUsage(w: anytype) !void {
         \\  --online                With search: also search GitHub repositories
         \\  --open                  With home: open the page in a browser
         \\  --all                   With upgrade: every outdated package; with migrate: dependencies too
+        \\  --include <glob,...>    With install hf:...: only these files; --exclude leaves files out
+        \\  --all-files             With install hf:...: also the copies in other weight formats
         \\  --from-brew-list <f>    With migrate: names from `brew list --formula` (- for stdin)
         \\  --brewfile <f>          With migrate: names from a Brewfile (- for stdin)
         \\  --install               With migrate: install what matched
@@ -1913,6 +1944,47 @@ fn run(base: std.mem.Allocator, a: std.mem.Allocator) !u8 {
         auto.markDone(a, st.root, "gc");
     }
 
+    // ---- Hugging Face: no registry, no store ----
+    if (std.mem.eql(u8, cmd, "hf")) return cmdHf(a, args.rest.items);
+    if (std.mem.eql(u8, cmd, "install") or std.mem.eql(u8, cmd, "uninstall")) {
+        var hf_count: usize = 0;
+        for (args.rest.items) |item| {
+            if (std.mem.startsWith(u8, item, "hf:")) hf_count += 1;
+        }
+        if (hf_count != 0 and hf_count != args.rest.items.len) {
+            term.err("{s}error{s}: give hf: names in a command of their own (they go to the Hugging Face cache, not the package store)\n", .{ term.red, term.reset });
+            return 2;
+        }
+        var bad: u8 = 0;
+        for (args.rest.items) |item| {
+            if (hf_count == 0) break;
+            const spec = hf.parseSpec(item) orelse {
+                term.err("{s}error{s}: '{}' is not a Hugging Face name (hf:owner/model, hf:datasets/owner/name, @revision optional)\n", .{ term.red, term.reset, safe(item) });
+                bad = 2;
+                continue;
+            };
+            const rc = if (std.mem.eql(u8, cmd, "install"))
+                try hf.install(base, spec, .{
+                    .include = args.include.items,
+                    .exclude = args.exclude.items,
+                    .all = args.all_files,
+                    .force = args.force,
+                    .allow_suspicious = args.allow_suspicious,
+                    .dry_run = output.dry_run,
+                    .quiet = output.quiet,
+                    .jobs = args.jobs orelse 4,
+                })
+            else
+                try hf.remove(base, spec, output.dry_run);
+            if (rc != 0 and bad == 0) bad = rc;
+        }
+        if (hf_count != 0) return bad;
+    }
+    if (args.include.items.len != 0 or args.exclude.items.len != 0 or args.all_files) {
+        term.err("{s}error{s}: --include, --exclude and --all-files apply to hf: installs\n", .{ term.red, term.reset });
+        return 2;
+    }
+
     // ---- commands that need no registry ----
     if (std.mem.eql(u8, cmd, "autoupdate")) return cmdAutoupdate(a, &st, args.rest.items);
     if (std.mem.eql(u8, cmd, "gc")) {
@@ -2524,6 +2596,28 @@ const max_names_bytes = 1024 * 1024;
 fn readNamesInput(a: std.mem.Allocator, path: []const u8) ![]u8 {
     if (std.mem.eql(u8, path, "-")) return std.io.getStdIn().reader().readAllAlloc(a, max_names_bytes);
     return std.fs.cwd().readFileAlloc(a, path, max_names_bytes);
+}
+
+/// `abv0 hf list | path <spec> | search <words> | search-datasets <words>`.
+fn cmdHf(a: std.mem.Allocator, rest: []const []const u8) !u8 {
+    const usage = "usage: abv0 hf list | path <hf:owner/name> | search <words> | search-datasets <words>\n";
+    if (rest.len == 0) {
+        term.err(usage, .{});
+        return 2;
+    }
+    const sub = rest[0];
+    if (std.mem.eql(u8, sub, "list") and rest.len == 1) return hf.listCache(a);
+    if (std.mem.eql(u8, sub, "path") and rest.len == 2) {
+        const spec = hf.parseSpec(rest[1]) orelse {
+            term.err("{s}error{s}: '{}' is not a Hugging Face name\n", .{ term.red, term.reset, safe(rest[1]) });
+            return 2;
+        };
+        return hf.snapshotPath(a, spec);
+    }
+    if (std.mem.eql(u8, sub, "search") and rest.len >= 2) return hf.search(a, .model, rest[1..]);
+    if (std.mem.eql(u8, sub, "search-datasets") and rest.len >= 2) return hf.search(a, .dataset, rest[1..]);
+    term.err(usage, .{});
+    return 2;
 }
 
 /// One name to move over from Homebrew.
@@ -4414,6 +4508,7 @@ comptime {
     _ = @import("net.zig");
     _ = @import("store.zig");
     _ = @import("cmds_extra.zig");
+    _ = @import("hf.zig");
     _ = @import("stream.zig");
     _ = @import("http.zig");
     _ = @import("ghrelease.zig");

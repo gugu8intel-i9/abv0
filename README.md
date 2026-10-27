@@ -197,6 +197,38 @@ MAINTENANCE
   help [command]           This message, or help for one command
 ```
 
+### Hugging Face models and datasets
+
+```sh
+abv0 install hf:HuggingFaceTB/SmolLM2-135M-Instruct      # a model
+abv0 install hf:datasets/fka/awesome-chatgpt-prompts     # a dataset
+abv0 install hf:bartowski/Llama-3.2-1B-Instruct-GGUF --include "*Q4_K_M*"
+abv0 hf search llama 3.2 gguf                             # most downloaded first
+abv0 hf list                                              # what is in the cache
+abv0 hf path hf:HuggingFaceTB/SmolLM2-135M-Instruct      # where its files are
+abv0 uninstall hf:HuggingFaceTB/SmolLM2-135M-Instruct
+```
+
+- **Where files go:** the Hugging Face cache, in the same layout as Hugging Face's own
+  tools, so transformers, datasets, diffusers and llama.cpp find them without
+  downloading again. The cache is `HF_HUB_CACHE`, else `HF_HOME/hub`, else
+  `~/.cache/huggingface/hub`.
+- **Checks:** every file is checked against the Hub: large files against their
+  SHA-256, small ones against their git blob id. The whole download comes from one
+  pinned commit.
+- **Pickle scan:** PyTorch pickles (`.bin`, `.pt`, `.pkl`, ...) can run code when
+  loaded, so they are scanned for imports such as `os.system` or `builtins.eval`, and
+  refused if they have one (`--allow-suspicious` keeps them).
+- **What gets downloaded:**
+  - When a model has `.safetensors` weights, its copies in other formats (PyTorch
+    `.bin`, ONNX, TensorFlow, ...) are skipped. That often saves gigabytes, and
+    `--all-files` takes them too.
+  - `--include` and `--exclude` take patterns such as `"*.gguf"` or `"onnx/*"`.
+  - A download over 25 GB needs `--include` or `--force`.
+  - Files already in the cache aren't downloaded again.
+- **Gated and private repositories** need a token: `HF_TOKEN`, or the one
+  `huggingface-cli login` saves.
+
 ### Moving from Homebrew
 
 ```sh
