@@ -4,6 +4,21 @@
 
 ### New
 
+- **Proprietary software.** `catalog/vendor.txt` lists software published on its maker's
+  own site. Each line gives a homepage instead of `owner/repo`, plus `url.<platform>=` for
+  each download link (`url.macos=` for a universal Mac build). `{version}` in a link is
+  filled in from `version-url=` and `version-after=`.
+  - Version: read from the vendor's update feed, else from the final download URL, else
+    from the file's Last-Modified date.
+  - Links are followed by the builder, https only. A link that lands on a stable,
+    versioned file is pinned as that file; one that lands on a signed, expiring URL stays
+    the original link.
+  - Each file is downloaded once, its SHA-256 pinned and the malware scan run. A platform
+    whose link fails is left out.
+  - The license defaults to `Proprietary`.
+  - First entries: Chrome, VS Code (Mac and Windows), Slack, Discord, Docker Desktop,
+    Notion, Postman, Steam, Raycast, Warp, Arc, ChatGPT, Firefox, Signal, Terraform,
+    Vault, Packer, Consul, Nomad and the 1Password CLI (`op`).
 - **Thousands more packages, found automatically.** `build-catalog discover` searches
   GitHub every week for popular projects (500+ stars, compiled languages, active, at least
   six months old) whose latest release has downloads, and writes them to

@@ -163,6 +163,7 @@ pub fn build(b: *std.Build) void {
     const run_catalog_tests = b.addRunArtifact(catalog_tests);
     // The sources tests read this file at run time; re-run them when it changes.
     run_catalog_tests.addFileInput(b.path("catalog/sources.txt"));
+    run_catalog_tests.addFileInput(b.path("catalog/vendor.txt"));
     test_step.dependOn(&run_catalog_tests.step);
 
     // ---- compile check for every supported platform ------------------------

@@ -1,0 +1,50 @@
+# Software published on its maker's own site instead of GitHub releases:
+# proprietary apps and tools, and a few open-source ones that are only
+# distributed this way.
+#
+#   name  https://homepage  key=value ...
+#
+# url.<platform>=URL    the official download link for one platform; url.macos=
+#                       sets both Macs (a universal build). Links may redirect:
+#                       one that lands on a stable, versioned file is pinned as
+#                       that file; one that lands on a signed, expiring URL stays
+#                       the original link. {version} is replaced by the version.
+# version-url=URL       a page that names the current version (an update feed)
+# version-after=TEXT    the version is the text right after TEXT on that page, or
+#                       in the final download URL when there is no version-url.
+#                       Without either, the version is read from the final URL,
+#                       else from the file's Last-Modified date (YYYY.M.D).
+# app=, win=, bin=, desc=, license=   as in sources.txt (license defaults to
+#                       Proprietary).
+#
+# The builder downloads every file, pins its SHA-256 in the signed catalog,
+# finds the app or programs inside and runs the malware scan, as for any
+# source. abv0 refuses a download whose SHA-256 differs, so a vendor that
+# replaces a file under the same link is picked up by the next daily build.
+#
+# Mac: .dmg and .zip apps (not .pkg installers). Windows: portable .zip only.
+# Kept sorted within each section.
+
+# ---- Apps (macOS; Windows where a portable build exists) ---------------------
+arc                https://arc.net url.macos=https://releases.arc.net/release/Arc-latest.dmg app=Arc.app desc="The Arc web browser"
+chatgpt            https://chatgpt.com url.macos=https://persistent.oaistatic.com/sidekick/public/ChatGPT.dmg app=ChatGPT.app desc="ChatGPT desktop app"
+discord            https://discord.com url.macos=https://discord.com/api/download?platform=osx app=Discord.app desc="Voice, video and text chat"
+docker-desktop     https://www.docker.com/products/docker-desktop/ url.aarch64-macos=https://desktop.docker.com/mac/main/arm64/Docker.dmg url.x86_64-macos=https://desktop.docker.com/mac/main/amd64/Docker.dmg version-url=https://desktop.docker.com/mac/main/arm64/appcast.xml "version-after=<title>Version " app=Docker.app desc="Docker Desktop: containers and Kubernetes on your Mac"
+firefox            https://www.mozilla.org/firefox/ url.macos=https://download.mozilla.org/?product=firefox-latest-ssl&os=osx&lang=en-US app=Firefox.app license=MPL-2.0 desc="The Firefox web browser"
+google-chrome      https://www.google.com/chrome/ url.macos=https://dl.google.com/chrome/mac/universal/stable/GGRO/googlechrome.dmg version-url=https://versionhistory.googleapis.com/v1/chrome/platforms/mac/channels/stable/versions "version-after=\"version\": \"" "app=Google Chrome.app" desc="The Google Chrome web browser"
+notion             https://www.notion.com url.macos=https://www.notion.so/desktop/mac-universal/download app=Notion.app desc="Notes, docs and projects in one workspace"
+postman            https://www.postman.com url.aarch64-macos=https://dl.pstmn.io/download/latest/osx_arm64 url.x86_64-macos=https://dl.pstmn.io/download/latest/osx_64 app=Postman.app desc="API platform for building and testing APIs"
+raycast            https://www.raycast.com url.macos=https://releases.raycast.com/download app=Raycast.app desc="Extendable launcher for macOS"
+signal             https://signal.org url.macos=https://updates.signal.org/desktop/signal-desktop-mac-universal-{version}.dmg version-url=https://updates.signal.org/desktop/latest-mac.yml "version-after=version: " app=Signal.app license=AGPL-3.0-only desc="Private messenger"
+slack              https://slack.com url.macos=https://slack.com/ssb/download-osx-universal app=Slack.app desc="Team chat and collaboration"
+steam              https://store.steampowered.com url.macos=https://cdn.akamai.steamstatic.com/client/installer/steam.dmg app=Steam.app desc="Valve's game store and launcher"
+visual-studio-code https://code.visualstudio.com url.macos=https://update.code.visualstudio.com/latest/darwin-universal/stable url.x86_64-windows=https://update.code.visualstudio.com/latest/win32-x64-archive/stable url.aarch64-windows=https://update.code.visualstudio.com/latest/win32-arm64-archive/stable version-url=https://update.code.visualstudio.com/api/update/darwin-universal/stable/latest "version-after=\"productVersion\":\"" "app=Visual Studio Code.app" "win=Visual Studio Code=Code.exe" desc="Microsoft's code editor"
+warp               https://www.warp.dev url.macos=https://app.warp.dev/download?package=dmg app=Warp.app desc="The Warp terminal"
+
+# ---- Command-line tools ---------------------------------------------------------
+consul             https://www.hashicorp.com/products/consul url.aarch64-linux=https://releases.hashicorp.com/consul/{version}/consul_{version}_linux_arm64.zip url.x86_64-linux=https://releases.hashicorp.com/consul/{version}/consul_{version}_linux_amd64.zip url.aarch64-macos=https://releases.hashicorp.com/consul/{version}/consul_{version}_darwin_arm64.zip url.x86_64-macos=https://releases.hashicorp.com/consul/{version}/consul_{version}_darwin_amd64.zip url.x86_64-windows=https://releases.hashicorp.com/consul/{version}/consul_{version}_windows_amd64.zip url.aarch64-windows=https://releases.hashicorp.com/consul/{version}/consul_{version}_windows_arm64.zip version-url=https://api.releases.hashicorp.com/v1/releases/consul/latest "version-after=\"version\":\"" bin=consul license=BUSL-1.1 desc="Service networking: discovery, configuration and service mesh"
+nomad              https://www.hashicorp.com/products/nomad url.aarch64-linux=https://releases.hashicorp.com/nomad/{version}/nomad_{version}_linux_arm64.zip url.x86_64-linux=https://releases.hashicorp.com/nomad/{version}/nomad_{version}_linux_amd64.zip url.aarch64-macos=https://releases.hashicorp.com/nomad/{version}/nomad_{version}_darwin_arm64.zip url.x86_64-macos=https://releases.hashicorp.com/nomad/{version}/nomad_{version}_darwin_amd64.zip url.x86_64-windows=https://releases.hashicorp.com/nomad/{version}/nomad_{version}_windows_amd64.zip url.aarch64-windows=https://releases.hashicorp.com/nomad/{version}/nomad_{version}_windows_arm64.zip version-url=https://api.releases.hashicorp.com/v1/releases/nomad/latest "version-after=\"version\":\"" bin=nomad license=BUSL-1.1 desc="Workload orchestrator for containers and plain programs"
+op                 https://developer.1password.com/docs/cli/ url.aarch64-linux=https://cache.agilebits.com/dist/1P/op2/pkg/v{version}/op_linux_arm64_v{version}.zip url.x86_64-linux=https://cache.agilebits.com/dist/1P/op2/pkg/v{version}/op_linux_amd64_v{version}.zip url.aarch64-macos=https://cache.agilebits.com/dist/1P/op2/pkg/v{version}/op_darwin_arm64_v{version}.zip url.x86_64-macos=https://cache.agilebits.com/dist/1P/op2/pkg/v{version}/op_darwin_amd64_v{version}.zip url.x86_64-windows=https://cache.agilebits.com/dist/1P/op2/pkg/v{version}/op_windows_amd64_v{version}.zip version-url=https://app-updates.agilebits.com/check/1/0/CLI2/en/2.0.0/N "version-after=\"version\":\"" bin=op desc="1Password command-line tool"
+packer             https://www.hashicorp.com/products/packer url.aarch64-linux=https://releases.hashicorp.com/packer/{version}/packer_{version}_linux_arm64.zip url.x86_64-linux=https://releases.hashicorp.com/packer/{version}/packer_{version}_linux_amd64.zip url.aarch64-macos=https://releases.hashicorp.com/packer/{version}/packer_{version}_darwin_arm64.zip url.x86_64-macos=https://releases.hashicorp.com/packer/{version}/packer_{version}_darwin_amd64.zip url.x86_64-windows=https://releases.hashicorp.com/packer/{version}/packer_{version}_windows_amd64.zip url.aarch64-windows=https://releases.hashicorp.com/packer/{version}/packer_{version}_windows_arm64.zip version-url=https://api.releases.hashicorp.com/v1/releases/packer/latest "version-after=\"version\":\"" bin=packer license=BUSL-1.1 desc="Builds machine images from one configuration"
+terraform          https://www.hashicorp.com/products/terraform url.aarch64-linux=https://releases.hashicorp.com/terraform/{version}/terraform_{version}_linux_arm64.zip url.x86_64-linux=https://releases.hashicorp.com/terraform/{version}/terraform_{version}_linux_amd64.zip url.aarch64-macos=https://releases.hashicorp.com/terraform/{version}/terraform_{version}_darwin_arm64.zip url.x86_64-macos=https://releases.hashicorp.com/terraform/{version}/terraform_{version}_darwin_amd64.zip url.x86_64-windows=https://releases.hashicorp.com/terraform/{version}/terraform_{version}_windows_amd64.zip url.aarch64-windows=https://releases.hashicorp.com/terraform/{version}/terraform_{version}_windows_arm64.zip version-url=https://api.releases.hashicorp.com/v1/releases/terraform/latest "version-after=\"version\":\"" bin=terraform license=BUSL-1.1 desc="Infrastructure as code: plan and apply cloud resources"
+vault              https://www.hashicorp.com/products/vault url.aarch64-linux=https://releases.hashicorp.com/vault/{version}/vault_{version}_linux_arm64.zip url.x86_64-linux=https://releases.hashicorp.com/vault/{version}/vault_{version}_linux_amd64.zip url.aarch64-macos=https://releases.hashicorp.com/vault/{version}/vault_{version}_darwin_arm64.zip url.x86_64-macos=https://releases.hashicorp.com/vault/{version}/vault_{version}_darwin_amd64.zip url.x86_64-windows=https://releases.hashicorp.com/vault/{version}/vault_{version}_windows_amd64.zip url.aarch64-windows=https://releases.hashicorp.com/vault/{version}/vault_{version}_windows_arm64.zip version-url=https://api.releases.hashicorp.com/v1/releases/vault/latest "version-after=\"version\":\"" bin=vault license=BUSL-1.1 desc="Secrets management and encryption as a service"

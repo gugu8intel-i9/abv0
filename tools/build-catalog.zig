@@ -140,7 +140,24 @@ pub const Source = struct {
     /// `max_new_auto` at a time, and a failure is remembered instead of
     /// reported.
     auto: bool = false,
+    /// A vendor source (catalog/vendor.txt): software published on its maker's
+    /// own site, not as GitHub releases. Its line names the homepage instead of
+    /// owner/repo, and `url.<platform>=` gives each download link.
+    vendor: ?Vendor = null,
     line: usize = 0,
+};
+
+pub const Vendor = struct {
+    homepage: []const u8,
+    /// The official download link per platform. It may redirect; `{version}`
+    /// is replaced by the version once it is known.
+    urls: [6]?[]const u8 = .{null} ** 6,
+    /// A page whose text names the current version (a JSON update feed, an
+    /// appcast), read when the download links do not carry it.
+    version_url: ?[]const u8 = null,
+    /// The version is the text right after this marker in the version page
+    /// (or in the final download URL when there is no version page).
+    version_after: ?[]const u8 = null,
 };
 
 pub const Problem = struct { line: usize, text: []const u8 };
@@ -213,13 +230,20 @@ fn parseLine(arena: Allocator, toks: []const []const u8, line_no: usize) !LineRe
     const name = toks[0];
     if (!safepath.isValidId(name)) return bad(arena, "invalid package name '{s}'", .{name});
 
-    if (std.mem.indexOfScalar(u8, toks[1], '@') != null) {
-        return bad(arena, "'{s}': pin a tag with tag=..., not owner/repo@tag", .{toks[1]});
+    var vendor: ?Vendor = null;
+    var spec: ghrelease.Spec = .{ .owner = "", .repo = "", .tag = null };
+    if (std.mem.startsWith(u8, toks[1], "https://")) {
+        if (!net.isSafeUrl(toks[1])) return bad(arena, "'{s}' is not a usable homepage URL", .{toks[1]});
+        vendor = .{ .homepage = toks[1] };
+    } else {
+        if (std.mem.indexOfScalar(u8, toks[1], '@') != null) {
+            return bad(arena, "'{s}': pin a tag with tag=..., not owner/repo@tag", .{toks[1]});
+        }
+        spec = ghrelease.parseSpec(toks[1]) orelse
+            return bad(arena, "'{s}' is not a valid owner/repo", .{toks[1]});
     }
-    const spec = ghrelease.parseSpec(toks[1]) orelse
-        return bad(arena, "'{s}' is not a valid owner/repo", .{toks[1]});
 
-    var src = Source{ .name = name, .owner = spec.owner, .repo = spec.repo, .line = line_no };
+    var src = Source{ .name = name, .owner = spec.owner, .repo = spec.repo, .line = line_no, .vendor = vendor };
     var kind_key: ?SourceKind = null;
 
     for (toks[2..]) |t| {
@@ -281,6 +305,25 @@ fn parseLine(arena: Allocator, toks: []const []const u8, line_no: usize) !LineRe
                 try list.append(n);
             }
             src.win = try list.toOwnedSlice();
+        } else if (std.mem.startsWith(u8, key, "url.")) {
+            const v = if (src.vendor) |*x| x else return bad(arena, "url.* needs a vendor line (a homepage URL instead of owner/repo)", .{});
+            const probe = try std.mem.replaceOwned(u8, arena, val, "{version}", "1.0");
+            if (!net.isSafeUrl(probe)) return bad(arena, "'{s}' is not a usable https URL", .{val});
+            const plat = key["url.".len..];
+            if (std.mem.eql(u8, plat, "macos")) {
+                v.urls[platformIndex("aarch64-macos").?] = val;
+                v.urls[platformIndex("x86_64-macos").?] = val;
+            } else {
+                const pi = platformIndex(plat) orelse return bad(arena, "unknown platform in '{s}'", .{key});
+                v.urls[pi] = val;
+            }
+        } else if (std.mem.eql(u8, key, "version-url")) {
+            const v = if (src.vendor) |*x| x else return bad(arena, "version-url needs a vendor line", .{});
+            if (!net.isSafeUrl(val)) return bad(arena, "'{s}' is not a usable https URL", .{val});
+            v.version_url = val;
+        } else if (std.mem.eql(u8, key, "version-after")) {
+            const v = if (src.vendor) |*x| x else return bad(arena, "version-after needs a vendor line", .{});
+            v.version_after = val;
         } else if (std.mem.startsWith(u8, key, "asset.")) {
             const pi = platformIndex(key["asset.".len..]) orelse
                 return bad(arena, "unknown platform in '{s}'", .{key});
@@ -294,6 +337,20 @@ fn parseLine(arena: Allocator, toks: []const []const u8, line_no: usize) !LineRe
     if (src.kind == .cli and src.apps.len != 0) return bad(arena, "app= needs kind=app", .{});
     if (src.kind == .cli and src.win.len != 0) return bad(arena, "win= needs kind=app", .{});
     if (src.kind == .app and src.bin.len != 0) return bad(arena, "bin= does not apply to kind=app", .{});
+    if (src.vendor) |v| {
+        var any = false;
+        var templated = false;
+        for (v.urls) |u| {
+            if (u) |x| {
+                any = true;
+                if (std.mem.indexOf(u8, x, "{version}") != null) templated = true;
+            }
+        }
+        if (!any) return bad(arena, "a vendor line needs at least one url.<platform>=", .{});
+        if (templated and v.version_url == null) return bad(arena, "{{version}} in a URL needs version-url=", .{});
+        if (v.version_url != null and v.version_after == null) return bad(arena, "version-url needs version-after=", .{});
+        if (src.tag != null) return bad(arena, "tag= does not apply to a vendor line", .{});
+    }
     return .{ .source = src };
 }
 
@@ -1193,7 +1250,7 @@ pub const Net = struct {
     pub fn fetchText(self: *Net, a: Allocator, url: []const u8, max_bytes: usize) ![]u8 {
         if (!net.isSafeUrl(url)) return error.UnsafeUrl;
         if (self.currentMode() == .fixtures) {
-            const p = try self.fixtureAssetPath(a, url);
+            const p = self.fixtureAssetPath(a, url) catch try self.webFixturePath(a, url);
             return self.readFixture(a, p);
         }
         const body = try self.withRetry([]u8, a, fetchTextOnce, .{ url, max_bytes });
@@ -1456,6 +1513,151 @@ pub const Net = struct {
         return .{ .status = code, .body = res.stdout[0..nl], .info = api.infoFromHeaderDump(a, dump) };
     }
 
+    // ---- vendor links -----------------------------------------------------
+
+    pub const Resolved = struct {
+        /// Where the link lands after its redirects.
+        final_url: []const u8,
+        disposition: ?[]const u8 = null,
+        last_modified: ?[]const u8 = null,
+    };
+
+    /// Follows a download link's redirects (https only, at most 10) and reads
+    /// the final response's headers without downloading the file. In fixture
+    /// mode, `web/<url with / ? & = replaced by _>.resolve` holds
+    /// `final-url`, then optional `content-disposition:` and `last-modified:`
+    /// lines; without one the link resolves to itself.
+    pub fn resolve(self: *Net, a: Allocator, url: []const u8) !Resolved {
+        if (!net.isSafeUrl(url)) return error.UnsafeUrl;
+        switch (self.currentMode()) {
+            .fixtures => {
+                const p = try std.fmt.allocPrint(a, "{s}.resolve", .{try self.webFixturePath(a, url)});
+                const text = self.readFixture(a, p) catch return .{ .final_url = url };
+                var lines = std.mem.splitScalar(u8, text, '\n');
+                var r = Resolved{ .final_url = try a.dupe(u8, std.mem.trim(u8, lines.next() orelse url, " \r")) };
+                while (lines.next()) |l| {
+                    const line = std.mem.trim(u8, l, " \r");
+                    if (headerValue(line, "content-disposition")) |v| r.disposition = try a.dupe(u8, v);
+                    if (headerValue(line, "last-modified")) |v| r.last_modified = try a.dupe(u8, v);
+                }
+                return r;
+            },
+            .http => {
+                if (self.httpResolve(a, url)) |r| return r else |e| {
+                    if (isStatusError(e) or !self.curlAvailable()) return e;
+                    self.switchToCurl(e);
+                    return self.curlResolve(a, url);
+                }
+            },
+            else => return self.curlResolve(a, url),
+        }
+    }
+
+    fn headerValue(line: []const u8, name: []const u8) ?[]const u8 {
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse return null;
+        if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, line[0..colon], " "), name)) return null;
+        return std.mem.trim(u8, line[colon + 1 ..], " \t\r");
+    }
+
+    fn webFixturePath(self: *Net, a: Allocator, url: []const u8) ![]u8 {
+        const rel = try a.dupe(u8, url["https://".len..]);
+        for (rel) |*c| {
+            if (c.* == '/' or c.* == '?' or c.* == '&' or c.* == '=' or c.* == ':') c.* = '_';
+        }
+        return self.fixturePath(a, "web/{s}", .{rel});
+    }
+
+    /// The redirect target `location` relative to `base`.
+    pub fn joinLocation(a: Allocator, base: []const u8, location: []const u8) ![]u8 {
+        if (std.mem.startsWith(u8, location, "https://")) return a.dupe(u8, location);
+        if (std.mem.startsWith(u8, location, "http://")) return error.InsecureRedirect;
+        const after = base["https://".len..];
+        const host_end = "https://".len + (std.mem.indexOfScalar(u8, after, '/') orelse after.len);
+        if (std.mem.startsWith(u8, location, "//")) return std.fmt.allocPrint(a, "https:{s}", .{location});
+        if (std.mem.startsWith(u8, location, "/")) return std.fmt.allocPrint(a, "{s}{s}", .{ base[0..host_end], location });
+        const no_query = base[0 .. std.mem.indexOfAny(u8, base, "?#") orelse base.len];
+        const dir_end = if (std.mem.lastIndexOfScalar(u8, no_query, '/')) |i| @max(i + 1, host_end) else host_end;
+        if (dir_end == host_end) return std.fmt.allocPrint(a, "{s}/{s}", .{ base[0..host_end], location });
+        return std.fmt.allocPrint(a, "{s}{s}", .{ no_query[0..dir_end], location });
+    }
+
+    fn httpResolve(self: *Net, a: Allocator, start: []const u8) !Resolved {
+        var url = try a.dupe(u8, start);
+        var hops: u8 = 0;
+        while (true) : (hops += 1) {
+            if (hops > 10) return error.TooManyRedirects;
+            if (!net.isSafeUrl(url)) return error.UnsafeUrl;
+            var header_buf: [32 * 1024]u8 = undefined;
+            var req = try self.client.open(.GET, try std.Uri.parse(url), .{
+                .server_header_buffer = &header_buf,
+                .headers = .{ .user_agent = .{ .override = user_agent } },
+                // Ask for one byte: enough for the headers, and servers that
+                // ignore Range are not read past them.
+                .extra_headers = &.{.{ .name = "Range", .value = "bytes=0-0" }},
+                .redirect_behavior = .unhandled,
+            });
+            defer req.deinit();
+            try req.send();
+            try req.finish();
+            try req.wait();
+            const code = @intFromEnum(req.response.status);
+            var location: ?[]const u8 = null;
+            var r = Resolved{ .final_url = url };
+            var it = req.response.iterateHeaders();
+            while (it.next()) |h| {
+                if (std.ascii.eqlIgnoreCase(h.name, "location")) location = try a.dupe(u8, h.value);
+                if (std.ascii.eqlIgnoreCase(h.name, "content-disposition")) r.disposition = try a.dupe(u8, h.value);
+                if (std.ascii.eqlIgnoreCase(h.name, "last-modified")) r.last_modified = try a.dupe(u8, h.value);
+            }
+            switch (code) {
+                301, 302, 303, 307, 308 => {
+                    url = try joinLocation(a, url, location orelse return error.BadStatus);
+                    continue;
+                },
+                200, 206 => return r,
+                else => {
+                    try statusToError(code);
+                    return error.BadStatus;
+                },
+            }
+        }
+    }
+
+    fn curlResolve(self: *Net, a: Allocator, url: []const u8) !Resolved {
+        const n = self.seq.fetchAdd(1, .monotonic);
+        const sink = try std.fmt.allocPrint(a, "{s}{c}resolve{d}", .{ self.tmp_root, std.fs.path.sep, n });
+        defer std.fs.cwd().deleteFile(sink) catch {};
+        const argv = [_][]const u8{
+            "curl",              "-q",                              "--silent",      "--show-error",
+            "--location",        "--max-redirs",                    "10",            "--proto",
+            "=https",            "--proto-redir",                   "=https",        "--tlsv1.2",
+            "--connect-timeout", "20",                              "--max-time",    "60",
+            "--user-agent",      user_agent,                        "--range",       "0-0",
+            "--output",          sink,                              "--dump-header", "-",
+            "--write-out",       "\n%{http_code} %{url_effective}", url,
+        };
+        const res = std.process.Child.run(.{ .allocator = a, .argv = &argv, .max_output_bytes = 1024 * 1024 }) catch return error.CurlFailed;
+        if (res.term != .Exited or res.term.Exited != 0) return error.CurlFailed;
+        const nl = std.mem.lastIndexOfScalar(u8, res.stdout, '\n') orelse return error.CurlFailed;
+        const tail = std.mem.trim(u8, res.stdout[nl + 1 ..], " \r\n");
+        const sp = std.mem.indexOfScalar(u8, tail, ' ') orelse return error.CurlFailed;
+        const code = std.fmt.parseInt(u16, tail[0..sp], 10) catch return error.CurlFailed;
+        if (code != 206) try statusToError(code);
+        var r = Resolved{ .final_url = try a.dupe(u8, tail[sp + 1 ..]) };
+        // Headers of every hop are dumped; the last block is the final response.
+        var lines = std.mem.splitScalar(u8, res.stdout[0..nl], '\n');
+        while (lines.next()) |l| {
+            const line = std.mem.trim(u8, l, " \r");
+            if (std.mem.startsWith(u8, line, "HTTP/")) {
+                r.disposition = null;
+                r.last_modified = null;
+            }
+            if (headerValue(line, "content-disposition")) |v| r.disposition = try a.dupe(u8, v);
+            if (headerValue(line, "last-modified")) |v| r.last_modified = try a.dupe(u8, v);
+        }
+        return r;
+    }
+
     // ---- downloads --------------------------------------------------------
 
     pub const Downloaded = struct { sha256: [64]u8, size: u64 };
@@ -1472,7 +1674,7 @@ pub const Net = struct {
     }
 
     fn copyFixture(self: *Net, a: Allocator, url: []const u8, dest: []const u8) !Downloaded {
-        const src = try self.fixtureAssetPath(a, url);
+        const src = self.fixtureAssetPath(a, url) catch try self.webFixturePath(a, url);
         std.fs.cwd().copyFile(src, std.fs.cwd(), dest, .{}) catch |e| switch (e) {
             error.FileNotFound => return error.NoFixture,
             else => return e,
@@ -1637,6 +1839,9 @@ pub const Options = struct {
     use_graphql: bool = true,
     /// Repositories per GraphQL query.
     batch_size: usize = default_batch_size,
+    /// catalog/vendor.txt: proprietary software downloaded from its maker's
+    /// site. Defaults to vendor.txt beside the sources file, if it exists.
+    vendor_path: ?[]const u8 = null,
     /// catalog/auto-sources.txt: sources found by `discover`. A name or
     /// repository that is also in `sources_path` or the manual entries is
     /// left out; the hand-written one wins.
@@ -1710,6 +1915,170 @@ pub fn nameCheck(bins: []const []const u8, owner: []const u8, repo: []const u8) 
         if (relatedName(b, owner)) return .owner;
     }
     return .none;
+}
+
+/// A version at the start of `s`: a digit, then digits, letters and `._+-`,
+/// with at least one `.` among the digits, and no trailing punctuation. A
+/// leading `v` is skipped. Null when `s` does not start with one.
+pub fn versionAt(s: []const u8) ?[]const u8 {
+    var t = s;
+    if (t.len > 1 and (t[0] == 'v' or t[0] == 'V') and std.ascii.isDigit(t[1])) t = t[1..];
+    if (t.len == 0 or !std.ascii.isDigit(t[0])) return null;
+    var n: usize = 0;
+    var dot = false;
+    while (n < t.len and n < 64) : (n += 1) {
+        const c = t[n];
+        if (c == '.') {
+            if (n + 1 >= t.len or !std.ascii.isDigit(t[n + 1])) break;
+            dot = true;
+        } else if (!std.ascii.isDigit(c)) break;
+    }
+    if (!dot) return null;
+    return t[0..n];
+}
+
+/// The first version anywhere in a URL's path (not its host or query), or
+/// null: `.../4.53.269/Slack-4.53.269-macOS.dmg` gives `4.53.269`.
+pub fn versionInUrl(url: []const u8) ?[]const u8 {
+    const after_scheme = url["https://".len..];
+    const slash = std.mem.indexOfScalar(u8, after_scheme, '/') orelse return null;
+    const path_full = after_scheme[slash..];
+    const path = path_full[0 .. std.mem.indexOfAny(u8, path_full, "?#") orelse path_full.len];
+    var i: usize = 0;
+    while (i < path.len) : (i += 1) {
+        const prev_ok = i == 0 or !std.ascii.isAlphanumeric(path[i - 1]) or (path[i] == 'v' or path[i] == 'V');
+        if (!prev_ok) continue;
+        if (versionAt(path[i..])) |v| return v;
+    }
+    return null;
+}
+
+/// The version right after `marker` in `text`, or null.
+pub fn versionAfter(text: []const u8, marker: []const u8) ?[]const u8 {
+    const at = std.mem.indexOf(u8, text, marker) orelse return null;
+    return versionAt(std.mem.trimLeft(u8, text[at + marker.len ..], " \t"));
+}
+
+/// `2026.10.26` from an HTTP date (`Mon, 26 Oct 2026 19:40:18 GMT`): the
+/// version of a download whose link and page name none.
+pub fn versionFromHttpDate(a: Allocator, date: []const u8) !?[]const u8 {
+    var it = std.mem.tokenizeAny(u8, date, " ,");
+    _ = it.next() orelse return null; // weekday
+    const day = std.fmt.parseInt(u8, it.next() orelse return null, 10) catch return null;
+    const mon_s = it.next() orelse return null;
+    const year = std.fmt.parseInt(u16, it.next() orelse return null, 10) catch return null;
+    const months = [_][]const u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    for (months, 1..) |m, k| {
+        if (std.ascii.eqlIgnoreCase(m, mon_s)) return try std.fmt.allocPrint(a, "{d}.{d}.{d}", .{ year, k, day });
+    }
+    return null;
+}
+
+/// The file name a download is saved as: `filename=` from Content-Disposition
+/// when it has one, else the last part of the URL's path. Null when neither
+/// is a usable file name.
+pub fn downloadFileName(a: Allocator, final_url: []const u8, disposition: ?[]const u8) !?[]const u8 {
+    if (disposition) |d| {
+        if (std.ascii.indexOfIgnoreCase(d, "filename=")) |at| {
+            var v = std.mem.trim(u8, d[at + "filename=".len ..], " ");
+            if (std.mem.indexOfScalar(u8, v, ';')) |semi| v = v[0..semi];
+            v = std.mem.trim(u8, v, "\" ");
+            // %20 and friends, as in `Postman%20for%20macOS%20(arm64).zip`.
+            const out = try a.alloc(u8, v.len);
+            var n: usize = 0;
+            var k: usize = 0;
+            while (k < v.len) : (k += 1) {
+                if (v[k] == '%' and k + 2 < v.len) {
+                    if (std.fmt.parseInt(u8, v[k + 1 .. k + 3], 16)) |b| {
+                        out[n] = b;
+                        n += 1;
+                        k += 2;
+                        continue;
+                    } else |_| {}
+                }
+                out[n] = v[k];
+                n += 1;
+            }
+            const name = std.fs.path.basename(out[0..n]);
+            if (isPlainFileName(name)) return name;
+        }
+    }
+    const no_query = final_url[0 .. std.mem.indexOfAny(u8, final_url, "?#") orelse final_url.len];
+    const slash = std.mem.lastIndexOfScalar(u8, no_query, '/') orelse return null;
+    const name = no_query[slash + 1 ..];
+    if (!isPlainFileName(name)) return null;
+    return name;
+}
+
+fn isPlainFileName(name: []const u8) bool {
+    if (name.len == 0 or name.len > 200 or name[0] == '.') return false;
+    for (name) |c| {
+        if (c < 0x20 or c == 0x7f or c == '/' or c == '\\' or c == ':' or c == '"') return false;
+    }
+    return true;
+}
+
+/// The release a vendor source stands for: one asset per platform whose link
+/// was given, named after the file it downloads, and the version from the
+/// version page, the final download URL, or the file's Last-Modified date (in
+/// that order). A link that redirects to a stable, versioned file is pinned
+/// as that file; one that lands on a signed, expiring URL (a query string)
+/// stays the original link, which abv0 follows at install time.
+pub const VendorRelease = struct {
+    rel: ghrelease.Release,
+    /// The asset each platform installs (several may share one file).
+    pick: [6]?usize,
+};
+
+fn vendorRelease(ctx: *Ctx, a: Allocator, src_name: []const u8, v: Vendor) !VendorRelease {
+    var version: ?[]const u8 = null;
+    if (v.version_url) |vu| {
+        const text = try ctx.net.fetchText(a, vu, 4 * 1024 * 1024);
+        version = versionAfter(text, v.version_after.?) orelse return error.NoVersionInPage;
+    }
+    var assets = std.ArrayList(ghrelease.Asset).init(a);
+    var pick: [6]?usize = .{null} ** 6;
+    var asked = std.ArrayList([]const u8).init(a);
+    var last_modified: ?[]const u8 = null;
+    for (v.urls, 0..) |maybe, pi| {
+        const tmpl = maybe orelse continue;
+        const url = if (version) |ver| try std.mem.replaceOwned(u8, a, tmpl, "{version}", ver) else tmpl;
+        // One link for several platforms (a universal Mac build) is one file.
+        var same: ?usize = null;
+        for (asked.items, 0..) |u, k| {
+            if (std.mem.eql(u8, u, url)) same = k;
+        }
+        if (same) |k| {
+            pick[pi] = k;
+            continue;
+        }
+        // A platform whose link fails is left out; the others still count.
+        const r = ctx.net.resolve(a, url) catch |e| {
+            if (e == error.OutOfMemory) return e;
+            if (!ctx.opts.quiet) std.debug.print("{s}: {s} link failed ({s}); leaving it out\n", .{ src_name, platform_tags[pi], netErrorName(e) });
+            continue;
+        };
+        const file = (try downloadFileName(a, r.final_url, r.disposition)) orelse {
+            if (!ctx.opts.quiet) std.debug.print("{s}: {s} link gives no file name; leaving it out\n", .{ src_name, platform_tags[pi] });
+            continue;
+        };
+        if (version == null) {
+            if (v.version_after) |m| {
+                version = versionAfter(r.final_url, m);
+            } else version = versionInUrl(r.final_url);
+        }
+        if (last_modified == null) last_modified = r.last_modified;
+        const keep_final = std.mem.indexOfAny(u8, r.final_url, "?#") == null and net.isSafeUrl(r.final_url);
+        pick[pi] = assets.items.len;
+        try asked.append(url);
+        try assets.append(.{ .name = file, .url = if (keep_final) r.final_url else url, .size = 0, .sha256 = null });
+    }
+    if (version == null) {
+        if (last_modified) |lm| version = try versionFromHttpDate(a, lm);
+    }
+    if (assets.items.len == 0) return error.NoWorkingLink;
+    const ver = version orelse return error.NoVersion;
+    return .{ .rel = .{ .tag = ver, .assets = try assets.toOwnedSlice() }, .pick = pick };
 }
 
 const Outcome = union(enum) {
@@ -1834,10 +2203,18 @@ fn buildEntry(ctx: *Ctx, a: Allocator, src: Source, prev: ?Entry, index: usize) 
 
     if (pinnedUnchanged(opts, src, prev) and prevMatchesSource(src, prev.?)) return .reuse;
 
-    const rel_json = ctx.net.fetchRelease(a, src.owner, src.repo, src.tag) catch |e|
-        return lookupFailed(ctx, a, src, "release", e);
-    const rel = ghrelease.parseRelease(a, rel_json) catch |e|
-        return failf(a, "unreadable release data: {s}", .{@errorName(e)});
+    var vpick: ?[6]?usize = null;
+    const rel: ghrelease.Release = if (src.vendor) |v| blk: {
+        const vr = vendorRelease(ctx, a, src.name, v) catch |e|
+            return failf(a, "vendor download lookup failed: {s}", .{netErrorName(e)});
+        vpick = vr.pick;
+        break :blk vr.rel;
+    } else blk: {
+        const rel_json = ctx.net.fetchRelease(a, src.owner, src.repo, src.tag) catch |e|
+            return lookupFailed(ctx, a, src, "release", e);
+        break :blk ghrelease.parseRelease(a, rel_json) catch |e|
+            return failf(a, "unreadable release data: {s}", .{@errorName(e)});
+    };
     const version = versionFromTag(rel.tag) orelse
         return failf(a, "tag '{s}' does not give a valid version", .{rel.tag});
 
@@ -1859,7 +2236,8 @@ fn buildEntry(ctx: *Ctx, a: Allocator, src: Source, prev: ?Entry, index: usize) 
             if (osOfPlatform(i) == .windows) {
                 // Windows: only with win=, and only a portable .zip.
                 if (src.win.len == 0) continue;
-                const found = if (src.assets[i]) |want| findAssetNamed(rel.assets, want) else pickWinAppAsset(rel.assets, tag);
+                if (vpick) |vp| if (vp[i] == null) continue;
+                const found = if (vpick) |vp| vp[i] else if (src.assets[i]) |want| findAssetNamed(rel.assets, want) else pickWinAppAsset(rel.assets, tag);
                 const chosen = found orelse {
                     try notes.writer().print("{s}: no portable .zip (zips:", .{tag});
                     for (rel.assets) |asset| {
@@ -1879,7 +2257,8 @@ fn buildEntry(ctx: *Ctx, a: Allocator, src: Source, prev: ?Entry, index: usize) 
             // win= and no app= is for Windows only.
             if (osOfPlatform(i) != .macos) continue;
             if (src.win.len != 0 and src.apps.len == 0) continue;
-            const found = if (src.assets[i]) |want| findAssetNamed(rel.assets, want) else pickAppAsset(rel.assets, tag, src.apps.len != 0);
+            if (vpick) |vp| if (vp[i] == null) continue;
+            const found = if (vpick) |vp| vp[i] else if (src.assets[i]) |want| findAssetNamed(rel.assets, want) else pickAppAsset(rel.assets, tag, src.apps.len != 0);
             const chosen = found orelse {
                 try notes.writer().print("{s}: no .dmg or .zip for this Mac; ", .{tag});
                 continue;
@@ -1896,7 +2275,7 @@ fn buildEntry(ctx: *Ctx, a: Allocator, src: Source, prev: ?Entry, index: usize) 
             pick[i] = chosen;
             continue;
         }
-        const idx = if (src.assets[i]) |want| findAssetNamed(rel.assets, want) else ghrelease.pickAsset(rel.assets, tag);
+        const idx = if (vpick) |vp| vp[i] else if (src.assets[i]) |want| findAssetNamed(rel.assets, want) else ghrelease.pickAsset(rel.assets, tag);
         const chosen = idx orelse continue;
         const kind = ghrelease.archiveKindOf(rel.assets[chosen].name) orelse continue;
         if (std.mem.eql(u8, kind, "dmg")) continue; // cannot be unpacked off macOS
@@ -2167,14 +2546,22 @@ fn finishEntry(
     apps: []const []const u8,
     plats: []const PlatEntry,
 ) !Outcome {
-    const repo_json = ctx.net.fetchRepo(a, src.owner, src.repo) catch |e|
-        return lookupFailed(ctx, a, src, "repository", e);
-    const info = parseRepoInfo(a, repo_json, src.owner, src.repo) catch |e|
-        return failf(a, "unreadable repository data: {s}", .{@errorName(e)});
+    // A vendor source has no repository record: its line says it all.
+    const info: RepoInfo = if (src.vendor) |v| .{ .homepage = v.homepage, .license = "Proprietary" } else blk: {
+        const repo_json = ctx.net.fetchRepo(a, src.owner, src.repo) catch |e|
+            return lookupFailed(ctx, a, src, "repository", e);
+        break :blk parseRepoInfo(a, repo_json, src.owner, src.repo) catch |e|
+            return failf(a, "unreadable repository data: {s}", .{@errorName(e)});
+    };
 
     var description: []const u8 = info.description;
     if (src.desc) |d| description = try cleanText(a, d, max_description_len);
-    if (description.len == 0) description = try std.fmt.allocPrint(a, "{s} (github.com/{s}/{s})", .{ src.name, src.owner, src.repo });
+    if (description.len == 0) {
+        description = if (src.vendor) |v|
+            try std.fmt.allocPrint(a, "{s} ({s})", .{ src.name, v.homepage })
+        else
+            try std.fmt.allocPrint(a, "{s} (github.com/{s}/{s})", .{ src.name, src.owner, src.repo });
+    }
     var license: []const u8 = info.license;
     if (src.license) |l| license = if (validLicense(l)) l else "";
 
@@ -2569,6 +2956,7 @@ fn collectLookups(arena: Allocator, ctx: *Ctx) ![]api.RepoRequest {
 
     for (ctx.sources, 0..) |src, si| {
         if (isDeferred(ctx, si)) continue;
+        if (src.vendor != null) continue;
         if (ctx.only) |only| {
             if (!only.contains(src.name)) continue;
         }
@@ -2826,14 +3214,36 @@ pub fn execute(gpa: Allocator, opts: Options, out: anytype) !Report {
     }
     var all_sources = std.ArrayList(Source).init(arena);
     try all_sources.appendSlice(parsed.sources);
+    // Vendor sources (proprietary software from its maker's site). A name that
+    // sources.txt already uses stays with sources.txt.
+    if (opts.vendor_path) |vp| {
+        if (try readOptional(arena, vp)) |bytes| {
+            const vparsed = try parseSources(arena, bytes);
+            for (vparsed.problems) |pr| try out.print("warning: {s}:{d}: {s}\n", .{ vp, pr.line, pr.text });
+            outer: for (vparsed.sources) |src| {
+                if (src.vendor == null) {
+                    try out.print("warning: {s}:{d}: {s} names owner/repo; GitHub projects belong in sources.txt\n", .{ vp, src.line, src.name });
+                    continue;
+                }
+                for (parsed.sources) |h| {
+                    if (std.mem.eql(u8, h.name, src.name)) {
+                        try out.print("warning: {s}:{d}: {s} is already in sources.txt\n", .{ vp, src.line, src.name });
+                        continue :outer;
+                    }
+                }
+                try all_sources.append(src);
+            }
+        }
+    }
+    const hand_count = all_sources.items.len;
     if (opts.auto_sources_path) |ap| {
         if (try readOptional(arena, ap)) |bytes| {
             const auto_parsed = try parseSources(arena, bytes);
             var names = std.StringHashMap(void).init(arena);
             var repos = std.StringHashMap(void).init(arena);
-            for (parsed.sources) |src| {
+            for (all_sources.items[0..hand_count]) |src| {
                 try names.put(src.name, {});
-                try repos.put(try repoKey(arena, src), {});
+                if (src.vendor == null) try repos.put(try repoKey(arena, src), {});
             }
             for (auto_parsed.sources) |src_in| {
                 var src = src_in;
@@ -3283,6 +3693,8 @@ const usage =
     \\  --max-download-mb N     skip assets larger than this when they must be fetched
     \\  --allow-shrink          allow the catalog to lose more than half its packages
     \\  --allow-failures        write the catalog even when most sources failed
+    \\  --vendor FILE           proprietary software from its maker's site (default: vendor.txt
+    \\                          beside the sources file): `name https://homepage url.<platform>=...`
     \\  --auto-sources FILE     also build the projects `discover` found (catalog/auto-sources.txt);
     \\                          a hand-written source with the same name or repository wins
     \\  --rejects FILE          discovered repositories with no usable download, skipped for
@@ -3315,7 +3727,7 @@ pub fn main() !void {
     var i: usize = 1;
     while (i < argv.len) : (i += 1) {
         const arg = argv[i];
-        const value_opts = [_][]const u8{ "--sources", "--out", "--previous", "--manual", "--only", "--offline-fixtures", "--jobs", "--max-download-mb", "--summary", "--max-wait-min", "--etag-cache", "--batch", "--auto-sources", "--rejects", "--max-new-auto" };
+        const value_opts = [_][]const u8{ "--sources", "--out", "--previous", "--manual", "--only", "--offline-fixtures", "--jobs", "--max-download-mb", "--summary", "--max-wait-min", "--etag-cache", "--batch", "--auto-sources", "--rejects", "--max-new-auto", "--vendor" };
         var needs_value = false;
         for (value_opts) |o| {
             if (std.mem.eql(u8, arg, o)) needs_value = true;
@@ -3332,6 +3744,8 @@ pub fn main() !void {
             out_path = value;
         } else if (std.mem.eql(u8, arg, "--previous")) {
             opts.previous_path = value;
+        } else if (std.mem.eql(u8, arg, "--vendor")) {
+            opts.vendor_path = value;
         } else if (std.mem.eql(u8, arg, "--auto-sources")) {
             opts.auto_sources_path = value;
         } else if (std.mem.eql(u8, arg, "--rejects")) {
@@ -3388,6 +3802,10 @@ pub fn main() !void {
     if (opts.manual_path == null) {
         const dir = std.fs.path.dirname(opts.sources_path) orelse ".";
         opts.manual_path = try std.fs.path.join(gpa, &.{ dir, "manual.json" });
+    }
+    if (opts.vendor_path == null) {
+        const dir = std.fs.path.dirname(opts.sources_path) orelse ".";
+        opts.vendor_path = try std.fs.path.join(gpa, &.{ dir, "vendor.txt" });
     }
     if (std.process.getEnvVarOwned(gpa, "GITHUB_TOKEN")) |t| {
         if (t.len != 0) opts.token = t;
@@ -4097,6 +4515,110 @@ test "nameCheck: programs must be named after the project" {
     try testing.expect(!relatedName("a", "abc"));
     try testing.expect(!relatedName("go", "gogs"));
     try testing.expect(relatedName("gh", "gh"));
+}
+
+test "vendor lines: homepage instead of owner/repo, url.<platform>, version page" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const parsed = try parseSources(a,
+        \\chrome https://www.google.com/chrome/ url.macos=https://dl.google.com/x.dmg "app=Google Chrome.app" version-url=https://v.example.com/feed "version-after=\"version\": \""
+        \\tf https://www.hashicorp.com url.x86_64-linux=https://r.example.com/tf/{version}/tf_{version}_linux_amd64.zip version-url=https://api.example.com/tf "version-after=\"version\":\"" bin=tf
+        \\nolink https://example.com
+        \\notemplate https://example.com url.x86_64-linux=https://r.example.com/{version}.zip
+        \\gh owner/repo url.x86_64-linux=https://example.com/x.zip
+        \\badurl https://example.com url.x86_64-linux=http://example.com/x.zip
+        \\
+    );
+    try testing.expectEqual(@as(usize, 2), parsed.sources.len);
+    try testing.expectEqual(@as(usize, 4), parsed.problems.len);
+    const chrome = parsed.sources[0];
+    try testing.expect(chrome.kind == .app);
+    try testing.expectEqualStrings("https://www.google.com/chrome/", chrome.vendor.?.homepage);
+    try testing.expectEqualStrings("https://dl.google.com/x.dmg", chrome.vendor.?.urls[platformIndex("aarch64-macos").?].?);
+    try testing.expectEqualStrings("https://dl.google.com/x.dmg", chrome.vendor.?.urls[platformIndex("x86_64-macos").?].?);
+    try testing.expectEqualStrings("\"version\": \"", chrome.vendor.?.version_after.?);
+    try testing.expect(parsed.sources[1].kind == .cli);
+}
+
+test "versions from feeds, download URLs and HTTP dates" {
+    try testing.expectEqualStrings("156.0.8078.48", versionAfter("{\"versions\":[{\"version\": \"156.0.8078.48\"}", "\"version\": \"").?);
+    try testing.expectEqualStrings("4.96.3", versionAfter("<title>Version 4.96.3 (244472)</title>", "<title>Version ").?);
+    try testing.expectEqualStrings("4.53.269", versionInUrl("https://downloads.slack-edge.com/desktop-releases/mac/universal/4.53.269/Slack-4.53.269-macOS.dmg").?);
+    try testing.expectEqualStrings("0.0.420", versionInUrl("https://stable.dl2.discordapp.net/apps/osx/0.0.420/Discord.dmg").?);
+    try testing.expectEqualStrings("1.104.32", versionInUrl("https://r.example.com/Raycast_v1.104.32_6b800d2a_universal.dmg?X-Amz-Date=20261027").?);
+    try testing.expectEqualStrings("0.2026.10.21.08.25", versionInUrl("https://releases.warp.dev/stable/v0.2026.10.21.08.25.stable_02/Warp.dmg").?);
+    // The host and the query are not looked at.
+    try testing.expect(versionInUrl("https://dl2.example.com/x/googlechrome.dmg?v=1.2.3") == null);
+    try testing.expect(versionAt("123") == null);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqualStrings("2026.10.26", (try versionFromHttpDate(arena.allocator(), "Mon, 26 Oct 2026 19:40:18 GMT")).?);
+    try testing.expect((try versionFromHttpDate(arena.allocator(), "yesterday")) == null);
+}
+
+test "download file names and redirect targets" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqualStrings("Postman for macOS (arm64).zip", (try downloadFileName(a, "https://dl.pstmn.io/download/latest/osx_arm64", "attachment; filename=Postman%20for%20macOS%20(arm64).zip")).?);
+    try testing.expectEqualStrings("Docker.dmg", (try downloadFileName(a, "https://desktop.docker.com/mac/main/arm64/Docker.dmg", "attachment")).?);
+    try testing.expectEqualStrings("x.dmg", (try downloadFileName(a, "https://e.com/a/x.dmg?sig=1", null)).?);
+    // A file name that climbs out is cut to its last part.
+    try testing.expectEqualStrings("evil.dmg", (try downloadFileName(a, "https://e.com/a", "attachment; filename=\"../../evil.dmg\"")).?);
+    try testing.expect((try downloadFileName(a, "https://e.com/", null)) == null);
+
+    try testing.expectEqualStrings("https://cdn.e.com/f.dmg", try Net.joinLocation(a, "https://e.com/dl?x=1", "https://cdn.e.com/f.dmg"));
+    try testing.expectEqualStrings("https://e.com/other/f.dmg", try Net.joinLocation(a, "https://e.com/dl/latest", "/other/f.dmg"));
+    try testing.expectEqualStrings("https://e.com/dl/f.dmg", try Net.joinLocation(a, "https://e.com/dl/latest?x=1", "f.dmg"));
+    try testing.expectEqualStrings("https://cdn.e.com/f", try Net.joinLocation(a, "https://e.com/dl", "//cdn.e.com/f"));
+    try testing.expectError(error.InsecureRedirect, Net.joinLocation(a, "https://e.com/dl", "http://e.com/f"));
+}
+
+test "a vendor tool: version from its feed, links from a template, pinned by download" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    var env = try TestEnv.init(a);
+    defer env.tmp.cleanup();
+    try env.tmp.dir.makePath("fx/web");
+
+    var tar = std.ArrayList(u8).init(a);
+    try tarMember(&tar, "tf", 0o755, "\x7fELF tf");
+    try tar.appendNTimes(0, 1024);
+    try writeTestFile(env.tmp.dir, "fx/web/api.example.com_tf", "{\"builds\":[],\"version\":\"1.9.8\"}");
+    // The Linux link redirects to a versioned file; the Mac link fails.
+    try writeTestFile(env.tmp.dir, "fx/web/r.example.com_tf_1.9.8_linux.resolve", "https://cdn.example.com/tf/1.9.8/tf_1.9.8_linux_amd64.tar\nlast-modified: Mon, 26 Oct 2026 19:40:18 GMT\n");
+    try writeTestFile(env.tmp.dir, "fx/web/cdn.example.com_tf_1.9.8_tf_1.9.8_linux_amd64.tar", tar.items);
+    try writeTestFile(env.tmp.dir, "sources.txt", "");
+    try writeTestFile(env.tmp.dir, "vendor.txt",
+        \\tf https://www.example.com/tf url.x86_64-linux=https://r.example.com/tf/{version}/linux url.x86_64-macos=https://r.example.com/tf/{version}/mac version-url=https://api.example.com/tf "version-after=\"version\":\"" bin=tf desc="A tool"
+        \\
+    );
+    var sink = std.ArrayList(u8).init(a);
+    var opts = Options{ .sources_path = env.sources, .out_path = env.out, .fixtures_dir = env.fixtures, .jobs = 1, .now_epoch = 1781740800, .quiet = true };
+    opts.vendor_path = try std.fs.path.join(a, &.{ env.root, "vendor.txt" });
+    const r = try execute(testing.allocator, opts, sink.writer());
+    try testing.expectEqual(@as(usize, 1), r.new);
+
+    var reg = try registry.loadFromJsonFile(testing.allocator, env.out, null);
+    defer reg.deinit();
+    const tf = reg.get("tf").?;
+    try testing.expectEqualStrings("1.9.8", tf.version);
+    try testing.expectEqualStrings("Proprietary", tf.license);
+    try testing.expectEqualStrings("https://www.example.com/tf", tf.homepage);
+    try testing.expectEqual(@as(usize, 1), tf.platforms.len);
+    // Pinned as the versioned file it redirects to, with the hash of what was downloaded.
+    try testing.expectEqualStrings("https://cdn.example.com/tf/1.9.8/tf_1.9.8_linux_amd64.tar", tf.platforms[0].url);
+    try testing.expectEqualStrings(&hexOf(tar.items), tf.platforms[0].sha256);
+
+    // Unchanged next day: reused without a download.
+    opts.previous_path = env.out;
+    opts.out_path = try std.fs.path.join(a, &.{ env.root, "second.json" });
+    const r2 = try execute(testing.allocator, opts, sink.writer());
+    try testing.expectEqual(@as(usize, 1), r2.kept);
+    try testing.expectEqual(@as(u64, 0), r2.bytes);
 }
 
 test "refreshSlot spreads names over the week" {
@@ -4945,6 +5467,26 @@ test "catalog/sources.txt parses cleanly with unique names" {
         if (s.kind == .app) apps += 1;
     }
     try testing.expect(apps >= 25);
+}
+
+test "catalog/vendor.txt parses cleanly, sorted, with no name from sources.txt" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const text = std.fs.cwd().readFileAlloc(a, "catalog/vendor.txt", 1 << 20) catch |e| switch (e) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return e,
+    };
+    const parsed = try parseSources(a, text);
+    for (parsed.problems) |pr| std.debug.print("vendor.txt:{d}: {s}\n", .{ pr.line, pr.text });
+    try testing.expectEqual(@as(usize, 0), parsed.problems.len);
+    try testing.expect(parsed.sources.len >= 10);
+    const hand = try parseSources(a, try readRealSources(a));
+    for (parsed.sources, 0..) |src, i| {
+        try testing.expect(src.vendor != null);
+        for (hand.sources) |h| try testing.expect(!std.mem.eql(u8, h.name, src.name));
+        if (i > 0 and parsed.sources[i - 1].kind == src.kind) try testing.expect(std.mem.order(u8, parsed.sources[i - 1].name, src.name) == .lt);
+    }
 }
 
 test "catalog/sources.txt is sorted within each section" {
