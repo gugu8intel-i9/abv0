@@ -304,6 +304,7 @@ jobs:
             --sources catalog/sources.txt \
             --out "$RUNNER_TEMP/idx.json" \
             --previous packages/index.json \
+            --auto-sources catalog/auto-sources.txt \
             --only ripgrep,fd,fzf
           # build-catalog exits 0 even when a lookup fails, so check the result.
           # fd and fzf are absent from packages/index.json, so they can only
