@@ -163,6 +163,28 @@ jobs:
           $abv0 autoupdate status | tee status.txt
           grep -q '^scheduled: *no' status.txt || { echo "still scheduled after 'off'"; exit 1; }
 
+      - name: Hugging Face model, verified into the Hugging Face cache
+        shell: bash
+        env:
+          HF_HUB_CACHE: ${{ runner.temp }}/hf-cache
+        run: |
+          set -euo pipefail
+          abv0=./zig-out/bin/abv0
+          # A tiny test model; --all-files also fetches its PyTorch pickle, which is scanned.
+          $abv0 install hf:hf-internal-testing/tiny-random-gpt2 --all-files | tee hf.txt
+          grep -q '^done ' hf.txt
+          snap="$($abv0 hf path hf:hf-internal-testing/tiny-random-gpt2)"
+          test -s "$snap/config.json" && test -s "$snap/model.safetensors" && test -s "$snap/pytorch_model.bin"
+          # A second run finds everything in the cache.
+          $abv0 install hf:hf-internal-testing/tiny-random-gpt2 --all-files | grep -q '(0 downloaded'
+          # Offline: no request to Hugging Face, the cached copy is used.
+          HF_HUB_OFFLINE=1 $abv0 install hf:hf-internal-testing/tiny-random-gpt2 --all-files | grep -q '(0 downloaded)'
+          if HF_HUB_OFFLINE=1 $abv0 install hf:hf-internal-testing/not-downloaded 2>/dev/null; then echo "offline install of an uncached repo passed"; exit 1; fi
+          $abv0 hf whoami >/dev/null 2>&1 && { echo "whoami with no token passed"; exit 1; } || true
+          $abv0 hf list | grep -q 'hf:hf-internal-testing/tiny-random-gpt2'
+          $abv0 uninstall hf:hf-internal-testing/tiny-random-gpt2
+          if $abv0 hf path hf:hf-internal-testing/tiny-random-gpt2 2>/dev/null; then echo "still cached after uninstall"; exit 1; fi
+
       - name: Migrate from Homebrew (a made-up one, and the runner's real one)
         if: runner.os != 'Windows'
         shell: bash

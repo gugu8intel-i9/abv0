@@ -23,6 +23,18 @@ hostile:
 Everything derived from those inputs is validated before it reaches the filesystem or a
 `exec` call.
 
+Hugging Face downloads (`abv0 install hf:...`) are not in the signed catalog. Each file
+is checked against what the Hub lists for one pinned commit: the SHA-256 of a large
+file, the git blob id of a small one. Anything that does not match is deleted before it
+reaches the cache. The Hub's own TLS certificate is what makes that listing
+trustworthy, so trust in a model rests on Hugging Face and on its uploader. Python
+pickles can run code when they are loaded, so pickle files are scanned for imports of
+modules such as `os`, `subprocess`, `socket` and `builtins.eval`, and refused when they
+have one. Prefer `.safetensors` and `.gguf`, which hold no code. A token is sent only
+to huggingface.co, never to the download servers it redirects to. `abv0 hf login`
+saves it only in the local token file, readable only by its owner, and never prints
+it. With `HF_HUB_OFFLINE=1`, abv0 makes no request to Hugging Face at all.
+
 Packages from `catalog/vendor.txt` come from their makers' own servers, which publish no
 checksum abv0 can check. The builder downloads each file over https, pins its SHA-256 in
 the signed catalog and scans it. A file swapped behind the same link afterwards no
