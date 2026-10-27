@@ -1,3 +1,0 @@
-hf:hf-internal-testing/tiny-random-gpt2 @ 71034c5d8bde (main): 10 files, 11.9 MB
-done hf:hf-internal-testing/tiny-random-gpt2: 10 files verified (10 downloaded, 11.9 MB) in 1.9s
-  /tmp/claude-0/-home-user-abv0/5d8e67f1-d957-5d57-a7c8-faf9449c24e5/scratchpad/rt2/hf/models--hf-internal-testing--tiny-random-gpt2/snapshots/71034c5d8bde858ff824298bdedc65515b97d2b9
