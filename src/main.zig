@@ -228,6 +228,12 @@ fn parseArgsDiag(allocator: std.mem.Allocator, argv: []const []const u8, diag: *
         } else if (std.mem.eql(u8, arg, "--daily") or std.mem.eql(u8, arg, "--weekly")) {
             // `autoupdate on` reads these from the rest.
             try args.rest.append(arg);
+        } else if (std.mem.eql(u8, arg, "--token")) {
+            // `hf login` reads it from the rest.
+            i += 1;
+            if (i >= argv.len) return failArg(diag, arg, "", error.MissingOptionValue);
+            try args.rest.append(arg);
+            try args.rest.append(argv[i]);
         } else if (arg.len > 1 and arg[0] == '-' and !std.mem.eql(u8, arg, "-")) {
             return failArg(diag, arg, "", error.UnknownOption);
         } else if (args.command == null) {
@@ -411,8 +417,8 @@ const commands = [_]Command{
     },
     .{
         .name = "hf",
-        .args = "list | path <hf:spec> | search <words> | search-datasets <words>",
-        .summary = "Hugging Face models and datasets: list what is in the Hugging Face cache, print where one is, or search the Hub (most downloaded first). Install with `abv0 install hf:owner/model`.",
+        .args = "login [--token <token>] | whoami | logout | list | path <hf:spec> | search <words> | search-datasets <words>",
+        .summary = "Hugging Face models and datasets: plug in your token (`login` checks it and keeps it on this computer only), list what is in the Hugging Face cache, print where one is, or search the Hub (most downloaded first). Install with `abv0 install hf:owner/model`; HF_HUB_OFFLINE=1 uses only what is already downloaded.",
         .example = "abv0 hf search llama 3.2 gguf",
     },
     .{
@@ -708,6 +714,7 @@ fn renderUsage(w: anytype) !void {
         \\  install hf:owner/model  Download a Hugging Face model (hf:datasets/owner/name for a dataset),
         \\                          verified, into the Hugging Face cache; --include "*.gguf" picks files
         \\  hf list|path|search     Hugging Face models and datasets in the cache, or on the Hub
+        \\  hf login|whoami|logout  Plug in your Hugging Face token (kept on this computer only)
         \\  uninstall <pkg>...      Remove packages and the links they created
         \\  upgrade [--all|pkg]...  Upgrade outdated packages (keeps the previous version for rollback)
         \\  outdated                List packages with a newer version available (pinned ones marked)
@@ -2600,12 +2607,18 @@ fn readNamesInput(a: std.mem.Allocator, path: []const u8) ![]u8 {
 
 /// `abv0 hf list | path <spec> | search <words> | search-datasets <words>`.
 fn cmdHf(a: std.mem.Allocator, rest: []const []const u8) !u8 {
-    const usage = "usage: abv0 hf list | path <hf:owner/name> | search <words> | search-datasets <words>\n";
+    const usage = "usage: abv0 hf login [--token <token>] | whoami | logout | list | path <hf:owner/name> | search <words> | search-datasets <words>\n";
     if (rest.len == 0) {
         term.err(usage, .{});
         return 2;
     }
     const sub = rest[0];
+    if (std.mem.eql(u8, sub, "login")) {
+        if (rest.len == 1) return hf.login(a, null);
+        if (rest.len == 3 and std.mem.eql(u8, rest[1], "--token")) return hf.login(a, rest[2]);
+    }
+    if (std.mem.eql(u8, sub, "whoami") and rest.len == 1) return hf.whoami(a);
+    if (std.mem.eql(u8, sub, "logout") and rest.len == 1) return hf.logout(a);
     if (std.mem.eql(u8, sub, "list") and rest.len == 1) return hf.listCache(a);
     if (std.mem.eql(u8, sub, "path") and rest.len == 2) {
         const spec = hf.parseSpec(rest[1]) orelse {

@@ -226,8 +226,16 @@ abv0 uninstall hf:HuggingFaceTB/SmolLM2-135M-Instruct
   - `--include` and `--exclude` take patterns such as `"*.gguf"` or `"onnx/*"`.
   - A download over 25 GB needs `--include` or `--force`.
   - Files already in the cache aren't downloaded again.
-- **Gated and private repositories** need a token: `HF_TOKEN`, or the one
-  `huggingface-cli login` saves.
+- **Your token (for gated and private repositories):**
+  - `abv0 hf login` asks for it with typing hidden (or pipe it in, or pass
+    `--token`), checks it with Hugging Face, and saves it on this computer only, in the
+    file Hugging Face's own tools read (`~/.cache/huggingface/token`, readable only by
+    you).
+  - `abv0 hf whoami` shows the account; `abv0 hf logout` deletes the file.
+  - `HF_TOKEN` works too. The token is sent only to huggingface.co.
+- **Staying local:** `HF_HUB_OFFLINE=1 abv0 install hf:...` never contacts Hugging
+  Face and uses only what is already downloaded. With no network, install falls back to
+  the downloaded copy by itself.
 
 ### Moving from Homebrew
 

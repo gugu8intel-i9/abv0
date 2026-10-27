@@ -177,6 +177,10 @@ jobs:
           test -s "$snap/config.json" && test -s "$snap/model.safetensors" && test -s "$snap/pytorch_model.bin"
           # A second run finds everything in the cache.
           $abv0 install hf:hf-internal-testing/tiny-random-gpt2 --all-files | grep -q '(0 downloaded'
+          # Offline: no request to Hugging Face, the cached copy is used.
+          HF_HUB_OFFLINE=1 $abv0 install hf:hf-internal-testing/tiny-random-gpt2 --all-files | grep -q '(0 downloaded)'
+          if HF_HUB_OFFLINE=1 $abv0 install hf:hf-internal-testing/not-downloaded 2>/dev/null; then echo "offline install of an uncached repo passed"; exit 1; fi
+          $abv0 hf whoami >/dev/null 2>&1 && { echo "whoami with no token passed"; exit 1; } || true
           $abv0 hf list | grep -q 'hf:hf-internal-testing/tiny-random-gpt2'
           $abv0 uninstall hf:hf-internal-testing/tiny-random-gpt2
           if $abv0 hf path hf:hf-internal-testing/tiny-random-gpt2 2>/dev/null; then echo "still cached after uninstall"; exit 1; fi

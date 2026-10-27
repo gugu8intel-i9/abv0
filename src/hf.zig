@@ -17,6 +17,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const http = @import("http.zig");
 const net = @import("net.zig");
 const platform = @import("platform.zig");
 const safepath = @import("safepath.zig");
@@ -466,14 +467,34 @@ pub fn token(a: Allocator) ?[]const u8 {
             if (validToken(t)) return t;
         }
     }
-    const path = blk: {
-        if (platform.envOwned(a, "HF_HOME")) |h| if (h.len != 0) break :blk std.fs.path.join(a, &.{ h, "token" }) catch return null;
-        const home = platform.homeDir(a) catch return null;
-        break :blk std.fs.path.join(a, &.{ home, ".cache", "huggingface", "token" }) catch return null;
-    };
+    const path = tokenPath(a) catch return null;
     const text = std.fs.cwd().readFileAlloc(a, path, 4096) catch return null;
     const t = std.mem.trim(u8, text, " \t\r\n");
     return if (validToken(t)) t else null;
+}
+
+/// Where the token is kept on this computer, the same file Hugging Face's
+/// own tools read: `$HF_TOKEN_PATH`, `$HF_HOME/token`, else
+/// `~/.cache/huggingface/token`.
+pub fn tokenPath(a: Allocator) ![]u8 {
+    if (platform.envOwned(a, "HF_TOKEN_PATH")) |p| if (p.len != 0) return p;
+    if (platform.envOwned(a, "HF_HOME")) |h| if (h.len != 0) return std.fs.path.join(a, &.{ h, "token" });
+    const home = try platform.homeDir(a);
+    return std.fs.path.join(a, &.{ home, ".cache", "huggingface", "token" });
+}
+
+/// `HF_HUB_OFFLINE=1`: never contact Hugging Face, use only the cache.
+pub fn offline(a: Allocator) bool {
+    const v = platform.envOwned(a, "HF_HUB_OFFLINE") orelse return false;
+    defer a.free(v);
+    return isTrue(std.mem.trim(u8, v, " \t\r\n"));
+}
+
+fn isTrue(v: []const u8) bool {
+    for ([_][]const u8{ "1", "true", "yes", "on", "TRUE", "True", "YES", "ON" }) |t| {
+        if (std.mem.eql(u8, v, t)) return true;
+    }
+    return false;
 }
 
 fn authHeaders(a: Allocator) ![]const []const u8 {
@@ -598,9 +619,18 @@ pub fn install(base: Allocator, spec: Spec, opts: Options) !u8 {
     const a = arena.allocator();
     var timer = try std.time.Timer.start();
     const shown = try display(a, spec);
+    if (offline(a)) {
+        if (!opts.quiet) term.print("offline (HF_HUB_OFFLINE): Hugging Face is not contacted\n", .{});
+        return useCache(a, spec, opts);
+    }
     const headers = try authHeaders(a);
 
     const body = net.fetchToString(a, try apiUrl(a, spec), 64 * 1024 * 1024, .{ .headers = headers }) catch |e| {
+        // No network: what is already on this computer still works.
+        if ((try cachedSnapshot(a, spec)) != null) {
+            if (!opts.quiet) term.print("cannot reach Hugging Face ({s}); using the copy already on this computer\n", .{@errorName(e)});
+            return useCache(a, spec, opts);
+        }
         term.err("{s}error{s}: cannot read {s} from Hugging Face ({s}){s}\n", .{ term.red, term.reset, shown, @errorName(e), if (headers.len == 0) "; a private or misspelled repository looks the same as a missing one" else "" });
         return 1;
     };
@@ -613,7 +643,7 @@ pub fn install(base: Allocator, spec: Spec, opts: Options) !u8 {
         return 1;
     };
     if (repo.gated and headers.len == 0) {
-        term.err("{s}error{s}: {s} is gated: accept its terms on huggingface.co, then set HF_TOKEN (or run `huggingface-cli login`)\n", .{ term.red, term.reset, shown });
+        term.err("{s}error{s}: {s} is gated: accept its terms on huggingface.co, then run `abv0 hf login` (or set HF_TOKEN)\n", .{ term.red, term.reset, shown });
         return 1;
     }
 
@@ -789,17 +819,73 @@ pub fn snapshotPath(base: Allocator, spec: Spec) !u8 {
     var arena = std.heap.ArenaAllocator.init(base);
     defer arena.deinit();
     const a = arena.allocator();
+    const snapshot = try cachedSnapshot(a, spec) orelse {
+        term.err("{s} is not in the Hugging Face cache (install it first)\n", .{try display(a, spec)});
+        return 1;
+    };
+    term.print("{s}\n", .{snapshot});
+    return 0;
+}
+
+/// The cached snapshot folder for `spec`'s revision, or null. Reads only
+/// the disk.
+pub fn cachedSnapshot(a: Allocator, spec: Spec) !?[]u8 {
     const folder = try std.fs.path.join(a, &.{ try cacheRoot(a), try cacheFolderName(a, spec) });
     const commit = if (isHex(spec.revision, 40)) spec.revision else blk: {
         const ref = try std.fs.path.join(a, &.{ folder, "refs", spec.revision });
-        const text = std.fs.cwd().readFileAlloc(a, ref, 256) catch {
-            term.err("{s} is not in the Hugging Face cache (install it first)\n", .{try display(a, spec)});
-            return 1;
-        };
+        const text = std.fs.cwd().readFileAlloc(a, ref, 256) catch return null;
         break :blk std.mem.trim(u8, text, " \r\n");
     };
-    if (!isHex(commit, 40)) return 1;
-    term.print("{s}\n", .{try std.fs.path.join(a, &.{ folder, "snapshots", commit })});
+    if (!isHex(commit, 40)) return null;
+    const snapshot = try std.fs.path.join(a, &.{ folder, "snapshots", commit });
+    std.fs.cwd().access(snapshot, .{}) catch return null;
+    return snapshot;
+}
+
+/// Install with no network: the cached snapshot, if it holds the files
+/// asked for (`--include`), else an error.
+fn useCache(a: Allocator, spec: Spec, opts: Options) !u8 {
+    const shown = try display(a, spec);
+    const snapshot = try cachedSnapshot(a, spec) orelse {
+        term.err("{s}error{s}: {s} is not on this computer yet; download it once with network on\n", .{ term.red, term.reset, shown });
+        return 1;
+    };
+    var dir = try std.fs.cwd().openDir(snapshot, .{ .iterate = true });
+    defer dir.close();
+    var w = try dir.walk(a);
+    defer w.deinit();
+    var count: usize = 0;
+    var missing: usize = 0;
+    while (try w.next()) |e| {
+        if (e.kind == .directory) continue;
+        const rel = try std.mem.replaceOwned(u8, a, e.path, "\\", "/");
+        if (opts.include.len != 0) {
+            var hit = false;
+            for (opts.include) |p| hit = hit or matches(p, rel);
+            if (!hit) continue;
+        }
+        var skip = false;
+        for (opts.exclude) |p| skip = skip or matches(p, rel);
+        if (skip) continue;
+        // A link whose blob is gone is a broken download.
+        e.dir.access(e.basename, .{}) catch {
+            missing += 1;
+            continue;
+        };
+        count += 1;
+    }
+    if (count == 0 or missing != 0) {
+        term.err("{s}error{s}: {s}: the copy on this computer is {s}; download it with network on\n", .{ term.red, term.reset, shown, if (count == 0) "missing those files" else "incomplete" });
+        return 1;
+    }
+    if (opts.dry_run) {
+        term.print("dry run: {d} files already on this computer\n", .{count});
+        return 0;
+    }
+    if (!opts.quiet) {
+        term.print("{s}done{s} {s}: {d} files on this computer (0 downloaded)\n", .{ term.green, term.reset, shown, count });
+        term.print("  {s}\n", .{snapshot});
+    }
     return 0;
 }
 
@@ -809,6 +895,10 @@ pub fn search(base: Allocator, kind: Kind, words: []const []const u8) !u8 {
     var arena = std.heap.ArenaAllocator.init(base);
     defer arena.deinit();
     const a = arena.allocator();
+    if (offline(a)) {
+        term.err("{s}error{s}: search needs Hugging Face, and HF_HUB_OFFLINE is set\n", .{ term.red, term.reset });
+        return 1;
+    }
     var q = std.ArrayList(u8).init(a);
     for (words, 0..) |w, i| {
         if (i != 0) try q.appendSlice("%20");
@@ -834,6 +924,149 @@ pub fn search(base: Allocator, kind: Kind, words: []const []const u8) !u8 {
         term.print("{s:<60} {d:>12} downloads  {s}\n", .{ spec_text, dl, tag });
     }
     if (v.array.items.len == 0) term.print("no match\n", .{});
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Your token: login, whoami, logout
+// ---------------------------------------------------------------------------
+
+/// The token is sent only to huggingface.co: the HTTP client drops it on a
+/// redirect to any other host (the file CDN), and it is never written
+/// anywhere but the token file.
+const Account = struct { name: []const u8, role: []const u8 };
+
+fn whoamiRequest(a: Allocator, t: []const u8) !Account {
+    const header = try std.fmt.allocPrint(a, "Authorization: Bearer {s}", .{t});
+    const body = try net.fetchToString(a, hub ++ "/api/whoami-v2", 1024 * 1024, .{ .headers = &.{header} });
+    return parseWhoami(a, body);
+}
+
+fn parseWhoami(a: Allocator, body: []const u8) !Account {
+    const v = std.json.parseFromSliceLeaky(std.json.Value, a, body, .{}) catch return error.BadAnswer;
+    if (v != .object) return error.BadAnswer;
+    const name = v.object.get("name") orelse return error.BadAnswer;
+    if (name != .string) return error.BadAnswer;
+    var role: []const u8 = "";
+    if (v.object.get("auth")) |auth| if (auth == .object) if (auth.object.get("accessToken")) |at| if (at == .object) if (at.object.get("role")) |r| if (r == .string) {
+        role = r.string;
+    };
+    return .{ .name = name.string, .role = role };
+}
+
+/// One line from the terminal with typing hidden, or from a pipe as is.
+fn readSecret(a: Allocator, prompt: []const u8) ![]u8 {
+    const in = std.io.getStdIn();
+    const tty = in.isTty();
+    if (tty) term.err("{s}", .{prompt});
+    var restore: ?if (builtin.os.tag == .windows) u32 else std.posix.termios = null;
+    if (tty) {
+        if (builtin.os.tag == .windows) {
+            const k32 = std.os.windows.kernel32;
+            var mode: u32 = 0;
+            if (k32.GetConsoleMode(in.handle, &mode) != 0) {
+                restore = mode;
+                _ = k32.SetConsoleMode(in.handle, mode & ~@as(u32, 0x4)); // ENABLE_ECHO_INPUT
+            }
+        } else if (std.posix.tcgetattr(in.handle)) |orig| {
+            var quiet = orig;
+            quiet.lflag.ECHO = false;
+            std.posix.tcsetattr(in.handle, .FLUSH, quiet) catch {};
+            restore = orig;
+        } else |_| {}
+    }
+    defer if (restore) |r| {
+        if (builtin.os.tag == .windows) {
+            _ = std.os.windows.kernel32.SetConsoleMode(in.handle, r);
+        } else std.posix.tcsetattr(in.handle, .FLUSH, r) catch {};
+        term.err("\n", .{});
+    };
+    const line = try in.reader().readUntilDelimiterOrEofAlloc(a, '\n', 4096) orelse return error.EndOfStream;
+    return line;
+}
+
+/// Save the token where Hugging Face's own tools look, readable only by you.
+fn saveToken(a: Allocator, t: []const u8) ![]u8 {
+    const path = try tokenPath(a);
+    if (std.fs.path.dirname(path)) |d| try std.fs.cwd().makePath(d);
+    const f = try std.fs.cwd().createFile(path, .{ .truncate = true, .mode = if (builtin.os.tag == .windows) 0 else 0o600 });
+    defer f.close();
+    // An older file keeps its mode on create; tighten it.
+    if (builtin.os.tag != .windows) try f.chmod(0o600);
+    try f.writeAll(t);
+    return path;
+}
+
+/// `abv0 hf login [--token <token>]`: check the token with Hugging Face and
+/// keep it on this computer. With no `--token`, it is typed (hidden) or piped
+/// in, so it stays out of shell history.
+pub fn login(base: Allocator, given: ?[]const u8) !u8 {
+    var arena = std.heap.ArenaAllocator.init(base);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const raw = given orelse (readSecret(a, "Hugging Face token (from https://huggingface.co/settings/tokens): ") catch {
+        term.err("{s}error{s}: no token given\n", .{ term.red, term.reset });
+        return 2;
+    });
+    const t = std.mem.trim(u8, raw, " \t\r\n");
+    if (!validToken(t)) {
+        term.err("{s}error{s}: that does not look like a Hugging Face token (they start with hf_)\n", .{ term.red, term.reset });
+        return 2;
+    }
+    if (offline(a)) {
+        term.err("{s}error{s}: HF_HUB_OFFLINE is set; the token cannot be checked, so it was not saved\n", .{ term.red, term.reset });
+        return 1;
+    }
+    const acct = whoamiRequest(a, t) catch |e| {
+        const rejected = e == error.HttpStatus and (http.last_http_status == 401 or http.last_http_status == 403);
+        term.err("{s}error{s}: {s}; nothing was saved\n", .{ term.red, term.reset, if (rejected) "Hugging Face did not accept that token" else "Hugging Face did not accept that token, or cannot be reached" });
+        return 1;
+    };
+    const path = try saveToken(a, t);
+    term.print("{s}logged in{s} as {s}{s}{s}{s}\n", .{ term.green, term.reset, acct.name, if (acct.role.len != 0) " (" else "", acct.role, if (acct.role.len != 0) " token)" else "" });
+    term.print("  token saved on this computer only: {s}\n", .{path});
+    if (platform.envOwned(a, "HF_TOKEN") != null) term.print("  note: HF_TOKEN is set and is used instead of the saved token\n", .{});
+    return 0;
+}
+
+/// `abv0 hf whoami`: which account the token belongs to, and where it lives.
+pub fn whoami(base: Allocator) !u8 {
+    var arena = std.heap.ArenaAllocator.init(base);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const t = token(a) orelse {
+        term.print("not logged in (run `abv0 hf login`)\n", .{});
+        return 1;
+    };
+    const from = if (platform.envOwned(a, "HF_TOKEN") != null) "HF_TOKEN" else if (platform.envOwned(a, "HUGGING_FACE_HUB_TOKEN") != null) "HUGGING_FACE_HUB_TOKEN" else try tokenPath(a);
+    if (offline(a)) {
+        term.print("a token is set ({s}); offline, so the account is not checked\n", .{from});
+        return 0;
+    }
+    const acct = whoamiRequest(a, t) catch {
+        term.err("{s}error{s}: the token from {s} was not accepted (or Hugging Face cannot be reached)\n", .{ term.red, term.reset, from });
+        return 1;
+    };
+    term.print("{s}{s}{s}{s}  (token from {s})\n", .{ acct.name, if (acct.role.len != 0) ", " else "", acct.role, if (acct.role.len != 0) " token" else "", from });
+    return 0;
+}
+
+/// `abv0 hf logout`: delete the saved token from this computer.
+pub fn logout(base: Allocator) !u8 {
+    var arena = std.heap.ArenaAllocator.init(base);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const path = try tokenPath(a);
+    std.fs.cwd().deleteFile(path) catch |e| switch (e) {
+        error.FileNotFound => {
+            term.print("no saved token ({s})\n", .{path});
+            return 0;
+        },
+        else => return e,
+    };
+    term.print("logged out: {s} is gone\n", .{path});
+    if (platform.envOwned(a, "HF_TOKEN") != null or platform.envOwned(a, "HUGGING_FACE_HUB_TOKEN") != null)
+        term.print("  note: a token is still set in your environment (HF_TOKEN)\n", .{});
     return 0;
 }
 
@@ -959,4 +1192,30 @@ test "a pickle split across reads is still found" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     try testing.expectEqualStrings("system", (try scanPickleFile(arena.allocator(), p)).?.name);
+}
+
+test "parseWhoami reads the account name and token role" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const acct = try parseWhoami(arena.allocator(),
+        \\{"type":"user","name":"someone","auth":{"type":"access_token","accessToken":{"displayName":"x","role":"read"}}}
+    );
+    try testing.expectEqualStrings("someone", acct.name);
+    try testing.expectEqualStrings("read", acct.role);
+    try testing.expectError(error.BadAnswer, parseWhoami(arena.allocator(), "{\"error\":\"Invalid credentials\"}"));
+    try testing.expectError(error.BadAnswer, parseWhoami(arena.allocator(), "not json"));
+}
+
+test "HF_HUB_OFFLINE values" {
+    try testing.expect(isTrue("1"));
+    try testing.expect(isTrue("true"));
+    try testing.expect(!isTrue("0"));
+    try testing.expect(!isTrue(""));
+}
+
+test "validToken refuses anything that could break a header" {
+    try testing.expect(validToken("hf_abcdefghijklmnopqrstuvwxyz0123"));
+    try testing.expect(!validToken("hf_abc\r\nX-Evil: 1"));
+    try testing.expect(!validToken("hf_ab cd ef gh"));
+    try testing.expect(!validToken("short"));
 }

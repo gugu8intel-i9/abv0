@@ -16,7 +16,11 @@
     takes them).
   - `--include` and `--exclude` pick files; a download over 25 GB needs `--include` or
     `--force`; files already cached are reused.
-  - Tokens come from `HF_TOKEN` or the `huggingface-cli login` file.
+  - `abv0 hf login` plugs in your token: typed hidden (or piped, or `--token`), checked
+    with Hugging Face, and saved on this computer only, mode 600, in the file Hugging
+    Face's tools share. `abv0 hf whoami` and `abv0 hf logout` too. `HF_TOKEN` also works.
+  - `HF_HUB_OFFLINE=1` never contacts Hugging Face and uses only the cache. With no
+    network, install falls back to the cached copy.
   - `abv0 hf list | path | search | search-datasets`, and `abv0 uninstall hf:...`.
 - **Proprietary software.** `catalog/vendor.txt` lists software published on its maker's
   own site. Each line gives a homepage instead of `owner/repo`, plus `url.<platform>=` for

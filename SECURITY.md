@@ -31,7 +31,9 @@ trustworthy, so trust in a model rests on Hugging Face and on its uploader. Pyth
 pickles can run code when they are loaded, so pickle files are scanned for imports of
 modules such as `os`, `subprocess`, `socket` and `builtins.eval`, and refused when they
 have one. Prefer `.safetensors` and `.gguf`, which hold no code. A token is sent only
-to huggingface.co, never to the download servers it redirects to.
+to huggingface.co, never to the download servers it redirects to. `abv0 hf login`
+saves it only in the local token file, readable only by its owner, and never prints
+it. With `HF_HUB_OFFLINE=1`, abv0 makes no request to Hugging Face at all.
 
 Packages from `catalog/vendor.txt` come from their makers' own servers, which publish no
 checksum abv0 can check. The builder downloads each file over https, pins its SHA-256 in
