@@ -13,10 +13,28 @@ can also be installed directly with `gh:owner/repo`.
 ```bash
 abv0 install ripgrep jq                  # verified, parallel
 abv0 install gh:BurntSushi/ripgrep       # any GitHub release, verified
+abv0 install google-chrome slack         # proprietary apps, from their makers' own sites
+abv0 install hf:Qwen/Qwen2.5-0.5B-Instruct-GGUF --include "*q4_k_m*"   # AI models
+abv0 install book:gutenberg/1342         # free books and papers
+abv0 undo                                # take back the last change
 abv0 run ripgrep -- --help               # run without touching PATH
 abv0 shell ripgrep                       # ephemeral subshell with just that package
 abv0 browse                              # pick packages from a searchable list
 ```
+
+**What it does, in one list:**
+
+| | |
+| :--- | :--- |
+| Command-line tools | About 1,500 in the signed catalog, plus any GitHub project's release with `gh:owner/repo` |
+| Desktop apps | Mac apps into `~/Applications`, Windows portable apps with Start Menu shortcuts |
+| Proprietary software | Chrome, VS Code, Slack, Discord, Docker Desktop, Terraform, 1Password CLI and more, from their makers' own links, checksum-pinned |
+| AI models and datasets | `hf:owner/model` into the Hugging Face cache, every file verified, pickle files scanned; token login, offline mode |
+| Books and papers | Project Gutenberg, Standard Ebooks, the Internet Archive and arXiv, into `~/Books` |
+| Undo | `abv0 history`, `abv0 undo`, `abv0 rollback <pkg>`, `abv0 self-update --rollback` |
+| Staying current | Catalog refreshes itself; `abv0 autoupdate on` with daily, weekly, every-N-hours or a set time |
+| Downloads | Built-in HTTPS client, parallel ranged downloads, micro-shards, streaming unpack, a verified download cache |
+| Safety | Signed catalog, SHA-256 on every file, malware scan before anything is linked |
 
 **Staying up to date, automatically.**
 
@@ -26,10 +44,15 @@ abv0 browse                              # pick packages from a searchable list
 - `abv0 maintain` does all upkeep in one go: refresh the catalog, upgrade every package
   that is not pinned, install missing dependencies, remove dependencies nothing needs,
   clear temporary files, and update abv0 itself.
-- `abv0 autoupdate on` runs `maintain` every night at about 03:17 (`--weekly` for
-  Sundays) through the system's own scheduler: launchd on macOS, a systemd user timer or
-  cron on Linux, Task Scheduler on Windows. `abv0 autoupdate status` shows whether it is
-  on and when it last ran; `abv0 autoupdate off` removes it.
+- `abv0 autoupdate on` runs `maintain` every night at about 03:17 through the system's
+  own scheduler: launchd on macOS, a systemd user timer or cron on Linux, Task Scheduler
+  on Windows. Pick another schedule with:
+  - `--weekly` (Sundays), or `--weekly --day mon` for another day;
+  - `--every 6h` (every N hours, 1-23) or `--hourly`;
+  - `--at 09:30` for the time of day.
+
+  `abv0 autoupdate status` shows whether it is on, when it runs and when it last ran;
+  `abv0 autoupdate off` removes it.
 - Dependencies install with what needs them, `upgrade` adds any a new version needs, and
   `abv0 fix` reinstalls missing ones. When you uninstall something, dependencies that
   nothing else uses go with it. Only packages abv0 itself pulled in as dependencies are
@@ -153,7 +176,7 @@ PACKAGES
   install gh:owner/repo    Install any GitHub project's release, verified (no recipe needed)
   browse                   Pick packages to install from a full-screen list
   maintain                 Refresh, upgrade, fix dependencies and clean up in one go
-  autoupdate on|off|status Run maintain daily (or --weekly) via the system scheduler
+  autoupdate on|off|status Run maintain daily, --weekly --day mon, --every 6h, --at 09:30
   uninstall <pkg>...       Remove packages and the links they created
   upgrade [--all|pkg]...   Upgrade outdated packages (keeps the previous version for rollback)
   outdated                 List packages with a newer version available (pinned ones marked)
@@ -165,11 +188,20 @@ PACKAGES
   leaves                   List installed packages nothing else depends on
   switch <pkg> <version>   Make an installed version the active one
   rollback <pkg>           Go back to the previously installed version
+  history                  Every change to what is installed, newest first
+  undo [<#>]               Undo the last change (or change #), all packages at once
   home [--open] <pkg>      Print (or open) a package's homepage
   pin <pkg>                Hold a package at its installed version
   unpin <pkg>              Let upgrade update it again
   pinned                   List pinned packages
   which <bin>              Show which package owns a command
+
+MODELS, DATASETS AND BOOKS
+  install hf:owner/model   A Hugging Face model (hf:datasets/owner/name for a dataset)
+  hf login|whoami|logout   Plug in your Hugging Face token (kept on this computer only)
+  hf list|path|search      What is in the Hugging Face cache, or on the Hub
+  install book:source/id   A free book or paper (gutenberg, standard, archive, arxiv)
+  book search|list|dir     Search every book source at once; what you downloaded
 
 EXECUTION
   run <pkg> [-- args]      Run a package executable
@@ -190,7 +222,7 @@ MAINTENANCE
   gc                       Remove temporary files and stale sandboxes
   cleanup                  Remove old versions (including rollback's), keeping the newest
   completions <shell>      Print a bash, zsh, fish or pwsh completion script
-  self-update [--check]    Update abv0 from a signed release
+  self-update [--check]    Update abv0 from a signed release (--rollback goes back)
   reset                    Uninstall everything
   report [--bug]           Open a prefilled GitHub issue
   version                  Print the version
@@ -259,6 +291,23 @@ abv0 uninstall book:gutenberg/1342
   archive lists. Every file must really be the format asked for, so an error page
   or a swapped file is never kept.
 
+### Undo and rollback
+
+```sh
+abv0 history              # every change to what is installed, newest first
+abv0 undo                 # undo the last change (all packages it touched)
+abv0 undo 12              # undo change #12 from the history
+abv0 rollback jq          # one package back to its previous version
+abv0 switch jq 1.7.1      # one package to any version still on disk
+abv0 self-update --rollback   # abv0 itself back to the version before the last update
+```
+
+- Every install, uninstall, upgrade, switch and undo is recorded in the history.
+- `undo` switches back to the old version when it is still on disk, with no download;
+  `upgrade` keeps the version it replaces for this. A removed package is installed
+  again (from the download cache when it is there; a GitHub one at the same release).
+- An undo is recorded too, so undoing it again redoes the change.
+
 ### Moving from Homebrew
 
 ```sh
@@ -310,6 +359,10 @@ abv0 install owner/repo               # the same as gh:owner/repo
 | `--allow-unverified` | Permit installs without a verified checksum |
 | `--allow-suspicious` | Install a package even if the malware scan blocks it |
 | `--micro-split` | Parallel ranged download for large assets |
+| `--micro-shards[=SIZE]` | Fetch big files as many small pieces (1M each by default) that the connections share; see [Downloads](#downloads) |
+| `--include`, `--exclude <glob,...>` | `hf:` installs: only these files, or not these |
+| `--all-files` | `hf:` installs: also the copies in other weight formats |
+| `--format epub\|pdf\|txt\|kindle` | `book:` installs: the file type |
 | `--no-stream` | Download fully before unpacking (disables the streaming install) |
 | `--force` | Overwrite files and replace conflicting bin links |
 | `--dry-run` | Show what install, upgrade, uninstall, bundle or cleanup would do; change nothing |
@@ -352,6 +405,10 @@ fetches and stores the macOS build without linking it into your `PATH`.
 | `ABV0_DOWNLOADER` | `builtin`, `curl` or `auto` (the default). `builtin` never uses curl; `curl` never uses the built-in client. |
 | `ABV0_SPLIT_MIN` | Smallest download fetched over several connections at once, in bytes (`8M`, `512k` and `1G` work too). Default 8 MiB. |
 | `ABV0_CONNECTIONS` | Connections for a split download, 1 to 16. `1` turns splitting off. Unset, a download gets one connection per 4 MiB, up to 8. |
+| `ABV0_SHARD_SIZE` | Turn micro-shards on for every download: `on` (1 MiB pieces) or a size such as `512k` or `4M` |
+| `ABV0_BOOKS_DIR` | Where books go, replacing `~/Books` |
+| `HF_TOKEN`, `HF_HUB_CACHE`, `HF_HOME` | Hugging Face token and cache, as Hugging Face's own tools read them |
+| `HF_HUB_OFFLINE` | `1` never contacts Hugging Face; installs come from the cache only |
 | `GITHUB_TOKEN`, `GH_TOKEN` | Optional GitHub token for API requests. `GITHUB_TOKEN` is read first. |
 | `ABV0_NO_SCAN` | `1` turns off the install-time malware scan |
 | `ABV0_AUTO_UPDATE` | `0` stops commands refreshing a stale catalog |
@@ -393,51 +450,91 @@ abv0 completions pwsh | Out-String | Invoke-Expression
 
 ## Performance
 
-Measured on the development machine (2 vCPU, Linux x86_64, ReleaseFast static build).
-Reproduce with `abv0 benchmark`; the wall-clock figures below are 30-run averages of
-the whole process including spawn.
+Measured by the [Benchmark workflow](.github/workflows/bench.yml) on GitHub's hosted
+runners, on 2026-10-28, with abv0 2.7.0, Homebrew 6.0–7.0 and zerobrew 0.4.2 installing
+the same five tools (ripgrep, fd, bat, jq, fzf). Wall time in milliseconds; lower is
+better. Hosted runners are shared machines, so read these as rough sizes, not exact
+figures. Run it yourself from the Actions tab.
 
-| Command | v1.5.0 (previously shipped) | v2.0.0 | Change |
+**Installing five tools**
+
+| | Linux x86_64 | macOS arm64 | macOS x86_64 |
 | :--- | ---: | ---: | ---: |
-| `abv0 help` | 4.91 ms | **0.50 ms** | 9.8× faster |
-| `abv0 list` | 5.14 ms | **0.63 ms** | 8.2× faster |
-| `abv0 outdated` | 4.92 ms | **0.74 ms** | 6.7× faster (and it now works — see below) |
-| `abv0 install ripgrep jq` (cached) | — | **0.84 ms** | — |
-| `abv0 install ripgrep` (cold, 2.3 MB download) | — | **257–296 ms** | — |
+| abv0, cold install | **1,022** | **1,277** | **1,363** |
+| zerobrew, cold install | 2,626 | 4,510 | failed ¹ |
+| Homebrew, cold install | 42,436 | 4,225 | 4,149 |
+| abv0, warm reinstall | 567 | 763 | **881** |
+| zerobrew, warm reinstall | **62** | **434** | failed ¹ |
+| Homebrew, warm reinstall | 44,243 | 2,497 | 5,495 |
 
-Internal micro-benchmarks (`abv0 benchmark`):
+¹ zerobrew 0.4.2 could not install fzf's dependency pcre2 on Intel macOS ("unsupported
+archive format").
 
-```
-  registry lookup         100000 ops     1.119 ms       11.2 ns/op
-  index build                 13 pkgs    0.107 ms
-  index mmap load             13 pkgs    0.032 ms
-  fastLink (hard link)       500 ops     1.755 ms        3.5 us/op
-  sha256                       8 MiB     8.426 ms      949.5 MiB/s
-```
+- **Cold installs** (nothing downloaded yet): abv0 is 2.6–3.5× faster than zerobrew
+  and 3–42× faster than Homebrew.
+- **Warm reinstalls** (everything already downloaded once): zerobrew is faster. It keeps
+  every unpacked package in its store and only relinks, where abv0 unpacks again from its
+  download cache. abv0 is still 3–78× faster than Homebrew here.
 
-Where the old startup time went: `Store.init` spawned three `chmod` subprocesses on
-*every* invocation, including `abv0 help`. Permissions are now set in-process with
-`fchmod`, the registry is only loaded by commands that need it, and the shipped Linux
-binary is a stripped `ReleaseFast` static build (679 KB) rather than an unstripped
-debug build (3.5 MB).
+**Everyday commands** (mean of 20–50 runs)
 
-Other performance work in 2.0.0:
+| | abv0 | Homebrew | zerobrew |
+| :--- | ---: | ---: | ---: |
+| `--version` (Linux / macOS arm64) | **0.4 / 6.6** | 12.3 / 123.5 | 1.8 / 9.9 |
+| `search rip` | **15 / 36** | 660 / 817 | no such command |
+| `info ripgrep` | **15 / 52** | 517 / 848 | no such command |
+| `list --installed` | **0.6 / 7.9** | 10.8 / 55.3 | no such command |
 
-- **One pass over each archive.** Downloads used to be read three times (curl, then
-  SHA-256, then a "deduplicated block store" that wrote a full second copy of every
-  archive into `~/.abv0/blockstore` and never read it back). The block store is gone;
-  hashing is a single streaming pass.
-- **One directory walk per install**, not one per binary. Installing `ffmpeg`
-  (3 executables) previously ran three full recursive walks.
-- **Bounded worker pool.** Installs used to spawn one OS thread per package with no
-  limit; a 50-line Brewfile meant 50 threads fighting for bandwidth. Now
-  `min(CPUs, packages, 8)`.
-- **Buffered stdout.** Output went through unbuffered `std.debug.print` to *stderr*,
-  so `abv0 list | grep foo` printed nothing at all. Output is now buffered and on
-  stdout, with ANSI colour only when the destination is a TTY (`NO_COLOR` respected).
-- **No DOM parse of the manifest.** Loading used to build a full JSON `Value` tree and
-  then duplicate every string, keeping two copies of the registry alive and freeing
-  neither.
+**One big download** (a 415 MB model file from Hugging Face)
+
+| | Linux x86_64 | macOS arm64 | macOS x86_64 |
+| :--- | ---: | ---: | ---: |
+| abv0, default | 1,791 (232 MB/s) | 5,431 (76 MB/s) | 3,865 (107 MB/s) |
+| abv0 through curl | 1,688 (246 MB/s) | 5,923 (70 MB/s) | 3,750 (111 MB/s) |
+| plain curl, one connection | 2,148 (193 MB/s) | 3,810 (109 MB/s) | 4,286 (97 MB/s) |
+
+abv0's rows also check the SHA-256 and write the Hugging Face cache; plain curl only saves
+the file. On these well-connected runners one connection is already close to the limit,
+so splitting the download helps most on Linux. On an ordinary home connection, where one
+connection is the bottleneck, the gap is larger: in a sandbox test, abv0 took 3.3–4.0 s
+for the same file and plain curl 17.5 s.
+
+### Downloads
+
+- A big file is split over several connections (one per 4 MiB, up to 8;
+  `ABV0_CONNECTIONS` changes it) and hashed in order as the pieces land, so the file is
+  never read twice.
+- **Micro-shards** (`--micro-shards`, or `ABV0_SHARD_SIZE=on` for every download) cut the
+  file into many pieces that the connections take from a shared queue, so a fast
+  connection takes more and one slow connection cannot hold up the end. Pieces start big
+  and shrink toward the end. Use it on uneven links (Wi-Fi, a busy mirror, one stalled
+  connection). On a clean, fast link the default is as fast or faster, because every
+  piece is one more request. `--micro-shards=4M` sets the smallest piece.
+- Verified downloads are kept in a cache, so reinstalling or rolling back needs no network.
+
+### Compared with zerobrew
+
+[zerobrew](https://github.com/lucasgelfond/zerobrew) is a fast client for Homebrew's own
+packages, written in Rust. Both are much faster than Homebrew; they solve different
+problems.
+
+| | abv0 | zerobrew |
+| :--- | :--- | :--- |
+| Where packages come from | Its own signed catalog built from upstream releases, any GitHub release (`gh:`), vendors' own downloads | Homebrew's formulas and bottles |
+| Platforms | Linux, macOS, **Windows** | Linux, macOS |
+| Desktop apps | Mac apps, Windows portable apps, proprietary apps | No casks |
+| Catalog size | About 1,500 packages | Homebrew's formulas (thousands), with some unsupported |
+| Builds from source | No (prebuilt only) | Yes, as a fallback |
+| Checks | Signed catalog, SHA-256 on every download, malware scan before linking | Homebrew's bottle checksums |
+| Undo | `history`, `undo`, `rollback`, `switch`, `self-update --rollback` | None |
+| Scheduled updates | `autoupdate on` (daily, weekly, every N hours, at a time) | None |
+| AI models, books | `hf:` models and datasets, `book:` books and papers | No |
+| Cold install (5 tools, measured above) | **faster** (2.6–3.5×) | slower |
+| Warm reinstall (measured above) | slower | **faster** |
+
+Choose zerobrew if you want Homebrew's exact packages and formulas, faster. Choose abv0 if
+you want one tool across Linux, macOS and Windows that verifies everything, can undo, and
+also handles apps, models and books.
 
 ### Streaming install
 
@@ -683,7 +780,7 @@ zig-out/bin/sign-manifest verify keys/manifest.pub packages/index.json
 
 ```bash
 zig build                       # debug build
-zig build test                  # 255 test blocks across src/*.zig and tools/*.zig
+zig build test                  # 450 test blocks across src/*.zig and tools/*.zig
 zig build check                 # type-check Linux, macOS and Windows targets
 zig build release               # stripped ReleaseFast binaries for all 6 targets
 zig build sign-tool             # the sign-manifest CLI

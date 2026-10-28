@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### New
+
+- **Undo and history.** Every install, uninstall, upgrade, switch and undo is recorded.
+  `abv0 history` lists the changes; `abv0 undo` reverses the newest (or `abv0 undo <#>`
+  one of them) for every package it touched: switching back to a version still on disk
+  with no download, removing what was added, and installing again what was removed.
+  Undoing an undo redoes it.
+- **Choose when upkeep runs.** `abv0 autoupdate on` takes `--weekly --day mon`,
+  `--every 6h`, `--hourly` and `--at 09:30`, on launchd, systemd, cron and Task Scheduler
+  alike. `abv0 autoupdate status` shows when it runs.
+- **Micro-sharded downloads.** `--micro-shards` (or `ABV0_SHARD_SIZE=1M`) cuts a big
+  file into many small pieces that the connections take from a shared queue, so a fast
+  connection takes more and one slow connection no longer holds up the end.
+  `--micro-shards=4M` sets the piece size. The SHA-256 is still computed in order as the
+  pieces land.
+- **Benchmarks against zerobrew.** The benchmark workflow now times zerobrew next to
+  Homebrew, and one 415 MB download with each download mode.
+- **Roll abv0 itself back.** `self-update` keeps the abv0 it replaces, and
+  `abv0 self-update --rollback` returns to it.
+
 ## 2.7.0 (2026-10-28)
 
 ### New

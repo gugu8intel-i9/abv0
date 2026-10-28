@@ -2602,7 +2602,7 @@ pub const Store = struct {
     }
 
     /// The spec recorded in a store directory's `.abv0-source`, if it has one.
-    fn readSource(a: std.mem.Allocator, dir_path: []const u8) ?ghrelease.Spec {
+    pub fn readSource(a: std.mem.Allocator, dir_path: []const u8) ?ghrelease.Spec {
         const p = std.fs.path.join(a, &.{ dir_path, source_file }) catch return null;
         const text = std.fs.cwd().readFileAlloc(a, p, 1024) catch return null;
         return ghverify.parseSourceNote(text);

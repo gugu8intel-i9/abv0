@@ -20,6 +20,8 @@ const sign = @import("sign.zig");
 const cmds_extra = @import("cmds_extra.zig");
 const books = @import("books.zig");
 const hf = @import("hf.zig");
+const history = @import("history.zig");
+const pget = @import("pget.zig");
 const ghrelease = @import("ghrelease.zig");
 const ghverify = @import("ghverify.zig");
 
@@ -232,9 +234,24 @@ fn parseArgsDiag(allocator: std.mem.Allocator, argv: []const []const u8, diag: *
             if (i >= argv.len) return failArg(diag, arg, "", error.MissingOptionValue);
             args.jobs = std.fmt.parseInt(usize, argv[i], 10) catch
                 return failArg(diag, arg, argv[i], error.InvalidNumber);
-        } else if (std.mem.eql(u8, arg, "--daily") or std.mem.eql(u8, arg, "--weekly")) {
-            // `autoupdate on` reads these from the rest.
+        } else if (std.mem.eql(u8, arg, "--daily") or std.mem.eql(u8, arg, "--weekly") or std.mem.eql(u8, arg, "--rollback")) {
+            // `autoupdate on` and `self-update` read these from the rest.
             try args.rest.append(arg);
+        } else if (std.mem.eql(u8, arg, "--micro-shards") or std.mem.startsWith(u8, arg, "--micro-shards=")) {
+            // Download big files as many small shards shared by the connections.
+            const value: ?[]const u8 = if (std.mem.indexOfScalar(u8, arg, '=')) |eq| arg[eq + 1 ..] else null;
+            pget.shard_override = if (value == null) pget.default_shard_size else pget.parseShardSize(value) orelse
+                return failArg(diag, arg, value.?, error.InvalidNumber);
+            if (pget.parseSize(value) == null and value != null and !std.ascii.eqlIgnoreCase(value.?, "on") and !std.mem.eql(u8, value.?, "1") and !std.ascii.eqlIgnoreCase(value.?, "true"))
+                return failArg(diag, arg, value.?, error.InvalidNumber);
+        } else if (std.mem.eql(u8, arg, "--hourly")) {
+            try args.rest.append(arg);
+        } else if (std.mem.eql(u8, arg, "--at") or std.mem.eql(u8, arg, "--day") or std.mem.eql(u8, arg, "--every")) {
+            // `autoupdate on` reads these and their values from the rest.
+            i += 1;
+            if (i >= argv.len) return failArg(diag, arg, "", error.MissingOptionValue);
+            try args.rest.append(arg);
+            try args.rest.append(argv[i]);
         } else if (std.mem.eql(u8, arg, "--token")) {
             // `hf login` reads it from the rest.
             i += 1;
@@ -516,6 +533,18 @@ const commands = [_]Command{
         .example = "abv0 switch jq 1.6",
     },
     .{
+        .name = "history",
+        .args = "[--all]",
+        .summary = "Every change to what is installed, newest first: the command, and which packages were added, removed or switched. Kept in the abv0 folder (the newest 200).",
+        .example = "abv0 history",
+    },
+    .{
+        .name = "undo",
+        .args = "[<#>]",
+        .summary = "Put back what one change did (the newest when no number is given): switch back to the old version when it is still on disk, remove what was added, and install again what was removed. The undo is recorded too, so undoing it redoes.",
+        .example = "abv0 undo",
+    },
+    .{
         .name = "rollback",
         .args = "<pkg>",
         .summary = "Switch to the version installed just before the active one. `upgrade` keeps that previous version for this; `cleanup` removes it.",
@@ -660,15 +689,22 @@ const commands = [_]Command{
     },
     .{
         .name = "autoupdate",
-        .args = "on [--daily|--weekly] | off | status",
-        .summary = "Run `abv0 maintain` automatically through the system scheduler (launchd on macOS, a systemd user timer or cron on Linux, Task Scheduler on Windows), at about 03:17. `status` shows whether it is on and when it last ran.",
-        .flags = &.{},
-        .example = "abv0 autoupdate on",
+        .args = "on [--daily | --weekly [--day <day>] | --every <N>h | --hourly] [--at HH:MM] | off | status",
+        .summary = "Run `abv0 maintain` automatically through the system scheduler (launchd on macOS, a systemd user timer or cron on Linux, Task Scheduler on Windows): daily at about 03:17 unless told otherwise. `status` shows whether it is on, when it runs and when it last ran.",
+        .flags = &.{
+            .{ .name = "--daily", .help = "Every day (the default)" },
+            .{ .name = "--weekly", .help = "Once a week (Sunday unless --day says otherwise)" },
+            .{ .name = "--day <day>", .help = "The day of the week for a weekly run: mon, tue, ... sun" },
+            .{ .name = "--every <N>h", .help = "Every N hours (1-23), starting at midnight" },
+            .{ .name = "--hourly", .help = "Every hour" },
+            .{ .name = "--at HH:MM", .help = "The time of day (24-hour clock); for --every, the minute" },
+        },
+        .example = "abv0 autoupdate on --weekly --day mon --at 09:30",
     },
     .{
         .name = "self-update",
-        .summary = "Update abv0 itself from a signed release.",
-        .flags = &.{.{ .name = "--check", .help = "Only report whether an update exists" }},
+        .summary = "Update abv0 itself from a signed release. The abv0 it replaces is kept, and --rollback returns to it (run it again to go forward).",
+        .flags = &.{ .{ .name = "--check", .help = "Only report whether an update exists" }, .{ .name = "--rollback", .help = "Go back to the abv0 the last update replaced" } },
         .example = "abv0 self-update --check",
     },
     .{
@@ -743,6 +779,8 @@ fn renderUsage(w: anytype) !void {
         \\  leaves                  List installed packages nothing else depends on
         \\  switch <pkg> <version>  Make an installed version the active one
         \\  rollback <pkg>          Go back to the previously installed version
+        \\  history                 Every change to what is installed, newest first
+        \\  undo [<#>]              Undo the last change (or change #), all packages at once
         \\  home [--open] <pkg>     Print (or open) a package's homepage
         \\  pin <pkg>               Hold a package at its installed version
         \\  unpin <pkg>             Let upgrade update it again
@@ -775,8 +813,8 @@ fn renderUsage(w: anytype) !void {
         \\  cleanup                 Remove old versions (including rollback's), keeping the newest
         \\  completions <shell>     Print a bash, zsh, fish or pwsh completion script
         \\  maintain                Refresh, upgrade, fix dependencies and clean up in one go
-        \\  autoupdate on|off|status  Run `maintain` daily (or --weekly) via the system scheduler
-        \\  self-update [--check]   Update abv0 from a signed release
+        \\  autoupdate on|off|status  Run `maintain` daily, --weekly --day mon, --every 6h, --at 09:30
+        \\  self-update [--check]   Update abv0 from a signed release (--rollback goes back)
         \\  reset                   Uninstall everything
         \\  report [--bug]          Open a prefilled GitHub issue
         \\  version                 Print the version
@@ -788,6 +826,8 @@ fn renderUsage(w: anytype) !void {
     try w.writeAll(
         \\  -f, --file <path>       Manifest path for bundle commands
         \\  -j, --jobs <n>          Parallel install workers
+        \\  --micro-shards[=SIZE]   Fetch big files as many small pieces (1M each by default)
+        \\                          shared by the connections; ABV0_SHARD_SIZE does the same
         \\  --registry <path>       Use this manifest (its <path>.sig must verify)
         \\  --allow-unsigned-manifest  Skip signature and replay checks (UNSAFE)
         \\  --allow-unverified      Permit installs without a verified checksum
@@ -2066,6 +2106,13 @@ fn run(base: std.mem.Allocator, a: std.mem.Allocator) !u8 {
         const extra: []const []const u8 = if (args.check) &.{"--check"} else &.{};
         return cmds_extra.cmdSelfUpdate(a, &st, version, if (args.rest.items.len > 0) args.rest.items else extra);
     }
+    if (std.mem.eql(u8, cmd, "history")) {
+        if (args.rest.items.len != 0) {
+            term.err("usage: abv0 history [--all]\n", .{});
+            return 2;
+        }
+        return history.cmdHistory(a, &st, args.all);
+    }
     if (std.mem.eql(u8, cmd, "list") and args.installed) {
         return writeInstalled(term.writer(), a, &st, platform_name, args.json);
     }
@@ -2090,51 +2137,97 @@ fn run(base: std.mem.Allocator, a: std.mem.Allocator) !u8 {
         try loadRegistry(base, &st, args.allow_unsigned_manifest);
     defer reg.deinit();
 
-    if (std.mem.eql(u8, cmd, "maintain")) return cmdMaintain(a, &st, &reg, &args, platform_name, opts);
+    // What is installed before and after, so the change can be undone.
+    var hist_arena = std.heap.ArenaAllocator.init(base);
+    defer hist_arena.deinit();
+    const before: ?[]const history.Item = if (recordsHistory(cmd) and !output.dry_run)
+        history.snapshot(hist_arena.allocator(), &st, platform_name) catch null
+    else
+        null;
+    const rc = runWithRegistry(a, &st, &reg, &args, platform_name, opts, &timer, cmd) catch |e| {
+        if (before) |b| recordHistory(hist_arena.allocator(), &st, rest_argv, b, platform_name);
+        return e;
+    };
+    if (before) |b| recordHistory(hist_arena.allocator(), &st, rest_argv, b, platform_name);
+    return rc;
+}
 
-    if (std.mem.eql(u8, cmd, "pin")) return cmds_extra.cmdPin(a, &st, &reg, args.rest.items);
-    if (std.mem.eql(u8, cmd, "list")) return cmdList(&reg, args.json);
-    if (std.mem.eql(u8, cmd, "search")) return cmdSearch(a, &reg, args.rest.items, args.json, args.online);
-    if (std.mem.eql(u8, cmd, "info")) return cmdInfo(a, &st, &reg, args.rest.items, args.json, platform_name);
-    if (std.mem.eql(u8, cmd, "deps")) return cmdDeps(a, &reg, &args);
-    if (std.mem.eql(u8, cmd, "uses")) return cmdUses(a, &st, &reg, &args, platform_name);
-    if (std.mem.eql(u8, cmd, "leaves")) return cmdLeaves(a, &st, &reg, &args, platform_name);
-    if (std.mem.eql(u8, cmd, "switch")) return cmdSwitch(a, &st, &reg, &args, platform_name, opts);
-    if (std.mem.eql(u8, cmd, "rollback")) return cmdSwitch(a, &st, &reg, &args, platform_name, opts);
-    if (std.mem.eql(u8, cmd, "home")) return cmdHome(a, &st, &reg, &args, platform_name);
-    if (std.mem.eql(u8, cmd, "migrate")) return cmdMigrate(a, &st, &reg, &args, platform_name, opts, &timer);
-    if (std.mem.eql(u8, cmd, "install")) return cmdInstall(a, &st, &reg, &args, platform_name, opts, &timer);
-    if (std.mem.eql(u8, cmd, "browse")) return cmdBrowse(a, &st, &reg, &args, platform_name, opts, &timer);
-    if (std.mem.eql(u8, cmd, "uninstall")) return cmdUninstall(a, &st, &reg, args.rest.items, platform_name);
-    if (std.mem.eql(u8, cmd, "outdated")) return cmdOutdated(a, &st, &reg, platform_name, args.json);
-    if (std.mem.eql(u8, cmd, "upgrade")) return cmdUpgrade(a, &st, &reg, args.rest.items, args.all, platform_name, opts, args.jobs);
-    if (std.mem.eql(u8, cmd, "run")) return cmdRun(a, &st, &reg, args.rest.items, platform_name, opts);
-    if (std.mem.eql(u8, cmd, "shell")) return cmdShell(a, &st, &reg, args.rest.items, platform_name, opts);
-    if (std.mem.eql(u8, cmd, "bundle")) return cmdBundle(a, &st, &reg, &args, platform_name, opts);
+/// Commands whose changes to what is installed go in the history.
+fn recordsHistory(cmd: []const u8) bool {
+    const names = [_][]const u8{ "install", "uninstall", "upgrade", "switch", "rollback", "undo", "migrate", "bundle", "fix", "reset", "maintain", "browse" };
+    for (names) |name| {
+        if (std.mem.eql(u8, cmd, name)) return true;
+    }
+    return false;
+}
+
+fn recordHistory(a: std.mem.Allocator, st: *const store.Store, argv: []const []const u8, before: []const history.Item, platform_name: []const u8) void {
+    const after = history.snapshot(a, st, platform_name) catch return;
+    const changes = history.diff(a, before, after) catch return;
+    const command = std.mem.join(a, " ", argv) catch return;
+    _ = history.record(a, st, command, changes) catch |e| {
+        term.err("{s}warning{s}: could not record this change in the history ({s})\n", .{ term.yellow, term.reset, @errorName(e) });
+    };
+}
+
+/// The commands that read the registry. `run` wraps them so a change to what
+/// is installed lands in the history.
+fn runWithRegistry(
+    a: std.mem.Allocator,
+    st: *store.Store,
+    reg: *registry.Registry,
+    args: *Args,
+    platform_name: []const u8,
+    opts: store.InstallOptions,
+    timer: *std.time.Timer,
+    cmd: []const u8,
+) !u8 {
+    if (std.mem.eql(u8, cmd, "maintain")) return cmdMaintain(a, st, reg, args, platform_name, opts);
+
+    if (std.mem.eql(u8, cmd, "pin")) return cmds_extra.cmdPin(a, st, reg, args.rest.items);
+    if (std.mem.eql(u8, cmd, "list")) return cmdList(reg, args.json);
+    if (std.mem.eql(u8, cmd, "search")) return cmdSearch(a, reg, args.rest.items, args.json, args.online);
+    if (std.mem.eql(u8, cmd, "info")) return cmdInfo(a, st, reg, args.rest.items, args.json, platform_name);
+    if (std.mem.eql(u8, cmd, "deps")) return cmdDeps(a, reg, args);
+    if (std.mem.eql(u8, cmd, "uses")) return cmdUses(a, st, reg, args, platform_name);
+    if (std.mem.eql(u8, cmd, "leaves")) return cmdLeaves(a, st, reg, args, platform_name);
+    if (std.mem.eql(u8, cmd, "switch")) return cmdSwitch(a, st, reg, args, platform_name, opts);
+    if (std.mem.eql(u8, cmd, "rollback")) return cmdSwitch(a, st, reg, args, platform_name, opts);
+    if (std.mem.eql(u8, cmd, "undo")) return cmdUndo(a, st, reg, args, platform_name, opts, timer);
+    if (std.mem.eql(u8, cmd, "home")) return cmdHome(a, st, reg, args, platform_name);
+    if (std.mem.eql(u8, cmd, "migrate")) return cmdMigrate(a, st, reg, args, platform_name, opts, timer);
+    if (std.mem.eql(u8, cmd, "install")) return cmdInstall(a, st, reg, args, platform_name, opts, timer);
+    if (std.mem.eql(u8, cmd, "browse")) return cmdBrowse(a, st, reg, args, platform_name, opts, timer);
+    if (std.mem.eql(u8, cmd, "uninstall")) return cmdUninstall(a, st, reg, args.rest.items, platform_name);
+    if (std.mem.eql(u8, cmd, "outdated")) return cmdOutdated(a, st, reg, platform_name, args.json);
+    if (std.mem.eql(u8, cmd, "upgrade")) return cmdUpgrade(a, st, reg, args.rest.items, args.all, platform_name, opts, args.jobs);
+    if (std.mem.eql(u8, cmd, "run")) return cmdRun(a, st, reg, args.rest.items, platform_name, opts);
+    if (std.mem.eql(u8, cmd, "shell")) return cmdShell(a, st, reg, args.rest.items, platform_name, opts);
+    if (std.mem.eql(u8, cmd, "bundle")) return cmdBundle(a, st, reg, args, platform_name, opts);
     if (std.mem.eql(u8, cmd, "doctor")) {
-        if (args.json) return cmdDoctorJson(a, &st, &reg, platform_name);
-        const h = try st.doctor(a, &reg, platform_name);
+        if (args.json) return cmdDoctorJson(a, st, reg, platform_name);
+        const h = try st.doctor(a, reg, platform_name);
         term.print("\n{d} warnings, {d} broken links ({d:.2}ms)\n", .{ h.warnings, h.broken_links, ms(timer.read()) });
         return if (h.warnings + h.broken_links == 0) 0 else 1;
     }
     if (std.mem.eql(u8, cmd, "fix")) {
-        const n = try st.fix(a, &reg, platform_name);
-        const deps = try installMissingDeps(a, &st, &reg, platform_name, opts, args.jobs);
+        const n = try st.fix(a, reg, platform_name);
+        const deps = try installMissingDeps(a, st, reg, platform_name, opts, args.jobs);
         say("repaired {d} packages and installed {d} missing dependencies in {d:.2}ms\n", .{ n, deps.installed, ms(timer.read()) });
         return if (deps.failed == 0) 0 else 1;
     }
-    if (std.mem.eql(u8, cmd, "detect")) return cmdDetect(a, &st, &reg, args.rest.items, platform_name);
+    if (std.mem.eql(u8, cmd, "detect")) return cmdDetect(a, st, reg, args.rest.items, platform_name);
     if (std.mem.eql(u8, cmd, "reset")) {
-        const n = try st.resetAll(a, &reg, platform_name);
+        const n = try st.resetAll(a, reg, platform_name);
         say("uninstalled {d} packages; store reset\n", .{n});
         return 0;
     }
     if (std.mem.eql(u8, cmd, "sync") or std.mem.eql(u8, cmd, "hybrid-sync")) {
-        try st.exportRegistry(a, &reg);
+        try st.exportRegistry(a, reg);
         say("\nsynchronised in {d:.2}ms\n", .{ms(timer.read())});
         return 0;
     }
-    if (std.mem.eql(u8, cmd, "benchmark")) return cmdBenchmark(a, &st, &reg, platform_name);
+    if (std.mem.eql(u8, cmd, "benchmark")) return cmdBenchmark(a, st, reg, platform_name);
 
     reportUnknownCommand(cmd);
     return 2;
@@ -2581,6 +2674,94 @@ fn cmdSwitch(
         say("  `abv0 upgrade` would replace it; `abv0 pin {}` holds it here\n", .{safe(name)});
     }
     return 0;
+}
+
+/// `undo [<#>]`: put back what one history entry changed (the newest when no
+/// number is given). A version still in the store is switched to with no
+/// download; a removed package is installed again (a GitHub one at the same
+/// release). The undo is itself recorded, so undoing it again redoes.
+fn cmdUndo(
+    a: std.mem.Allocator,
+    st: *store.Store,
+    reg: *const registry.Registry,
+    args: *Args,
+    platform_name: []const u8,
+    opts: store.InstallOptions,
+    timer: *std.time.Timer,
+) !u8 {
+    const rest = args.rest.items;
+    if (rest.len > 1) {
+        term.err("usage: abv0 undo [<#>]   (numbers come from `abv0 history`)\n", .{});
+        return 2;
+    }
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    const entries = try history.load(aa, st);
+    if (entries.len == 0) {
+        term.err("nothing to undo: no changes are recorded yet\n", .{});
+        return 1;
+    }
+    const entry = if (rest.len == 0) entries[entries.len - 1] else blk: {
+        const text = std.mem.trimLeft(u8, rest[0], "#");
+        const id = std.fmt.parseInt(u64, text, 10) catch {
+            term.err("{s}error{s}: '{}' is not a history number (see `abv0 history`)\n", .{ term.red, term.reset, safe(rest[0]) });
+            return 2;
+        };
+        for (entries) |e| if (e.id == id) break :blk e;
+        term.err("{s}error{s}: there is no history entry #{d}\n", .{ term.red, term.reset, id });
+        return 1;
+    };
+    say("undoing #{d} (abv0 {})\n", .{ entry.id, safe(entry.command) });
+
+    var failed: u8 = 0;
+    for (entry.changes) |c| {
+        const rc = undoOne(aa, st, reg, c, platform_name, opts, timer) catch |e| blk: {
+            term.err("{s}error{s}: {}: {s}\n", .{ term.red, term.reset, safe(c.name), @errorName(e) });
+            break :blk 1;
+        };
+        if (rc != 0) failed = 1;
+    }
+    if (failed != 0) term.err("some changes could not be undone; `abv0 history` shows what is recorded\n", .{});
+    return failed;
+}
+
+fn undoOne(
+    a: std.mem.Allocator,
+    st: *store.Store,
+    reg: *const registry.Registry,
+    c: history.Change,
+    platform_name: []const u8,
+    opts: store.InstallOptions,
+    timer: *std.time.Timer,
+) !u8 {
+    // It was added: take it out again.
+    const want = c.from orelse return cmdUninstall(a, st, reg, &.{c.name}, platform_name);
+
+    const rows = try cmds_extra.listVersions(a, st, c.name, platform_name);
+    if (cmds_extra.findVersion(rows, want)) |i| {
+        if (cmds_extra.activeIndex(rows)) |cur| if (cur == i) return 0;
+        // Still on disk: relink it, nothing is downloaded.
+        var sargs = try parseArgs(a, &.{ "switch", c.name, want });
+        defer sargs.deinit();
+        return cmdSwitch(a, st, reg, &sargs, platform_name, opts);
+    }
+    // Gone from the store: install it again.
+    if (c.from_gh) |spec| {
+        var iargs = try parseArgs(a, &.{ "install", spec });
+        defer iargs.deinit();
+        return cmdInstall(a, st, reg, &iargs, platform_name, opts, timer);
+    }
+    const pkg = store.Store.resolveRequest(reg, c.name) orelse {
+        term.err("{s}error{s}: {} is no longer in the catalog, so {} cannot be installed again\n", .{ term.red, term.reset, safe(c.name), safe(want) });
+        return 1;
+    };
+    if (!std.mem.eql(u8, pkg.version, want)) {
+        term.err("{s}note{s}: {} {} is no longer on disk and the catalog now has {}; installing that\n", .{ term.yellow, term.reset, safe(c.name), safe(want), safe(pkg.version) });
+    }
+    var iargs = try parseArgs(a, &.{ "install", c.name });
+    defer iargs.deinit();
+    return cmdInstall(a, st, reg, &iargs, platform_name, opts, timer);
 }
 
 fn writeSwitchJson(w: anytype, name: []const u8, from: ?[]const u8, to: []const u8) !void {
@@ -3306,7 +3487,7 @@ fn envOwned(a: std.mem.Allocator, name: []const u8) ?[]u8 {
     return std.process.getEnvVarOwned(a, name) catch null;
 }
 
-/// `abv0 autoupdate on [--weekly] | off | status`: a scheduled `abv0 maintain`
+/// `abv0 autoupdate on [schedule] | off | status`: a scheduled `abv0 maintain`
 /// through the system's own scheduler (launchd, systemd or cron, Task
 /// Scheduler).
 fn cmdAutoupdate(base: std.mem.Allocator, st: *store.Store, rest: []const []const u8) !u8 {
@@ -3314,13 +3495,60 @@ fn cmdAutoupdate(base: std.mem.Allocator, st: *store.Store, rest: []const []cons
     defer arena.deinit();
     const a = arena.allocator();
     const sub = if (rest.len > 0) rest[0] else "status";
-    var interval: auto.Interval = .daily;
-    for (rest[@min(rest.len, 1)..]) |opt| {
-        if (std.mem.eql(u8, opt, "--weekly")) interval = .weekly else if (std.mem.eql(u8, opt, "--daily")) interval = .daily else {
-            term.err("usage: abv0 autoupdate on [--daily|--weekly] | off | status\n", .{});
+    const usage = "usage: abv0 autoupdate on [--daily | --weekly [--day <mon..sun>] | --every <N>h | --hourly] [--at HH:MM] | off | status\n";
+    var sc = auto.Schedule{};
+    var weekly_asked = false;
+    var at_asked = false;
+    var i: usize = @min(rest.len, 1);
+    while (i < rest.len) : (i += 1) {
+        const opt = rest[i];
+        const value: ?[]const u8 = if (i + 1 < rest.len) rest[i + 1] else null;
+        if (std.mem.eql(u8, opt, "--daily")) {
+            sc.interval = .daily;
+        } else if (std.mem.eql(u8, opt, "--weekly")) {
+            sc.interval = .weekly;
+            weekly_asked = true;
+        } else if (std.mem.eql(u8, opt, "--hourly")) {
+            sc.interval = .hourly;
+            sc.every_hours = 1;
+        } else if (std.mem.eql(u8, opt, "--every") and value != null) {
+            sc.every_hours = auto.parseEvery(value.?) orelse {
+                term.err("{s}error{s}: --every takes a number of hours from 1 to 23, such as 6h\n", .{ term.red, term.reset });
+                return 2;
+            };
+            sc.interval = .hourly;
+            i += 1;
+        } else if (std.mem.eql(u8, opt, "--day") and value != null) {
+            sc.weekday = auto.parseDay(value.?) orelse {
+                term.err("{s}error{s}: --day takes a day of the week, such as mon or friday\n", .{ term.red, term.reset });
+                return 2;
+            };
+            weekly_asked = true;
+            i += 1;
+        } else if (std.mem.eql(u8, opt, "--at") and value != null) {
+            const t = auto.parseTime(value.?) orelse {
+                term.err("{s}error{s}: --at takes a 24-hour time, such as 09:30 or 21:00\n", .{ term.red, term.reset });
+                return 2;
+            };
+            sc.hour = t.hour;
+            sc.minute = t.minute;
+            sc.exact = true;
+            at_asked = true;
+            i += 1;
+        } else {
+            term.err(usage, .{});
             return 2;
         }
     }
+    if (weekly_asked) {
+        if (sc.interval == .hourly) {
+            term.err("{s}error{s}: pick either a weekly day or a number of hours, not both\n", .{ term.red, term.reset });
+            return 2;
+        }
+        sc.interval = .weekly;
+    }
+    // Every N hours starts at midnight; --at only sets the minute.
+    if (sc.interval == .hourly and !at_asked) sc.minute = 17;
     const logs = try std.fs.path.join(a, &.{ st.root, "logs" });
     const log = try std.fs.path.join(a, &.{ logs, "maintain.log" });
     const env = auto.JobEnv{ .home = envOwned(a, "ABV0_HOME"), .bin_dir = envOwned(a, "ABV0_BIN_DIR") };
@@ -3335,7 +3563,7 @@ fn cmdAutoupdate(base: std.mem.Allocator, st: *store.Store, rest: []const []cons
             }
         }
         try std.fs.cwd().makePath(logs);
-        const how = scheduleOn(a, st, exe, log, interval, env) catch |e| {
+        const how = scheduleOn(a, st, exe, log, sc, env) catch |e| {
             const why: []const u8 = switch (e) {
                 error.CrontabFailed => "no scheduler found: this needs a systemd user session or cron (the crontab command)",
                 error.LaunchctlFailed => "launchctl refused the job",
@@ -3345,19 +3573,31 @@ fn cmdAutoupdate(base: std.mem.Allocator, st: *store.Store, rest: []const []cons
             term.err("{s}error{s}: could not schedule abv0 maintain: {s}\n", .{ term.red, term.reset, why });
             return 1;
         };
-        say("{s}on{s}  abv0 maintain runs {s} at about 03:17 ({s})\n", .{ term.green, term.reset, @tagName(interval), how });
+        var when = std.ArrayList(u8).init(a);
+        try auto.describe(when.writer(), sc);
+        say("{s}on{s}  abv0 maintain runs {s}{s} ({s})\n", .{ term.green, term.reset, when.items, if (sc.exact or sc.interval == .hourly or !std.mem.startsWith(u8, how, "systemd")) "" else ", give or take an hour", how });
+        const state_dir = try std.fs.path.join(a, &.{ st.root, "state" });
+        std.fs.cwd().makePath(state_dir) catch {};
+        std.fs.cwd().writeFile(.{ .sub_path = try std.fs.path.join(a, &.{ state_dir, "autoupdate-schedule" }), .data = try auto.formatSchedule(a, sc) }) catch {};
         say("     it refreshes the catalog, upgrades unpinned packages, installs missing\n     dependencies, removes unused ones, cleans up and updates abv0\n", .{});
         say("     log: {s}\n", .{log});
         return 0;
     }
     if (std.mem.eql(u8, sub, "off")) {
         scheduleOff(a, st);
+        std.fs.cwd().deleteFile(try std.fs.path.join(a, &.{ st.root, "state", "autoupdate-schedule" })) catch {};
         say("{s}off{s}  automatic upkeep is disabled\n", .{ term.yellow, term.reset });
         return 0;
     }
     if (std.mem.eql(u8, sub, "status")) {
         const state = scheduleStatus(a, st);
         say("scheduled:   {s}\n", .{state});
+        const saved = std.fs.cwd().readFileAlloc(a, try std.fs.path.join(a, &.{ st.root, "state", "autoupdate-schedule" }), 256) catch null;
+        if (saved) |text| if (auto.parseSchedule(text)) |sv| {
+            var when = std.ArrayList(u8).init(a);
+            try auto.describe(when.writer(), sv);
+            say("when:        {s}\n", .{when.items});
+        };
         const last = try std.fs.path.join(a, &.{ st.root, "state", "last-maintain" });
         if (auto.ageSeconds(last)) |age| {
             say("last run:    {d} hours ago\n", .{@divTrunc(age, 3600)});
@@ -3368,7 +3608,7 @@ fn cmdAutoupdate(base: std.mem.Allocator, st: *store.Store, rest: []const []cons
         say("log:         {s}\n", .{log});
         return 0;
     }
-    term.err("usage: abv0 autoupdate on [--daily|--weekly] | off | status\n", .{});
+    term.err(usage, .{});
     return 2;
 }
 
@@ -3395,12 +3635,12 @@ fn hasUserSystemd(a: std.mem.Allocator) bool {
     return (runTool(a, &.{ "systemctl", "--user", "show-environment" }) orelse 1) == 0;
 }
 
-fn scheduleOn(a: std.mem.Allocator, st: *const store.Store, exe: []const u8, log: []const u8, interval: auto.Interval, env: auto.JobEnv) anyerror![]const u8 {
+fn scheduleOn(a: std.mem.Allocator, st: *const store.Store, exe: []const u8, log: []const u8, sc: auto.Schedule, env: auto.JobEnv) anyerror![]const u8 {
     switch (builtin.os.tag) {
         .macos => {
             const plist = try launchdPlistPath(a, st);
             try std.fs.cwd().makePath(std.fs.path.dirname(plist).?);
-            try std.fs.cwd().writeFile(.{ .sub_path = plist, .data = try auto.launchdPlist(a, exe, log, interval, env) });
+            try std.fs.cwd().writeFile(.{ .sub_path = plist, .data = try auto.launchdPlist(a, exe, log, sc, env) });
             const domain = try std.fmt.allocPrint(a, "gui/{d}", .{currentUid()});
             const target = try std.fmt.allocPrint(a, "{s}/{s}", .{ domain, auto.job_label });
             _ = runTool(a, &.{ "launchctl", "bootout", target });
@@ -3412,8 +3652,8 @@ fn scheduleOn(a: std.mem.Allocator, st: *const store.Store, exe: []const u8, log
         .windows => {
             const tr = try auto.schtasksCommand(a, exe, log, env);
             var argv = std.ArrayList([]const u8).init(a);
-            try argv.appendSlice(&.{ "schtasks", "/Create", "/F", "/TN", auto.job_name, "/ST", "03:17", "/TR", tr });
-            if (interval == .daily) try argv.appendSlice(&.{ "/SC", "DAILY" }) else try argv.appendSlice(&.{ "/SC", "WEEKLY", "/D", "SUN" });
+            try argv.appendSlice(&.{ "schtasks", "/Create", "/F", "/TN", auto.job_name, "/TR", tr });
+            try argv.appendSlice(try auto.schtasksSchedule(a, sc));
             if ((runTool(a, argv.items) orelse 1) != 0) return error.SchtasksFailed;
             return "Task Scheduler";
         },
@@ -3421,7 +3661,7 @@ fn scheduleOn(a: std.mem.Allocator, st: *const store.Store, exe: []const u8, log
             if (hasUserSystemd(a)) {
                 const dir = try systemdDir(a, st);
                 try std.fs.cwd().makePath(dir);
-                const units = try auto.systemdUnits(a, exe, interval, env);
+                const units = try auto.systemdUnits(a, exe, sc, env);
                 try std.fs.cwd().writeFile(.{ .sub_path = try std.fs.path.join(a, &.{ dir, auto.job_name ++ ".service" }), .data = units.service });
                 try std.fs.cwd().writeFile(.{ .sub_path = try std.fs.path.join(a, &.{ dir, auto.job_name ++ ".timer" }), .data = units.timer });
                 _ = runTool(a, &.{ "systemctl", "--user", "daemon-reload" });
@@ -3429,7 +3669,7 @@ fn scheduleOn(a: std.mem.Allocator, st: *const store.Store, exe: []const u8, log
             }
             // No user systemd: the user's crontab.
             const current = toolOutput(a, &.{ "crontab", "-l" }) orelse "";
-            const text = try auto.editCrontab(a, current, try auto.cronLine(a, exe, log, interval, env));
+            const text = try auto.editCrontab(a, current, try auto.cronLine(a, exe, log, sc, env));
             const tmp = try std.fs.path.join(a, &.{ st.root, "state", "crontab.tmp" });
             try std.fs.cwd().makePath(std.fs.path.dirname(tmp).?);
             try std.fs.cwd().writeFile(.{ .sub_path = tmp, .data = text });
@@ -4091,6 +4331,17 @@ test "parseArgs passes --weekly through to autoupdate" {
     try testing.expectEqualStrings("--weekly", args.rest.items[1]);
 }
 
+test "parseArgs takes --micro-shards with and without a size" {
+    defer pget.shard_override = null;
+    var a1 = try parseArgs(testing.allocator, &.{ "install", "--micro-shards", "jq" });
+    a1.deinit();
+    try testing.expectEqual(@as(?u64, pget.default_shard_size), pget.shard_override);
+    var a2 = try parseArgs(testing.allocator, &.{ "install", "--micro-shards=4M", "jq" });
+    a2.deinit();
+    try testing.expectEqual(@as(?u64, 4 << 20), pget.shard_override);
+    try testing.expectError(error.InvalidNumber, parseArgs(testing.allocator, &.{ "install", "--micro-shards=lots" }));
+}
+
 test "parseArgs rejects unknown options" {
     try testing.expectError(error.UnknownOption, parseArgs(testing.allocator, &.{ "install", "--definitely-not-a-flag" }));
 }
@@ -4597,6 +4848,7 @@ comptime {
     _ = @import("cmds_extra.zig");
     _ = @import("books.zig");
     _ = @import("hf.zig");
+    _ = @import("history.zig");
     _ = @import("stream.zig");
     _ = @import("http.zig");
     _ = @import("ghrelease.zig");

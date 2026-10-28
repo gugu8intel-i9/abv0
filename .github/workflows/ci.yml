@@ -159,9 +159,34 @@ jobs:
           $abv0 autoupdate on --weekly
           $abv0 autoupdate status | tee status.txt
           grep -q '^scheduled: *yes' status.txt || { echo "not scheduled after 'on'"; exit 1; }
+          $abv0 autoupdate on --weekly --day mon --at 09:30
+          $abv0 autoupdate status | tee status.txt
+          grep -q '^when: *weekly on Monday at 09:30' status.txt || { echo "chosen time not kept"; exit 1; }
+          $abv0 autoupdate on --every 6h
+          $abv0 autoupdate status | grep -q '^when: *every 6 hours'
           $abv0 autoupdate off
           $abv0 autoupdate status | tee status.txt
           grep -q '^scheduled: *no' status.txt || { echo "still scheduled after 'off'"; exit 1; }
+
+      - name: History and undo
+        shell: bash
+        env:
+          ABV0_HOME: ${{ runner.temp }}/undo-home
+        run: |
+          set -euo pipefail
+          abv0=./zig-out/bin/abv0
+          [ -x "$abv0" ] || abv0=./zig-out/bin/abv0.exe
+          reg="--registry packages/index.json"
+          $abv0 $reg install jq
+          $abv0 history | tee history.txt
+          grep -q 'jq .* added' history.txt
+          # Undo the install: jq is gone.
+          $abv0 $reg undo
+          if $abv0 list --installed | grep -q '^jq '; then echo "jq still installed after undo"; exit 1; fi
+          # Undo the undo: jq is back, from the local cache.
+          $abv0 $reg undo
+          $abv0 list --installed | grep -q '^jq '
+          $abv0 history | grep -q '#3'
 
       - name: Hugging Face model, verified into the Hugging Face cache
         shell: bash

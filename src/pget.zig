@@ -14,6 +14,16 @@
 //! the file readable while it is still being filled, so a consumer (the
 //! streaming unpacker) can decode chunk 0 while chunks 5 to 7 are in flight.
 //!
+//! Micro-shards (`--micro-shards`, `ABV0_SHARD_SIZE`): instead of one chunk
+//! per connection, the body is cut into many shards that the connections take
+//! from a shared queue. A fast connection takes more shards and a slow one
+//! fewer, so one slow connection no longer holds up the end of the download.
+//! Shards start big and shrink toward the end (each is the rest divided by
+//! twice the connections, down to the shard size, 1 MiB by default), so there
+//! are few requests while the transfer runs and fine ones only at the tail.
+//! Each shard is one ranged request on a kept-alive connection; the in-order
+//! hash works the same.
+//!
 //! Transport is the built-in client (`http.zig`) or, when that cannot talk to
 //! the server, one `curl` process per chunk that pipes its body here. Both go
 //! through the same engine; only `open(start, end)` differs.
@@ -49,6 +59,14 @@ pub const default_max_conns: u32 = 8;
 pub const hard_max_conns: u32 = 16;
 /// When ABV0_CONNECTIONS is set, chunks may be as small as this.
 pub const forced_min_chunk: u64 = 256 << 10;
+/// Most shards one download is cut into; bigger bodies get bigger shards.
+pub const max_shards: u32 = 1024;
+/// Shard size when micro-shards are on and no size is given.
+pub const default_shard_size: u64 = 1 << 20;
+/// Smallest shard: below this the per-request cost outweighs the gain.
+pub const min_shard_size: u64 = 64 << 10;
+/// Set from `--micro-shards[=SIZE]`; wins over `ABV0_SHARD_SIZE`.
+pub var shard_override: ?u64 = null;
 /// Retries of one chunk, each on a fresh connection.
 pub const max_chunk_retries: u32 = 2;
 /// Bytes of the payload kept for the error-page check and the type sniff.
@@ -60,7 +78,19 @@ pub const Config = struct {
     /// ABV0_CONNECTIONS was given: use that many whatever the size, down to
     /// `forced_min_chunk` per connection.
     forced: bool = false,
+    /// Micro-shards: the size of each shard, or null for one chunk per connection.
+    shard_size: ?u64 = null,
 };
+
+/// `ABV0_SHARD_SIZE` / `--micro-shards=SIZE`: "on"/"1" means the default
+/// size, "off"/"0" means none, else a size (at least `min_shard_size`).
+pub fn parseShardSize(text: ?[]const u8) ?u64 {
+    const t = std.mem.trim(u8, text orelse return null, " \t");
+    if (t.len == 0 or std.ascii.eqlIgnoreCase(t, "on") or std.mem.eql(u8, t, "1") or std.ascii.eqlIgnoreCase(t, "true")) return default_shard_size;
+    if (std.ascii.eqlIgnoreCase(t, "off") or std.mem.eql(u8, t, "0") or std.ascii.eqlIgnoreCase(t, "false")) return null;
+    const v = parseSize(t) orelse return null;
+    return @max(v, min_shard_size);
+}
 
 /// `8M`, `8MiB`, `512k`, `1048576`. Null when it is not a size.
 pub fn parseSize(text: ?[]const u8) ?u64 {
@@ -93,7 +123,7 @@ pub fn parseConns(text: ?[]const u8) ?u32 {
 }
 
 pub fn configFrom(split_text: ?[]const u8, conns_text: ?[]const u8) Config {
-    var cfg: Config = .{};
+    var cfg: Config = .{ .shard_size = shard_override };
     if (parseSize(split_text)) |v| cfg.split_min = v;
     if (parseConns(conns_text)) |v| {
         cfg.max_conns = v;
@@ -110,14 +140,21 @@ pub fn configFromEnv() Config {
     var f2 = std.heap.FixedBufferAllocator.init(&b2);
     const split = std.process.getEnvVarOwned(f1.allocator(), "ABV0_SPLIT_MIN") catch null;
     const conns = std.process.getEnvVarOwned(f2.allocator(), "ABV0_CONNECTIONS") catch null;
-    return configFrom(split, conns);
+    var cfg = configFrom(split, conns);
+    if (shard_override == null) {
+        var b3: [256]u8 = undefined;
+        var f3 = std.heap.FixedBufferAllocator.init(&b3);
+        cfg.shard_size = parseShardSize(std.process.getEnvVarOwned(f3.allocator(), "ABV0_SHARD_SIZE") catch null);
+    }
+    return cfg;
 }
 
 /// How many connections a body of `total` bytes gets: 1 below the threshold,
 /// otherwise `min(max_conns, total / chunk target)`, never below 1.
 pub fn connectionsFor(cfg: Config, total: u64) u32 {
     if (total < cfg.split_min) return 1;
-    const per = if (cfg.forced) forced_min_chunk else default_chunk_target;
+    // With shards, a connection is worth opening once there are two shards for it.
+    const per = if (cfg.forced) forced_min_chunk else if (cfg.shard_size) |sz| sz * 2 else default_chunk_target;
     const by_size = total / per;
     return @intCast(@max(1, @min(@as(u64, cfg.max_conns), by_size)));
 }
@@ -152,7 +189,7 @@ pub const Chunk = struct {
 
 pub const Plan = struct {
     n: u32,
-    items: [hard_max_conns]Chunk,
+    items: [max_shards]Chunk,
 
     pub fn slice(self: *const Plan) []const Chunk {
         return self.items[0..self.n];
@@ -170,6 +207,31 @@ pub fn planChunks(total: u64, n_wanted: u32) Plan {
     for (0..n) |i| {
         const start = size * i;
         plan.items[i] = .{ .start = start, .end = if (i == n - 1) total else start + size };
+    }
+    return plan;
+}
+
+/// Cut `total` bytes into shards for `conns` connections: each shard is what
+/// is left divided by twice the connections, never below `shard_size`, so they
+/// shrink toward the end. When that would make more than `max_shards`, the
+/// smallest size grows to fit.
+pub fn planShards(total: u64, shard_size: u64, conns: u32) Plan {
+    const min_size = @max(@max(shard_size, 1), (total + max_shards - 1) / max_shards);
+    const split: u64 = 2 * @as(u64, @max(conns, 1));
+    var plan: Plan = .{ .n = 0, .items = undefined };
+    var start: u64 = 0;
+    while (start < total and plan.n < max_shards) {
+        const rest = total - start;
+        var size = @max(min_size, rest / split);
+        // The last slot takes everything that is left.
+        if (plan.n + 1 == max_shards or size > rest) size = rest;
+        plan.items[plan.n] = .{ .start = start, .end = start + size };
+        plan.n += 1;
+        start += size;
+    }
+    if (plan.n == 0) {
+        plan.items[0] = .{ .start = 0, .end = 0 };
+        plan.n = 1;
     }
     return plan;
 }
@@ -238,7 +300,7 @@ pub const Assembly = struct {
     state: Thread.Mutex = .{},
     ready: Thread.Condition = .{},
     /// Contiguous bytes received at the start of each chunk.
-    filled: [hard_max_conns]u64 = [_]u64{0} ** hard_max_conns,
+    filled: [max_shards]u64 = [_]u64{0} ** max_shards,
     /// Bytes hashed so far, which is also how much of the file may be read.
     readable: u64 = 0,
     failed: ?anyerror = null,
@@ -527,6 +589,8 @@ pub fn Engine(comptime Src: type) type {
         plan: Plan,
         initial: ?Body,
         initial_taken: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+        /// Workers (connections); with micro-shards, fewer than `plan.n`.
+        conns: u32,
         next: std.atomic.Value(u32) = std.atomic.Value(u32).init(1),
         running: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
         threads: [hard_max_conns]?Thread = [_]?Thread{null} ** hard_max_conns,
@@ -550,12 +614,15 @@ pub fn Engine(comptime Src: type) type {
         };
 
         /// The engine is pinned in memory: the sink points into `plan`.
-        pub fn create(src: Src, file: std.fs.File, total: u64, n: u32, initial: ?Body) !*Self {
+        /// `n` connections; with `shard_size`, they share many small shards.
+        pub fn create(src: Src, file: std.fs.File, total: u64, n: u32, initial: ?Body, shard_size: ?u64) !*Self {
             const self = try page.create(Self);
+            const plan = if (shard_size) |sz| planShards(total, sz, n) else planChunks(total, n);
             self.* = .{
                 .src = src,
                 .sink = undefined,
-                .plan = planChunks(total, n),
+                .plan = plan,
+                .conns = @max(1, @min(std.math.clamp(n, 1, hard_max_conns), plan.n)),
                 .initial = initial,
             };
             self.sink = Assembly.init(file, self.plan.slice(), total);
@@ -563,7 +630,7 @@ pub fn Engine(comptime Src: type) type {
         }
 
         pub fn connections(self: *const Self) u32 {
-            return self.plan.n;
+            return self.conns;
         }
 
         /// Close what was never used and free the engine. Workers are joined.
@@ -596,7 +663,7 @@ pub fn Engine(comptime Src: type) type {
 
         fn spawnExtras(self: *Self) void {
             var i: usize = 1;
-            while (i < self.plan.n) : (i += 1) {
+            while (i < self.conns) : (i += 1) {
                 if (!self.spawnOne(i, false)) break;
             }
         }
@@ -1305,7 +1372,7 @@ fn beginBuiltin(url: []const u8, bo: BeginOptions) !?*Transfer {
     const final_url = try page.dupe(u8, s.finalUrl());
     errdefer page.free(final_url);
 
-    const eng = try BEngine.create(.{ .client = client, .url = final_url, .lim = lim }, t.file.?, total, n, s);
+    const eng = try BEngine.create(.{ .client = client, .url = final_url, .lim = lim }, t.file.?, total, n, s, configFromEnv().shard_size);
     t.impl = .{ .b_par = eng };
     if (bo.mode == .consume) eng.startAll();
     return t;
@@ -1379,7 +1446,8 @@ fn beginCurlWith(url: []const u8, bo: BeginOptions, header_file: ?[]u8) !*Transf
     }
     const final_url = try page.dupe(u8, body.final_url);
     errdefer page.free(final_url);
-    const eng = try CEngine.create(.{ .url = final_url, .opts = src_opts }, t.file.?, total, n, body);
+    // A curl process per shard costs more than it gains: one chunk per connection.
+    const eng = try CEngine.create(.{ .url = final_url, .opts = src_opts }, t.file.?, total, n, body, null);
     t.impl = .{ .c_par = eng };
     if (bo.mode == .consume) eng.startAll();
     return t;
@@ -1755,7 +1823,7 @@ fn runFake(tmp: *testing.TmpDir, src: FakeSource, n: u32, with_initial: bool) !s
     try file.setEndPos(total);
 
     const E = Engine(FakeSource);
-    var eng = try E.create(src, file, total, n, null);
+    var eng = try E.create(src, file, total, n, null, null);
     defer eng.destroy();
     if (with_initial) {
         // Chunk 0 arrives on an already open body that covers the whole payload.
@@ -1766,6 +1834,59 @@ fn runFake(tmp: *testing.TmpDir, src: FakeSource, n: u32, with_initial: bool) !s
     const r = eng.runInline();
     const f: ?Fetched = if (r) |_| (eng.sink.finalDigest(n) catch null) else |_| null;
     return .{ .result = r, .fetched = f, .opens = eng.src.opens.load(.acquire) };
+}
+
+test "planShards: big shards first, small ones at the end, no gaps" {
+    const total: u64 = 415 << 20;
+    const p = planShards(total, 1 << 20, 8);
+    // Few requests: far fewer than one per MiB.
+    try testing.expect(p.n < 100);
+    try testing.expect(p.items[0].len() > 20 << 20);
+    try testing.expect(p.items[p.n - 1].len() <= 1 << 20);
+    try testing.expectEqual(@as(u64, 0), p.items[0].start);
+    try testing.expectEqual(total, p.items[p.n - 1].end);
+    for (p.slice()[1..], 1..) |c, i| {
+        try testing.expectEqual(p.items[i - 1].end, c.start);
+        try testing.expect(c.len() <= p.items[i - 1].len());
+    }
+    // Small bodies: shards of the minimum size.
+    const small = planShards((3 << 20) + 5, 1 << 20, 8);
+    try testing.expectEqual(@as(u32, 4), small.n);
+    try testing.expectEqual(@as(u64, 5), small.items[3].len());
+    const huge = planShards(1 << 40, 64 << 10, 16);
+    try testing.expect(huge.n <= max_shards);
+    try testing.expectEqual(@as(u64, 1 << 40), huge.items[huge.n - 1].end);
+    try testing.expectEqual(@as(u32, 1), planShards(0, 1 << 20, 8).n);
+}
+
+test "parseShardSize: on, off and sizes" {
+    try testing.expectEqual(@as(?u64, default_shard_size), parseShardSize("on"));
+    try testing.expectEqual(@as(?u64, default_shard_size), parseShardSize("1"));
+    try testing.expectEqual(@as(?u64, null), parseShardSize("off"));
+    try testing.expectEqual(@as(?u64, 2 << 20), parseShardSize("2M"));
+    try testing.expectEqual(@as(?u64, min_shard_size), parseShardSize("1k"));
+    try testing.expectEqual(@as(?u64, null), parseShardSize(null));
+}
+
+test "micro-shards: few connections share many shards, digest matches" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const data = try patterned(testing.allocator, 3_000_017);
+    defer testing.allocator.free(data);
+    const file = try tmp.dir.createFile("out", .{ .read = true });
+    defer file.close();
+    try file.setEndPos(data.len);
+
+    const E = Engine(FakeSource);
+    var eng = try E.create(.{ .data = data }, file, data.len, 4, null, 100 << 10);
+    defer eng.destroy();
+    try testing.expectEqual(@as(u32, 4), eng.connections());
+    try testing.expect(eng.plan.n > 4);
+    try eng.runInline();
+    const f = try eng.sink.finalDigest(4);
+    try testing.expectEqualSlices(u8, &sha(data), &f.digest);
+    // Every shard was its own ranged request.
+    try testing.expectEqual(eng.plan.n, eng.src.opens.load(.acquire));
 }
 
 test "engine fetches every chunk in parallel and the digest matches" {
@@ -1849,7 +1970,7 @@ test "startAll lets a consumer read the file in order while workers fetch" {
     const E = Engine(FakeSource);
     const b = try testing.allocator.create(FakeSource.FakeBody);
     b.* = .{ .bytes = data };
-    const eng = try E.create(.{ .data = data }, file, data.len, 5, b);
+    const eng = try E.create(.{ .data = data }, file, data.len, 5, b, null);
     defer eng.destroy();
     eng.startAll();
 
@@ -1977,7 +2098,7 @@ test "a hard failure interrupts the workers that are stuck in a read" {
     try file.setEndPos(1_000_000);
 
     const E = Engine(HangSource);
-    const eng = try E.create(.{}, file, 1_000_000, 4, null);
+    const eng = try E.create(.{}, file, 1_000_000, 4, null, null);
     defer eng.destroy();
     // Chunk 0 is refused three times; chunks 1 to 3 hang until cut.
     try testing.expectError(error.ConnectionRefused, eng.runInline());
