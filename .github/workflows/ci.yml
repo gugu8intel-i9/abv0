@@ -171,7 +171,9 @@ jobs:
       - name: History and undo
         shell: bash
         env:
+          # Its own home and bin, so the jq an earlier step linked is not in the way.
           ABV0_HOME: ${{ runner.temp }}/undo-home
+          ABV0_BIN_DIR: ${{ runner.temp }}/undo-bin
         run: |
           set -euo pipefail
           abv0=./zig-out/bin/abv0
