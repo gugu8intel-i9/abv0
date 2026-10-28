@@ -240,8 +240,8 @@ fn parseArgsDiag(allocator: std.mem.Allocator, argv: []const []const u8, diag: *
         } else if (std.mem.eql(u8, arg, "--micro-shards") or std.mem.startsWith(u8, arg, "--micro-shards=")) {
             // Download big files as many small shards shared by the connections.
             const value: ?[]const u8 = if (std.mem.indexOfScalar(u8, arg, '=')) |eq| arg[eq + 1 ..] else null;
-            pget.shard_override = pget.parseShardSize(value) orelse
-                return failArg(diag, arg, value orelse "", error.InvalidNumber);
+            pget.shard_override = if (value == null) pget.default_shard_size else pget.parseShardSize(value) orelse
+                return failArg(diag, arg, value.?, error.InvalidNumber);
             if (pget.parseSize(value) == null and value != null and !std.ascii.eqlIgnoreCase(value.?, "on") and !std.mem.eql(u8, value.?, "1") and !std.ascii.eqlIgnoreCase(value.?, "true"))
                 return failArg(diag, arg, value.?, error.InvalidNumber);
         } else if (std.mem.eql(u8, arg, "--hourly")) {
@@ -4329,6 +4329,17 @@ test "parseArgs passes --weekly through to autoupdate" {
     try testing.expectEqualStrings("autoupdate", args.command.?);
     try testing.expectEqual(@as(usize, 2), args.rest.items.len);
     try testing.expectEqualStrings("--weekly", args.rest.items[1]);
+}
+
+test "parseArgs takes --micro-shards with and without a size" {
+    defer pget.shard_override = null;
+    var a1 = try parseArgs(testing.allocator, &.{ "install", "--micro-shards", "jq" });
+    a1.deinit();
+    try testing.expectEqual(@as(?u64, pget.default_shard_size), pget.shard_override);
+    var a2 = try parseArgs(testing.allocator, &.{ "install", "--micro-shards=4M", "jq" });
+    a2.deinit();
+    try testing.expectEqual(@as(?u64, 4 << 20), pget.shard_override);
+    try testing.expectError(error.InvalidNumber, parseArgs(testing.allocator, &.{ "install", "--micro-shards=lots" }));
 }
 
 test "parseArgs rejects unknown options" {
