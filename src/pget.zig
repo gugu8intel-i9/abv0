@@ -15,11 +15,14 @@
 //! streaming unpacker) can decode chunk 0 while chunks 5 to 7 are in flight.
 //!
 //! Micro-shards (`--micro-shards`, `ABV0_SHARD_SIZE`): instead of one chunk
-//! per connection, the body is cut into many small shards (1 MiB by default)
-//! that the connections take from a shared queue. A fast connection takes more
-//! shards and a slow one fewer, so one slow connection no longer holds up the
-//! end of the download. Each shard is one ranged request on a kept-alive
-//! connection; the in-order hash works the same.
+//! per connection, the body is cut into many shards that the connections take
+//! from a shared queue. A fast connection takes more shards and a slow one
+//! fewer, so one slow connection no longer holds up the end of the download.
+//! Shards start big and shrink toward the end (each is the rest divided by
+//! twice the connections, down to the shard size, 1 MiB by default), so there
+//! are few requests while the transfer runs and fine ones only at the tail.
+//! Each shard is one ranged request on a kept-alive connection; the in-order
+//! hash works the same.
 //!
 //! Transport is the built-in client (`http.zig`) or, when that cannot talk to
 //! the server, one `curl` process per chunk that pipes its body here. Both go
@@ -208,16 +211,23 @@ pub fn planChunks(total: u64, n_wanted: u32) Plan {
     return plan;
 }
 
-/// Cut `total` bytes into shards of `shard_size` (the last one shorter). When
-/// that would make more than `max_shards`, the shards grow to fit.
-pub fn planShards(total: u64, shard_size: u64) Plan {
-    var size = @max(shard_size, 1);
-    if (total > 0 and (total + size - 1) / size > max_shards) size = (total + max_shards - 1) / max_shards;
+/// Cut `total` bytes into shards for `conns` connections: each shard is what
+/// is left divided by twice the connections, never below `shard_size`, so they
+/// shrink toward the end. When that would make more than `max_shards`, the
+/// smallest size grows to fit.
+pub fn planShards(total: u64, shard_size: u64, conns: u32) Plan {
+    const min_size = @max(@max(shard_size, 1), (total + max_shards - 1) / max_shards);
+    const split: u64 = 2 * @as(u64, @max(conns, 1));
     var plan: Plan = .{ .n = 0, .items = undefined };
     var start: u64 = 0;
-    while (start < total) : (start += size) {
-        plan.items[plan.n] = .{ .start = start, .end = @min(total, start + size) };
+    while (start < total and plan.n < max_shards) {
+        const rest = total - start;
+        var size = @max(min_size, rest / split);
+        // The last slot takes everything that is left.
+        if (plan.n + 1 == max_shards or size > rest) size = rest;
+        plan.items[plan.n] = .{ .start = start, .end = start + size };
         plan.n += 1;
+        start += size;
     }
     if (plan.n == 0) {
         plan.items[0] = .{ .start = 0, .end = 0 };
@@ -607,7 +617,7 @@ pub fn Engine(comptime Src: type) type {
         /// `n` connections; with `shard_size`, they share many small shards.
         pub fn create(src: Src, file: std.fs.File, total: u64, n: u32, initial: ?Body, shard_size: ?u64) !*Self {
             const self = try page.create(Self);
-            const plan = if (shard_size) |sz| planShards(total, sz) else planChunks(total, n);
+            const plan = if (shard_size) |sz| planShards(total, sz, n) else planChunks(total, n);
             self.* = .{
                 .src = src,
                 .sink = undefined,
@@ -1826,18 +1836,27 @@ fn runFake(tmp: *testing.TmpDir, src: FakeSource, n: u32, with_initial: bool) !s
     return .{ .result = r, .fetched = f, .opens = eng.src.opens.load(.acquire) };
 }
 
-test "planShards cuts small shards and grows them past max_shards" {
-    const p = planShards(10 << 20, 1 << 20);
-    try testing.expectEqual(@as(u32, 10), p.n);
-    try testing.expectEqual(@as(u64, 1 << 20), p.items[0].len());
-    const odd = planShards((3 << 20) + 5, 1 << 20);
-    try testing.expectEqual(@as(u32, 4), odd.n);
-    try testing.expectEqual(@as(u64, 5), odd.items[3].len());
-    const big = planShards(4 << 30, 1 << 20);
-    try testing.expect(big.n <= max_shards);
-    try testing.expectEqual(@as(u64, 4 << 30), big.items[big.n - 1].end);
-    for (big.slice()[1..], 1..) |c, i| try testing.expectEqual(big.items[i - 1].end, c.start);
-    try testing.expectEqual(@as(u32, 1), planShards(0, 1 << 20).n);
+test "planShards: big shards first, small ones at the end, no gaps" {
+    const total: u64 = 415 << 20;
+    const p = planShards(total, 1 << 20, 8);
+    // Few requests: far fewer than one per MiB.
+    try testing.expect(p.n < 100);
+    try testing.expect(p.items[0].len() > 20 << 20);
+    try testing.expect(p.items[p.n - 1].len() <= 1 << 20);
+    try testing.expectEqual(@as(u64, 0), p.items[0].start);
+    try testing.expectEqual(total, p.items[p.n - 1].end);
+    for (p.slice()[1..], 1..) |c, i| {
+        try testing.expectEqual(p.items[i - 1].end, c.start);
+        try testing.expect(c.len() <= p.items[i - 1].len());
+    }
+    // Small bodies: shards of the minimum size.
+    const small = planShards((3 << 20) + 5, 1 << 20, 8);
+    try testing.expectEqual(@as(u32, 4), small.n);
+    try testing.expectEqual(@as(u64, 5), small.items[3].len());
+    const huge = planShards(1 << 40, 64 << 10, 16);
+    try testing.expect(huge.n <= max_shards);
+    try testing.expectEqual(@as(u64, 1 << 40), huge.items[huge.n - 1].end);
+    try testing.expectEqual(@as(u32, 1), planShards(0, 1 << 20, 8).n);
 }
 
 test "parseShardSize: on, off and sizes" {
@@ -1862,12 +1881,12 @@ test "micro-shards: few connections share many shards, digest matches" {
     var eng = try E.create(.{ .data = data }, file, data.len, 4, null, 100 << 10);
     defer eng.destroy();
     try testing.expectEqual(@as(u32, 4), eng.connections());
-    try testing.expectEqual(@as(u32, 30), eng.plan.n);
+    try testing.expect(eng.plan.n > 4);
     try eng.runInline();
     const f = try eng.sink.finalDigest(4);
     try testing.expectEqualSlices(u8, &sha(data), &f.digest);
-    // Every shard but the first was its own ranged request.
-    try testing.expectEqual(@as(u32, 30), eng.src.opens.load(.acquire));
+    // Every shard was its own ranged request.
+    try testing.expectEqual(eng.plan.n, eng.src.opens.load(.acquire));
 }
 
 test "engine fetches every chunk in parallel and the digest matches" {
