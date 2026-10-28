@@ -684,7 +684,10 @@ pub fn install(base: Allocator, spec: Spec, opts: Options) !u8 {
     try std.fs.cwd().makePath(snapshot);
 
     const jobs = try a.alloc(Job, sel.files.len);
-    for (sel.files, 0..) |f, i| jobs[i] = .{ .a = a, .spec = spec, .repo = &repo, .file = f, .blobs = blobs, .opts = &opts, .headers = headers };
+    // The jobs run on several threads; the arena is not thread-safe on its own.
+    var shared = std.heap.ThreadSafeAllocator{ .child_allocator = a };
+    const ja = shared.allocator();
+    for (sel.files, 0..) |f, i| jobs[i] = .{ .a = ja, .spec = spec, .repo = &repo, .file = f, .blobs = blobs, .opts = &opts, .headers = headers };
     // Several files at once; a big file is itself split over connections.
     if (opts.jobs <= 1 or jobs.len == 1) {
         for (jobs) |*j| fetchOne(j);
@@ -712,7 +715,10 @@ pub fn install(base: Allocator, spec: Spec, opts: Options) !u8 {
         }
         const depth = std.mem.count(u8, j.file.path, "/") + 2;
         const blob_abs = try std.fs.path.join(a, &.{ blobs, j.file.etag() });
-        try linkSnapshot(a, snapshot, depth, j.file.path, j.file.etag(), blob_abs);
+        linkSnapshot(a, snapshot, depth, j.file.path, j.file.etag(), blob_abs) catch |e| {
+            term.err("{s}error{s}: {s}: cannot place it in {s} ({s})\n", .{ term.red, term.reset, j.file.path, snapshot, @errorName(e) });
+            return 1;
+        };
     }
     if (failed != 0) {
         term.err("{s}{d} of {d} files failed{s}; the cache keeps the verified ones, and running the same command again fetches only the rest\n", .{ term.red, failed, jobs.len, term.reset });
