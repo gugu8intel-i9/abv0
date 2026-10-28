@@ -485,19 +485,22 @@ archive format").
 | `info ripgrep` | **15 / 52** | 517 / 848 | no such command |
 | `list --installed` | **0.6 / 7.9** | 10.8 / 55.3 | no such command |
 
-**One big download** (a 415 MB model file from Hugging Face)
+**One big download** (a 415 MB model file from Hugging Face; ms, with MB/s)
 
 | | Linux x86_64 | macOS arm64 | macOS x86_64 |
 | :--- | ---: | ---: | ---: |
-| abv0, default | 1,791 (232 MB/s) | 5,431 (76 MB/s) | 3,865 (107 MB/s) |
-| abv0 through curl | 1,688 (246 MB/s) | 5,923 (70 MB/s) | 3,750 (111 MB/s) |
-| plain curl, one connection | 2,148 (193 MB/s) | 3,810 (109 MB/s) | 4,286 (97 MB/s) |
+| abv0, default | 2,093 (198) | 4,347 (96) | 10,645 (39) |
+| abv0 `--micro-shards` | 2,354 (176) | **4,341 (96)** | 10,235 (41) |
+| abv0 `--micro-shards=4M` | 2,125 (195) | 4,991 (83) | 8,753 (47) |
+| abv0 through curl | **1,344 (309)** | 5,544 (75) | **7,405 (56)** |
+| plain curl, one connection | 3,646 (114) | 4,366 (95) | 10,754 (39) |
 
 abv0's rows also check the SHA-256 and write the Hugging Face cache; plain curl only saves
-the file. On these well-connected runners one connection is already close to the limit,
-so splitting the download helps most on Linux. On an ordinary home connection, where one
-connection is the bottleneck, the gap is larger: in a sandbox test, abv0 took 3.3–4.0 s
-for the same file and plain curl 17.5 s.
+the file. Each figure is one run on a shared machine, so differences under about 20% are
+noise: the Intel Mac's link was much slower in this run than in an earlier one. The split
+download beats a single connection most on Linux (up to 2.7×). On an ordinary home
+connection, where one connection is the bottleneck, the gap is larger: in a sandbox test,
+abv0 took 3.3–4.0 s for the same file and plain curl 17.5 s.
 
 ### Downloads
 
@@ -509,7 +512,9 @@ for the same file and plain curl 17.5 s.
   connection takes more and one slow connection cannot hold up the end. Pieces start big
   and shrink toward the end. Use it on uneven links (Wi-Fi, a busy mirror, one stalled
   connection). On a clean, fast link the default is as fast or faster, because every
-  piece is one more request. `--micro-shards=4M` sets the smallest piece.
+  piece is one more request. `--micro-shards=4M` sets the smallest piece. (A first
+  version used equal 1 MB pieces and ran at about 30 MB/s on these runners, because every
+  piece waited for the server to answer; the shrinking pieces fixed that.)
 - Verified downloads are kept in a cache, so reinstalling or rolling back needs no network.
 
 ### Compared with zerobrew
