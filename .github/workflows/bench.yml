@@ -1,6 +1,7 @@
 name: Benchmark
 
-# abv0 against Homebrew, timed on the same runners with the same five tools.
+# abv0 against Homebrew and zerobrew, timed on the same runners with the same
+# five tools, plus one big download (default, micro-shards, curl).
 # Hosted runners are shared, so read the numbers as rough orders of magnitude.
 
 on:
@@ -22,7 +23,7 @@ permissions:
 
 jobs:
   bench:
-    name: abv0 vs Homebrew (${{ matrix.os }})
+    name: abv0 vs Homebrew and zerobrew (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -77,9 +78,24 @@ jobs:
           echo "$(dirname "$brew_bin")" >> "$GITHUB_PATH"
           "$brew_bin" --version
 
+      # zerobrew (a faster client for Homebrew's bottles) from its own tap. Its
+      # failure only leaves the zerobrew column empty.
+      - name: Install zerobrew
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${BREW_BIN:-}" ] || { echo "no Homebrew to install zerobrew with"; exit 0; }
+          "$BREW_BIN" install zerobrewhq/tap/zerobrew
+          zb_bin="$(command -v zb || true)"
+          [ -n "$zb_bin" ] || zb_bin="$(dirname "$BREW_BIN")/zb"
+          "$zb_bin" --version
+          echo "ZB_BIN=$zb_bin" >> "$GITHUB_ENV"
+          echo "ZEROBREW_AUTO_INIT=true" >> "$GITHUB_ENV"
+
       # Uninstalls the preinstalled test formulae, then times everything.
       # Each row prints as it finishes, and the table goes to the job summary.
-      - name: Benchmark abv0 against Homebrew
+      - name: Benchmark abv0 against Homebrew and zerobrew
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

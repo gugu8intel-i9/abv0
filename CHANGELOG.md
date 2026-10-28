@@ -12,6 +12,13 @@
 - **Choose when upkeep runs.** `abv0 autoupdate on` takes `--weekly --day mon`,
   `--every 6h`, `--hourly` and `--at 09:30`, on launchd, systemd, cron and Task Scheduler
   alike. `abv0 autoupdate status` shows when it runs.
+- **Micro-sharded downloads.** `--micro-shards` (or `ABV0_SHARD_SIZE=1M`) cuts a big
+  file into many small pieces that the connections take from a shared queue, so a fast
+  connection takes more and one slow connection no longer holds up the end.
+  `--micro-shards=4M` sets the piece size. The SHA-256 is still computed in order as the
+  pieces land.
+- **Benchmarks against zerobrew.** The benchmark workflow now times zerobrew next to
+  Homebrew, and one 415 MB download with each download mode.
 - **Roll abv0 itself back.** `self-update` keeps the abv0 it replaces, and
   `abv0 self-update --rollback` returns to it.
 

@@ -21,6 +21,7 @@ const cmds_extra = @import("cmds_extra.zig");
 const books = @import("books.zig");
 const hf = @import("hf.zig");
 const history = @import("history.zig");
+const pget = @import("pget.zig");
 const ghrelease = @import("ghrelease.zig");
 const ghverify = @import("ghverify.zig");
 
@@ -236,6 +237,13 @@ fn parseArgsDiag(allocator: std.mem.Allocator, argv: []const []const u8, diag: *
         } else if (std.mem.eql(u8, arg, "--daily") or std.mem.eql(u8, arg, "--weekly") or std.mem.eql(u8, arg, "--rollback")) {
             // `autoupdate on` and `self-update` read these from the rest.
             try args.rest.append(arg);
+        } else if (std.mem.eql(u8, arg, "--micro-shards") or std.mem.startsWith(u8, arg, "--micro-shards=")) {
+            // Download big files as many small shards shared by the connections.
+            const value: ?[]const u8 = if (std.mem.indexOfScalar(u8, arg, '=')) |eq| arg[eq + 1 ..] else null;
+            pget.shard_override = pget.parseShardSize(value) orelse
+                return failArg(diag, arg, value orelse "", error.InvalidNumber);
+            if (pget.parseSize(value) == null and value != null and !std.ascii.eqlIgnoreCase(value.?, "on") and !std.mem.eql(u8, value.?, "1") and !std.ascii.eqlIgnoreCase(value.?, "true"))
+                return failArg(diag, arg, value.?, error.InvalidNumber);
         } else if (std.mem.eql(u8, arg, "--hourly")) {
             try args.rest.append(arg);
         } else if (std.mem.eql(u8, arg, "--at") or std.mem.eql(u8, arg, "--day") or std.mem.eql(u8, arg, "--every")) {
@@ -818,6 +826,8 @@ fn renderUsage(w: anytype) !void {
     try w.writeAll(
         \\  -f, --file <path>       Manifest path for bundle commands
         \\  -j, --jobs <n>          Parallel install workers
+        \\  --micro-shards[=SIZE]   Fetch big files as many small pieces (1M each by default)
+        \\                          shared by the connections; ABV0_SHARD_SIZE does the same
         \\  --registry <path>       Use this manifest (its <path>.sig must verify)
         \\  --allow-unsigned-manifest  Skip signature and replay checks (UNSAFE)
         \\  --allow-unverified      Permit installs without a verified checksum
