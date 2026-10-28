@@ -18,6 +18,7 @@ const bloom = @import("bloom.zig");
 const wal = @import("wal.zig");
 const sign = @import("sign.zig");
 const cmds_extra = @import("cmds_extra.zig");
+const books = @import("books.zig");
 const hf = @import("hf.zig");
 const ghrelease = @import("ghrelease.zig");
 const ghverify = @import("ghverify.zig");
@@ -89,6 +90,8 @@ const Args = struct {
     exclude: std.ArrayListUnmanaged([]const u8) = .{},
     /// `install hf:...`: also take the duplicate weight formats.
     all_files: bool = false,
+    /// `install book:...`: epub, pdf, txt or kindle.
+    book_format: ?[]const u8 = null,
 
     fn deinit(self: *Args) void {
         self.include.deinit(self.rest.allocator);
@@ -202,6 +205,10 @@ fn parseArgsDiag(allocator: std.mem.Allocator, argv: []const []const u8, diag: *
             }
         } else if (std.mem.eql(u8, arg, "--all-files")) {
             args.all_files = true;
+        } else if (std.mem.eql(u8, arg, "--format")) {
+            i += 1;
+            if (i >= argv.len) return failArg(diag, arg, "", error.MissingOptionValue);
+            args.book_format = argv[i];
         } else if (std.mem.eql(u8, arg, "--from-brew-list")) {
             i += 1;
             if (i >= argv.len) return failArg(diag, arg, "", error.MissingOptionValue);
@@ -405,7 +412,7 @@ const malware_flag = Flag{ .name = "--malware", .help = "Report a suspicious pac
 const commands = [_]Command{
     .{
         .name = "install",
-        .args = "<pkg|gh:owner/repo[@tag]|hf:owner/model|hf:datasets/owner/name>...",
+        .args = "<pkg|gh:owner/repo[@tag]|hf:owner/model|hf:datasets/owner/name|book:source/id>...",
         .summary = "Install packages and their dependencies, verified, in parallel. A gh:owner/repo spec installs that project's own GitHub release (no recipe needed), checked against GitHub's sha256 digest or the release's checksums file. An hf: spec downloads a Hugging Face model or dataset into the Hugging Face cache, every file checked against the Hub's hashes and pickles scanned.",
         .flags = &.{
             dry_run_flag,                                                                      json_flag,                                                                         jobs_flag,                                                                                             platform_flag,
@@ -414,6 +421,12 @@ const commands = [_]Command{
             .{ .name = "--all-files", .help = "hf: also the copies in other weight formats" },
         },
         .example = "abv0 install jq gh:BurntSushi/ripgrep",
+    },
+    .{
+        .name = "book",
+        .args = "search <words> | list | dir",
+        .summary = "Free, legal books and papers: search Project Gutenberg, Standard Ebooks, the Internet Archive (free downloads only, no lending) and arXiv at once, list what you downloaded, or print the books folder (ABV0_BOOKS_DIR, else ~/Books). Install with `abv0 install book:gutenberg/1342` (--format epub|pdf|txt|kindle).",
+        .example = "abv0 book search pride and prejudice",
     },
     .{
         .name = "hf",
@@ -715,6 +728,9 @@ fn renderUsage(w: anytype) !void {
         \\                          verified, into the Hugging Face cache; --include "*.gguf" picks files
         \\  hf list|path|search     Hugging Face models and datasets in the cache, or on the Hub
         \\  hf login|whoami|logout  Plug in your Hugging Face token (kept on this computer only)
+        \\  install book:gutenberg/1342  Download a free book (book:standard/..., book:archive/...,
+        \\                          book:arxiv/...) into ~/Books; --format epub|pdf|txt|kindle
+        \\  book search|list|dir    Search Gutenberg, Standard Ebooks, Internet Archive and arXiv
         \\  uninstall <pkg>...      Remove packages and the links they created
         \\  upgrade [--all|pkg]...  Upgrade outdated packages (keeps the previous version for rollback)
         \\  outdated                List packages with a newer version available (pinned ones marked)
@@ -1953,7 +1969,36 @@ fn run(base: std.mem.Allocator, a: std.mem.Allocator) !u8 {
 
     // ---- Hugging Face: no registry, no store ----
     if (std.mem.eql(u8, cmd, "hf")) return cmdHf(a, args.rest.items);
+    if (std.mem.eql(u8, cmd, "book") or std.mem.eql(u8, cmd, "books")) return cmdBook(a, args.rest.items);
     if (std.mem.eql(u8, cmd, "install") or std.mem.eql(u8, cmd, "uninstall")) {
+        var book_count: usize = 0;
+        for (args.rest.items) |item| {
+            if (std.mem.startsWith(u8, item, "book:")) book_count += 1;
+        }
+        if (book_count != 0 and book_count != args.rest.items.len) {
+            term.err("{s}error{s}: give book: names in a command of their own (they go to your books folder, not the package store)\n", .{ term.red, term.reset });
+            return 2;
+        }
+        if (book_count != 0) {
+            const format: ?books.Format = if (args.book_format) |f| books.Format.parse(f) orelse {
+                term.err("{s}error{s}: --format takes epub, pdf, txt or kindle\n", .{ term.red, term.reset });
+                return 2;
+            } else null;
+            var bad: u8 = 0;
+            for (args.rest.items) |item| {
+                const spec = books.parseSpec(item) orelse {
+                    term.err("{s}error{s}: '{}' is not a book name: book:gutenberg/<number>, book:standard/<author>/<title>, book:archive/<identifier> or book:arxiv/<id> (find one with `abv0 book search`)\n", .{ term.red, term.reset, safe(item) });
+                    bad = 2;
+                    continue;
+                };
+                const rc = if (std.mem.eql(u8, cmd, "install"))
+                    try books.install(base, spec, .{ .format = format, .force = args.force, .dry_run = output.dry_run, .quiet = output.quiet })
+                else
+                    try books.remove(base, spec, output.dry_run);
+                if (rc != 0 and bad == 0) bad = rc;
+            }
+            return bad;
+        }
         var hf_count: usize = 0;
         for (args.rest.items) |item| {
             if (std.mem.startsWith(u8, item, "hf:")) hf_count += 1;
@@ -1986,6 +2031,10 @@ fn run(base: std.mem.Allocator, a: std.mem.Allocator) !u8 {
             if (rc != 0 and bad == 0) bad = rc;
         }
         if (hf_count != 0) return bad;
+    }
+    if (args.book_format != null) {
+        term.err("{s}error{s}: --format applies to book: installs\n", .{ term.red, term.reset });
+        return 2;
     }
     if (args.include.items.len != 0 or args.exclude.items.len != 0 or args.all_files) {
         term.err("{s}error{s}: --include, --exclude and --all-files apply to hf: installs\n", .{ term.red, term.reset });
@@ -2629,6 +2678,31 @@ fn cmdHf(a: std.mem.Allocator, rest: []const []const u8) !u8 {
     }
     if (std.mem.eql(u8, sub, "search") and rest.len >= 2) return hf.search(a, .model, rest[1..]);
     if (std.mem.eql(u8, sub, "search-datasets") and rest.len >= 2) return hf.search(a, .dataset, rest[1..]);
+    term.err(usage, .{});
+    return 2;
+}
+
+/// `abv0 book search <words> | search-<source> <words> | list | dir`.
+fn cmdBook(a: std.mem.Allocator, rest: []const []const u8) !u8 {
+    const usage = "usage: abv0 book search <words> | search-gutenberg|search-standard|search-archive|search-arxiv <words> | list | dir\n";
+    if (rest.len == 0) {
+        term.err(usage, .{});
+        return 2;
+    }
+    const sub = rest[0];
+    if (std.mem.eql(u8, sub, "list") and rest.len == 1) return books.list(a);
+    if (std.mem.eql(u8, sub, "dir") and rest.len == 1) {
+        const dir = try books.booksDir(a);
+        defer a.free(dir);
+        term.print("{s}\n", .{dir});
+        return 0;
+    }
+    if (rest.len >= 2) {
+        if (std.mem.eql(u8, sub, "search")) return books.search(rest[1..], null);
+        if (std.mem.startsWith(u8, sub, "search-")) {
+            if (std.meta.stringToEnum(books.Source, sub["search-".len..])) |only| return books.search(rest[1..], only);
+        }
+    }
     term.err(usage, .{});
     return 2;
 }
@@ -4521,6 +4595,7 @@ comptime {
     _ = @import("net.zig");
     _ = @import("store.zig");
     _ = @import("cmds_extra.zig");
+    _ = @import("books.zig");
     _ = @import("hf.zig");
     _ = @import("stream.zig");
     _ = @import("http.zig");

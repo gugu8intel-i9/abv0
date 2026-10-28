@@ -185,6 +185,22 @@ jobs:
           $abv0 uninstall hf:hf-internal-testing/tiny-random-gpt2
           if $abv0 hf path hf:hf-internal-testing/tiny-random-gpt2 2>/dev/null; then echo "still cached after uninstall"; exit 1; fi
 
+      - name: Free books, checked into a books folder
+        shell: bash
+        run: |
+          set -euo pipefail
+          abv0=./zig-out/bin/abv0
+          [ -x "$abv0" ] || abv0=./zig-out/bin/abv0.exe
+          export ABV0_BOOKS_DIR="$RUNNER_TEMP/books"
+          $abv0 install book:gutenberg/84
+          $abv0 install book:gutenberg/84 | grep -q 'already downloaded'
+          $abv0 install book:standard/jane-austen/emma
+          $abv0 book list | grep -q 'book:gutenberg/84'
+          ls "$ABV0_BOOKS_DIR"/*.epub
+          $abv0 uninstall book:gutenberg/84
+          if $abv0 book list | grep -q 'book:gutenberg/84'; then echo "still listed after uninstall"; exit 1; fi
+          if $abv0 install book:not-a-source/1 2>/dev/null; then echo "bad book name passed"; exit 1; fi
+
       - name: Migrate from Homebrew (a made-up one, and the runner's real one)
         if: runner.os != 'Windows'
         shell: bash

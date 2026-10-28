@@ -4,6 +4,14 @@
 
 ### New
 
+- **Free books and papers.** `abv0 install book:gutenberg/1342`, `book:standard/<author>/<title>`,
+  `book:archive/<identifier>` and `book:arxiv/<id>`, into `~/Books` (or `ABV0_BOOKS_DIR`).
+  - `abv0 book search <words>` asks Project Gutenberg, Standard Ebooks, the Internet
+    Archive and arXiv at once; `search-gutenberg` (and so on) asks one.
+  - `--format epub|pdf|txt|kindle`; EPUB by default for books, PDF for scans and papers.
+  - Internet Archive downloads are checked against its SHA-1 and size; borrow-only
+    lending-library items are refused. Every file must match its format.
+  - `abv0 book list`, `abv0 book dir`, `abv0 uninstall book:...`.
 - **Hugging Face models and datasets.** `abv0 install hf:owner/model`,
   `hf:datasets/owner/name`, with an optional `@revision`. Files go into the Hugging Face
   cache in `huggingface_hub`'s layout (blobs, snapshot links, refs), so Python tools find

@@ -237,6 +237,28 @@ abv0 uninstall hf:HuggingFaceTB/SmolLM2-135M-Instruct
   Face and uses only what is already downloaded. With no network, install falls back to
   the downloaded copy by itself.
 
+### Free books and papers
+
+```sh
+abv0 book search pride and prejudice                  # every source at once
+abv0 install book:gutenberg/1342                      # Project Gutenberg (EPUB)
+abv0 install book:gutenberg/1342 --format txt         # or pdf, txt, kindle
+abv0 install book:standard/jane-austen/emma           # Standard Ebooks
+abv0 install book:archive/prideprejudice00aust        # Internet Archive (PDF)
+abv0 install book:arxiv/1706.03762                    # an arXiv paper
+abv0 book list                                        # what you downloaded
+abv0 uninstall book:gutenberg/1342
+```
+
+- **Sources:** only free, legal ones. Project Gutenberg and Standard Ebooks
+  (public-domain books), the Internet Archive (only items anyone may download;
+  borrow-only lending-library books are refused) and arXiv (open research papers).
+  Sites that share copyrighted books without permission are not supported.
+- **Where books go:** `~/Books` (or `ABV0_BOOKS_DIR`), named "Title - Author.epub".
+- **Checks:** Internet Archive files are checked against the SHA-1 and size the
+  archive lists. Every file must really be the format asked for, so an error page
+  or a swapped file is never kept.
+
 ### Moving from Homebrew
 
 ```sh
