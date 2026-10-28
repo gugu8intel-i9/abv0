@@ -453,39 +453,40 @@ abv0 completions pwsh | Out-String | Invoke-Expression
 ## Performance
 
 Measured by the [Benchmark workflow](.github/workflows/bench.yml) on GitHub's hosted
-runners, on 2026-10-28, with abv0 2.7.0, Homebrew 6.0–7.0 and zerobrew 0.4.2 installing
+runners, on 2026-10-28, with abv0 (this branch), Homebrew 6.0–7.0 and zerobrew 0.4.2 installing
 the same five tools (ripgrep, fd, bat, jq, fzf). Wall time in milliseconds; lower is
 better. Hosted runners are shared machines, so read these as rough sizes, not exact
 figures. Run it yourself from the Actions tab.
 
-**Installing five tools**
+**Installing five tools** (one command each)
 
 | | Linux x86_64 | macOS arm64 | macOS x86_64 |
 | :--- | ---: | ---: | ---: |
-| abv0, cold install | **1,022** | **1,277** | **1,363** |
-| zerobrew, cold install | 2,626 | 4,510 | failed ¹ |
-| Homebrew, cold install | 42,436 | 4,225 | 4,149 |
-| abv0, warm reinstall | 567 | 763 | **881** |
-| zerobrew, warm reinstall | **62** | **434** | failed ¹ |
-| Homebrew, warm reinstall | 44,243 | 2,497 | 5,495 |
+| abv0, cold install | **572** | **609** | **825** |
+| zerobrew, cold install | 3,142 | 4,558 | failed ¹ |
+| Homebrew, cold install | 42,052 | 1,745 | 4,318 |
+| abv0, warm reinstall | **52** | **62** | **99** |
+| zerobrew, warm reinstall | 56 | 291 | failed ¹ |
+| Homebrew, warm reinstall | 43,629 | 1,813 | 9,529 |
 
 ¹ zerobrew 0.4.2 could not install fzf's dependency pcre2 on Intel macOS ("unsupported
 archive format").
 
-- **Cold installs** (nothing downloaded yet): abv0 is 2.6–3.5× faster than zerobrew
-  and 3–42× faster than Homebrew.
-- **Warm reinstalls** (everything already downloaded once): zerobrew is faster. It keeps
-  every unpacked package in its store and only relinks, where abv0 unpacks again from its
-  download cache. abv0 is still 3–78× faster than Homebrew here.
+- **Cold installs** (nothing downloaded yet): abv0 is 5.5–7.5× faster than zerobrew and
+  3–74× faster than Homebrew. Tools the signed catalog builds need no GitHub API call,
+  even when asked for as `gh:owner/repo`.
+- **Warm reinstalls** (uninstall, then install again): abv0 is 1.1–4.7× faster than
+  zerobrew and 29–843× faster than Homebrew. Uninstall keeps the unpacked files aside, so
+  the reinstall is a rename and a link.
 
-**Everyday commands** (mean of 20–50 runs)
+**Everyday commands** (mean of 20–50 runs; Linux / macOS arm64)
 
 | | abv0 | Homebrew | zerobrew |
 | :--- | ---: | ---: | ---: |
-| `--version` (Linux / macOS arm64) | **0.4 / 6.6** | 12.3 / 123.5 | 1.8 / 9.9 |
-| `search rip` | **15 / 36** | 660 / 817 | no such command |
-| `info ripgrep` | **15 / 52** | 517 / 848 | no such command |
-| `list --installed` | **0.6 / 7.9** | 10.8 / 55.3 | no such command |
+| `--version` | **0.4 / 2.3** | 12.3 / 54.5 | 1.8 / 4.0 |
+| `search rip` | **15 / 28** | 654 / 401 | no such command |
+| `info ripgrep` | **15 / 30** | 511 / 325 | no such command |
+| `list --installed` | **0.6 / 2.4** | 10.8 / 14.4 | no such command |
 
 **One big download** (a 415 MB model file from Hugging Face; ms, with MB/s)
 
@@ -544,8 +545,8 @@ problems.
 | Undo | `history`, `undo`, `rollback`, `switch`, `self-update --rollback` | None |
 | Scheduled updates | `autoupdate on` (daily, weekly, every N hours, at a time) | None |
 | AI models, books | `hf:` models and datasets, `book:` books and papers | No |
-| Cold install (5 tools, measured above) | **faster** (2.6–3.5×) | slower |
-| Warm reinstall (measured above) | slower | **faster** |
+| Cold install (5 tools, measured above) | **5.5–7.5× faster** | |
+| Warm reinstall (measured above) | **1.1–4.7× faster** | |
 
 Choose zerobrew if you want Homebrew's exact packages and formulas, faster. Choose abv0 if
 you want one tool across Linux, macOS and Windows that verifies everything, can undo, and
