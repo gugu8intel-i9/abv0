@@ -26,10 +26,15 @@ abv0 browse                              # pick packages from a searchable list
 - `abv0 maintain` does all upkeep in one go: refresh the catalog, upgrade every package
   that is not pinned, install missing dependencies, remove dependencies nothing needs,
   clear temporary files, and update abv0 itself.
-- `abv0 autoupdate on` runs `maintain` every night at about 03:17 (`--weekly` for
-  Sundays) through the system's own scheduler: launchd on macOS, a systemd user timer or
-  cron on Linux, Task Scheduler on Windows. `abv0 autoupdate status` shows whether it is
-  on and when it last ran; `abv0 autoupdate off` removes it.
+- `abv0 autoupdate on` runs `maintain` every night at about 03:17 through the system's
+  own scheduler: launchd on macOS, a systemd user timer or cron on Linux, Task Scheduler
+  on Windows. Pick another schedule with:
+  - `--weekly` (Sundays), or `--weekly --day mon` for another day;
+  - `--every 6h` (every N hours, 1-23) or `--hourly`;
+  - `--at 09:30` for the time of day.
+
+  `abv0 autoupdate status` shows whether it is on, when it runs and when it last ran;
+  `abv0 autoupdate off` removes it.
 - Dependencies install with what needs them, `upgrade` adds any a new version needs, and
   `abv0 fix` reinstalls missing ones. When you uninstall something, dependencies that
   nothing else uses go with it. Only packages abv0 itself pulled in as dependencies are
@@ -153,7 +158,7 @@ PACKAGES
   install gh:owner/repo    Install any GitHub project's release, verified (no recipe needed)
   browse                   Pick packages to install from a full-screen list
   maintain                 Refresh, upgrade, fix dependencies and clean up in one go
-  autoupdate on|off|status Run maintain daily (or --weekly) via the system scheduler
+  autoupdate on|off|status Run maintain daily, --weekly --day mon, --every 6h, --at 09:30
   uninstall <pkg>...       Remove packages and the links they created
   upgrade [--all|pkg]...   Upgrade outdated packages (keeps the previous version for rollback)
   outdated                 List packages with a newer version available (pinned ones marked)

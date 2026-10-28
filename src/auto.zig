@@ -215,7 +215,82 @@ pub fn markDone(a: std.mem.Allocator, root: []const u8, task: []const u8) void {
 // The scheduled job
 // ---------------------------------------------------------------------------
 
-pub const Interval = enum { daily, weekly };
+pub const Interval = enum { daily, weekly, hourly };
+
+/// When the job runs: every day or every week at a time of day, or every
+/// `every_hours` hours at a minute past the hour.
+pub const Schedule = struct {
+    interval: Interval = .daily,
+    hour: u8 = 3,
+    minute: u8 = 17,
+    /// 0 = Sunday … 6 = Saturday (weekly only).
+    weekday: u8 = 0,
+    /// 1-23 (hourly only).
+    every_hours: u8 = 1,
+    /// A time the user chose: the run is not spread out by up to an hour.
+    exact: bool = false,
+};
+
+pub const day_names = [_][]const u8{ "sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday" };
+const short_days = [_][]const u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+
+/// "mon", "Monday", "MON" → 1.
+pub fn parseDay(s: []const u8) ?u8 {
+    if (s.len < 3) return null;
+    for (day_names, 0..) |d, i| {
+        if (s.len <= d.len and std.ascii.eqlIgnoreCase(s, d[0..s.len])) return @intCast(i);
+    }
+    return null;
+}
+
+/// "9:30", "09:30", "21:05" → hour and minute.
+pub fn parseTime(s: []const u8) ?struct { hour: u8, minute: u8 } {
+    const colon = std.mem.indexOfScalar(u8, s, ':') orelse return null;
+    const h = std.fmt.parseInt(u8, s[0..colon], 10) catch return null;
+    const m_text = s[colon + 1 ..];
+    if (m_text.len != 2) return null;
+    const m = std.fmt.parseInt(u8, m_text, 10) catch return null;
+    if (colon == 0 or colon > 2 or h > 23 or m > 59) return null;
+    return .{ .hour = h, .minute = m };
+}
+
+/// "6h", "6", "12hours" → 6 or 12 (1-23).
+pub fn parseEvery(s: []const u8) ?u8 {
+    var end: usize = 0;
+    while (end < s.len and std.ascii.isDigit(s[end])) end += 1;
+    if (end == 0) return null;
+    const unit = s[end..];
+    if (unit.len != 0 and !std.mem.eql(u8, unit, "h") and !std.mem.eql(u8, unit, "hour") and !std.mem.eql(u8, unit, "hours")) return null;
+    const n = std.fmt.parseInt(u8, s[0..end], 10) catch return null;
+    if (n == 0 or n > 23) return null;
+    return n;
+}
+
+/// "weekly on Monday at 09:30", "every 6 hours (at :17)".
+pub fn describe(w: anytype, sc: Schedule) !void {
+    switch (sc.interval) {
+        .daily => try w.print("daily at {d:0>2}:{d:0>2}", .{ sc.hour, sc.minute }),
+        .weekly => {
+            const d = day_names[sc.weekday];
+            try w.print("weekly on {c}{s} at {d:0>2}:{d:0>2}", .{ std.ascii.toUpper(d[0]), d[1..], sc.hour, sc.minute });
+        },
+        .hourly => if (sc.every_hours == 1)
+            try w.print("every hour (at :{d:0>2})", .{sc.minute})
+        else
+            try w.print("every {d} hours (at :{d:0>2})", .{ sc.every_hours, sc.minute }),
+    }
+}
+
+/// The hours of the day an every-N-hours job runs: 0, N, 2N, … below 24.
+fn runHours(sc: Schedule, buf: *[24]u8) []const u8 {
+    var n: usize = 0;
+    var h: u8 = 0;
+    while (h < 24) : (h += sc.every_hours) {
+        buf[n] = h;
+        n += 1;
+    }
+    return buf[0..n];
+}
 
 pub const job_label = "dev.abv0.maintain";
 pub const job_name = "abv0-maintain";
@@ -236,9 +311,9 @@ fn xmlEscape(w: anytype, s: []const u8) !void {
     };
 }
 
-/// The launchd agent (macOS) that runs `exe maintain --quiet` at 03:17, every
-/// day or on Sundays, logging to `log`.
-pub fn launchdPlist(a: std.mem.Allocator, exe: []const u8, log: []const u8, interval: Interval, env: JobEnv) ![]u8 {
+/// The launchd agent (macOS) that runs `exe maintain --quiet` on `sc`,
+/// logging to `log`.
+pub fn launchdPlist(a: std.mem.Allocator, exe: []const u8, log: []const u8, sc: Schedule, env: JobEnv) ![]u8 {
     var out = std.ArrayList(u8).init(a);
     const w = out.writer();
     try w.writeAll(
@@ -252,9 +327,21 @@ pub fn launchdPlist(a: std.mem.Allocator, exe: []const u8, log: []const u8, inte
     try w.writeAll("</string>\n  <key>ProgramArguments</key>\n  <array>\n    <string>");
     try xmlEscape(w, exe);
     try w.writeAll("</string>\n    <string>maintain</string>\n    <string>--quiet</string>\n  </array>\n");
-    try w.writeAll("  <key>StartCalendarInterval</key>\n  <dict>\n");
-    if (interval == .weekly) try w.writeAll("    <key>Weekday</key><integer>0</integer>\n");
-    try w.writeAll("    <key>Hour</key><integer>3</integer>\n    <key>Minute</key><integer>17</integer>\n  </dict>\n");
+    try w.writeAll("  <key>StartCalendarInterval</key>\n");
+    switch (sc.interval) {
+        .hourly => {
+            // One entry per run hour; launchd has no "every N hours" at a minute.
+            var buf: [24]u8 = undefined;
+            try w.writeAll("  <array>\n");
+            for (runHours(sc, &buf)) |h| try w.print("    <dict><key>Hour</key><integer>{d}</integer><key>Minute</key><integer>{d}</integer></dict>\n", .{ h, sc.minute });
+            try w.writeAll("  </array>\n");
+        },
+        else => {
+            try w.writeAll("  <dict>\n");
+            if (sc.interval == .weekly) try w.print("    <key>Weekday</key><integer>{d}</integer>\n", .{sc.weekday});
+            try w.print("    <key>Hour</key><integer>{d}</integer>\n    <key>Minute</key><integer>{d}</integer>\n  </dict>\n", .{ sc.hour, sc.minute });
+        },
+    }
     if (env.home != null or env.bin_dir != null) {
         try w.writeAll("  <key>EnvironmentVariables</key>\n  <dict>\n");
         if (env.home) |h| {
@@ -294,7 +381,7 @@ fn systemdQuote(w: anytype, s: []const u8) !void {
 }
 
 /// The systemd user service and timer (Linux).
-pub fn systemdUnits(a: std.mem.Allocator, exe: []const u8, interval: Interval, env: JobEnv) !struct { service: []u8, timer: []u8 } {
+pub fn systemdUnits(a: std.mem.Allocator, exe: []const u8, sc: Schedule, env: JobEnv) !struct { service: []u8, timer: []u8 } {
     var svc = std.ArrayList(u8).init(a);
     errdefer svc.deinit();
     const w = svc.writer();
@@ -313,19 +400,26 @@ pub fn systemdUnits(a: std.mem.Allocator, exe: []const u8, interval: Interval, e
     try systemdQuote(w, exe);
     try w.writeAll(" maintain --quiet\nNice=10\n");
 
+    const calendar = switch (sc.interval) {
+        .daily => try std.fmt.allocPrint(a, "*-*-* {d:0>2}:{d:0>2}:00", .{ sc.hour, sc.minute }),
+        .weekly => try std.fmt.allocPrint(a, "{s} *-*-* {d:0>2}:{d:0>2}:00", .{ short_days[sc.weekday], sc.hour, sc.minute }),
+        .hourly => try std.fmt.allocPrint(a, "*-*-* 00/{d}:{d:0>2}:00", .{ sc.every_hours, sc.minute }),
+    };
+    var when = std.ArrayList(u8).init(a);
+    try describe(when.writer(), sc);
     const timer = try std.fmt.allocPrint(a,
         \\[Unit]
         \\Description=Run abv0 maintain {s}
         \\
         \\[Timer]
         \\OnCalendar={s}
-        \\RandomizedDelaySec=1h
+        \\RandomizedDelaySec={s}
         \\Persistent=true
         \\
         \\[Install]
         \\WantedBy=timers.target
         \\
-    , .{ @tagName(interval), if (interval == .daily) "*-*-* 03:17:00" else "Sun *-*-* 03:17:00" });
+    , .{ when.items, calendar, if (sc.exact or sc.interval == .hourly) "2min" else "1h" });
     return .{ .service = try svc.toOwnedSlice(), .timer = timer };
 }
 
@@ -353,10 +447,17 @@ fn shQuote(w: anytype, s: []const u8) !void {
 pub const cron_marker = "# abv0-maintain";
 
 /// The crontab line (Linux without systemd): `exe maintain --quiet >> log`.
-pub fn cronLine(a: std.mem.Allocator, exe: []const u8, log: []const u8, interval: Interval, env: JobEnv) ![]u8 {
+pub fn cronLine(a: std.mem.Allocator, exe: []const u8, log: []const u8, sc: Schedule, env: JobEnv) ![]u8 {
     var out = std.ArrayList(u8).init(a);
     const w = out.writer();
-    try w.writeAll(if (interval == .daily) "17 3 * * * " else "17 3 * * 0 ");
+    switch (sc.interval) {
+        .daily => try w.print("{d} {d} * * * ", .{ sc.minute, sc.hour }),
+        .weekly => try w.print("{d} {d} * * {d} ", .{ sc.minute, sc.hour, sc.weekday }),
+        .hourly => if (sc.every_hours == 1)
+            try w.print("{d} * * * * ", .{sc.minute})
+        else
+            try w.print("{d} */{d} * * * ", .{ sc.minute, sc.every_hours }),
+    }
     if (env.home) |h| {
         try w.writeAll("ABV0_HOME=");
         try shQuote(w, h);
@@ -403,11 +504,105 @@ pub fn schtasksCommand(a: std.mem.Allocator, exe: []const u8, log: []const u8, e
     return out.toOwnedSlice();
 }
 
+/// The schedule part of `schtasks /Create` (Windows).
+pub fn schtasksSchedule(a: std.mem.Allocator, sc: Schedule) ![]const []const u8 {
+    const upper_days = [_][]const u8{ "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT" };
+    return switch (sc.interval) {
+        .daily => try a.dupe([]const u8, &.{ "/SC", "DAILY", "/ST", try std.fmt.allocPrint(a, "{d:0>2}:{d:0>2}", .{ sc.hour, sc.minute }) }),
+        .weekly => try a.dupe([]const u8, &.{ "/SC", "WEEKLY", "/D", upper_days[sc.weekday], "/ST", try std.fmt.allocPrint(a, "{d:0>2}:{d:0>2}", .{ sc.hour, sc.minute }) }),
+        .hourly => try a.dupe([]const u8, &.{ "/SC", "HOURLY", "/MO", try std.fmt.allocPrint(a, "{d}", .{sc.every_hours}), "/ST", try std.fmt.allocPrint(a, "00:{d:0>2}", .{sc.minute}) }),
+    };
+}
+
+/// Read back what `saveSchedule` wrote, for `autoupdate status`.
+pub fn parseSchedule(text: []const u8) ?Schedule {
+    var sc = Schedule{};
+    var it = std.mem.tokenizeAny(u8, text, " \n\r");
+    const kind = it.next() orelse return null;
+    sc.interval = std.meta.stringToEnum(Interval, kind) orelse return null;
+    const nums = [_]*u8{ &sc.hour, &sc.minute, &sc.weekday, &sc.every_hours };
+    for (nums) |n| n.* = std.fmt.parseInt(u8, it.next() orelse return null, 10) catch return null;
+    if (sc.hour > 23 or sc.minute > 59 or sc.weekday > 6 or sc.every_hours == 0 or sc.every_hours > 23) return null;
+    return sc;
+}
+
+pub fn formatSchedule(a: std.mem.Allocator, sc: Schedule) ![]u8 {
+    return std.fmt.allocPrint(a, "{s} {d} {d} {d} {d}\n", .{ @tagName(sc.interval), sc.hour, sc.minute, sc.weekday, sc.every_hours });
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;
+
+test "schedule options parse and describe" {
+    try testing.expectEqual(@as(?u8, 1), parseDay("mon"));
+    try testing.expectEqual(@as(?u8, 1), parseDay("Monday"));
+    try testing.expectEqual(@as(?u8, 6), parseDay("SAT"));
+    try testing.expectEqual(@as(?u8, null), parseDay("mo"));
+    try testing.expectEqual(@as(?u8, null), parseDay("someday"));
+    try testing.expectEqual(@as(u8, 9), parseTime("9:30").?.hour);
+    try testing.expectEqual(@as(u8, 5), parseTime("21:05").?.minute);
+    try testing.expect(parseTime("24:00") == null);
+    try testing.expect(parseTime("12:60") == null);
+    try testing.expect(parseTime("12:5") == null);
+    try testing.expect(parseTime("noon") == null);
+    try testing.expectEqual(@as(?u8, 6), parseEvery("6h"));
+    try testing.expectEqual(@as(?u8, 12), parseEvery("12hours"));
+    try testing.expectEqual(@as(?u8, null), parseEvery("0h"));
+    try testing.expectEqual(@as(?u8, null), parseEvery("24h"));
+    try testing.expectEqual(@as(?u8, null), parseEvery("2d"));
+
+    var buf: [64]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    try describe(fbs.writer(), .{ .interval = .weekly, .weekday = 1, .hour = 9, .minute = 30 });
+    try testing.expectEqualStrings("weekly on Monday at 09:30", fbs.getWritten());
+    fbs.reset();
+    try describe(fbs.writer(), .{ .interval = .hourly, .every_hours = 6, .minute = 0 });
+    try testing.expectEqualStrings("every 6 hours (at :00)", fbs.getWritten());
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const sc = Schedule{ .interval = .weekly, .weekday = 5, .hour = 18, .minute = 45 };
+    const back = parseSchedule(try formatSchedule(arena.allocator(), sc)).?;
+    try testing.expectEqual(sc.weekday, back.weekday);
+    try testing.expectEqual(sc.hour, back.hour);
+    try testing.expect(parseSchedule("weekly 25 0 0 1") == null);
+    try testing.expect(parseSchedule("") == null);
+}
+
+test "each scheduler gets the chosen time" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const weekly = Schedule{ .interval = .weekly, .weekday = 1, .hour = 9, .minute = 30, .exact = true };
+    const every6 = Schedule{ .interval = .hourly, .every_hours = 6, .minute = 5 };
+
+    try testing.expect(std.mem.startsWith(u8, try cronLine(a, "/x", "/l", weekly, .{}), "30 9 * * 1 "));
+    try testing.expect(std.mem.startsWith(u8, try cronLine(a, "/x", "/l", every6, .{}), "5 */6 * * * "));
+    try testing.expect(std.mem.startsWith(u8, try cronLine(a, "/x", "/l", .{ .interval = .hourly, .minute = 0 }, .{}), "0 * * * * "));
+
+    const u = try systemdUnits(a, "/x", weekly, .{});
+    try testing.expect(std.mem.indexOf(u8, u.timer, "OnCalendar=Mon *-*-* 09:30:00") != null);
+    try testing.expect(std.mem.indexOf(u8, u.timer, "RandomizedDelaySec=2min") != null);
+    const units6 = try systemdUnits(a, "/x", every6, .{});
+    try testing.expect(std.mem.indexOf(u8, units6.timer, "OnCalendar=*-*-* 00/6:05:00") != null);
+
+    const p = try launchdPlist(a, "/x", "/l", every6, .{});
+    try testing.expectEqual(@as(usize, 4), std.mem.count(u8, p, "<key>Hour</key>"));
+    try testing.expect(std.mem.indexOf(u8, p, "<integer>18</integer><key>Minute</key><integer>5</integer>") != null);
+    const pw = try launchdPlist(a, "/x", "/l", weekly, .{});
+    try testing.expect(std.mem.indexOf(u8, pw, "<key>Weekday</key><integer>1</integer>") != null);
+    try testing.expect(std.mem.indexOf(u8, pw, "<key>Hour</key><integer>9</integer>") != null);
+
+    const sw = try schtasksSchedule(a, weekly);
+    try testing.expectEqualStrings("MON", sw[3]);
+    try testing.expectEqualStrings("09:30", sw[5]);
+    const s6 = try schtasksSchedule(a, every6);
+    try testing.expectEqualStrings("HOURLY", s6[1]);
+    try testing.expectEqualStrings("6", s6[3]);
+}
 
 test "isSafeJobPath refuses what could change the job text" {
     try testing.expect(isSafeJobPath("/home/me/.abv0/bin/abv0"));
@@ -467,7 +662,7 @@ test "job definitions carry the command, schedule and home" {
     const a = testing.allocator;
     const env = JobEnv{ .home = "/Users/me/my abv0", .bin_dir = null };
 
-    const plist = try launchdPlist(a, "/Users/me/.abv0/bin/abv0", "/Users/me/.abv0/logs/maintain.log", .weekly, env);
+    const plist = try launchdPlist(a, "/Users/me/.abv0/bin/abv0", "/Users/me/.abv0/logs/maintain.log", .{ .interval = .weekly }, env);
     defer a.free(plist);
     try testing.expect(std.mem.indexOf(u8, plist, "<string>maintain</string>") != null);
     try testing.expect(std.mem.indexOf(u8, plist, "<key>Weekday</key><integer>0</integer>") != null);
@@ -475,12 +670,12 @@ test "job definitions carry the command, schedule and home" {
 
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
-    const units = try systemdUnits(arena.allocator(), "/home/me/.abv0/bin/abv0", .daily, .{ .home = "/home/me/100% \"x\"" });
+    const units = try systemdUnits(arena.allocator(), "/home/me/.abv0/bin/abv0", .{}, .{ .home = "/home/me/100% \"x\"" });
     try testing.expect(std.mem.indexOf(u8, units.service, "ExecStart=\"/home/me/.abv0/bin/abv0\" maintain --quiet") != null);
     try testing.expect(std.mem.indexOf(u8, units.service, "100%% \\\"x\\\"") != null);
     try testing.expect(std.mem.indexOf(u8, units.timer, "OnCalendar=*-*-* 03:17:00") != null);
 
-    const line = try cronLine(a, "/opt/it's/abv0", "/tmp/m.log", .daily, .{});
+    const line = try cronLine(a, "/opt/it's/abv0", "/tmp/m.log", .{}, .{});
     defer a.free(line);
     try testing.expectEqualStrings("17 3 * * * '/opt/it'\\''s/abv0' maintain --quiet >> '/tmp/m.log' 2>&1 # abv0-maintain", line);
     const edited = try editCrontab(a, "0 1 * * * backup\n17 3 * * * old # abv0-maintain\n", line);

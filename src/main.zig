@@ -236,6 +236,14 @@ fn parseArgsDiag(allocator: std.mem.Allocator, argv: []const []const u8, diag: *
         } else if (std.mem.eql(u8, arg, "--daily") or std.mem.eql(u8, arg, "--weekly") or std.mem.eql(u8, arg, "--rollback")) {
             // `autoupdate on` and `self-update` read these from the rest.
             try args.rest.append(arg);
+        } else if (std.mem.eql(u8, arg, "--hourly")) {
+            try args.rest.append(arg);
+        } else if (std.mem.eql(u8, arg, "--at") or std.mem.eql(u8, arg, "--day") or std.mem.eql(u8, arg, "--every")) {
+            // `autoupdate on` reads these and their values from the rest.
+            i += 1;
+            if (i >= argv.len) return failArg(diag, arg, "", error.MissingOptionValue);
+            try args.rest.append(arg);
+            try args.rest.append(argv[i]);
         } else if (std.mem.eql(u8, arg, "--token")) {
             // `hf login` reads it from the rest.
             i += 1;
@@ -673,10 +681,17 @@ const commands = [_]Command{
     },
     .{
         .name = "autoupdate",
-        .args = "on [--daily|--weekly] | off | status",
-        .summary = "Run `abv0 maintain` automatically through the system scheduler (launchd on macOS, a systemd user timer or cron on Linux, Task Scheduler on Windows), at about 03:17. `status` shows whether it is on and when it last ran.",
-        .flags = &.{},
-        .example = "abv0 autoupdate on",
+        .args = "on [--daily | --weekly [--day <day>] | --every <N>h | --hourly] [--at HH:MM] | off | status",
+        .summary = "Run `abv0 maintain` automatically through the system scheduler (launchd on macOS, a systemd user timer or cron on Linux, Task Scheduler on Windows): daily at about 03:17 unless told otherwise. `status` shows whether it is on, when it runs and when it last ran.",
+        .flags = &.{
+            .{ .name = "--daily", .help = "Every day (the default)" },
+            .{ .name = "--weekly", .help = "Once a week (Sunday unless --day says otherwise)" },
+            .{ .name = "--day <day>", .help = "The day of the week for a weekly run: mon, tue, ... sun" },
+            .{ .name = "--every <N>h", .help = "Every N hours (1-23), starting at midnight" },
+            .{ .name = "--hourly", .help = "Every hour" },
+            .{ .name = "--at HH:MM", .help = "The time of day (24-hour clock); for --every, the minute" },
+        },
+        .example = "abv0 autoupdate on --weekly --day mon --at 09:30",
     },
     .{
         .name = "self-update",
@@ -790,7 +805,7 @@ fn renderUsage(w: anytype) !void {
         \\  cleanup                 Remove old versions (including rollback's), keeping the newest
         \\  completions <shell>     Print a bash, zsh, fish or pwsh completion script
         \\  maintain                Refresh, upgrade, fix dependencies and clean up in one go
-        \\  autoupdate on|off|status  Run `maintain` daily (or --weekly) via the system scheduler
+        \\  autoupdate on|off|status  Run `maintain` daily, --weekly --day mon, --every 6h, --at 09:30
         \\  self-update [--check]   Update abv0 from a signed release (--rollback goes back)
         \\  reset                   Uninstall everything
         \\  report [--bug]          Open a prefilled GitHub issue
@@ -3462,7 +3477,7 @@ fn envOwned(a: std.mem.Allocator, name: []const u8) ?[]u8 {
     return std.process.getEnvVarOwned(a, name) catch null;
 }
 
-/// `abv0 autoupdate on [--weekly] | off | status`: a scheduled `abv0 maintain`
+/// `abv0 autoupdate on [schedule] | off | status`: a scheduled `abv0 maintain`
 /// through the system's own scheduler (launchd, systemd or cron, Task
 /// Scheduler).
 fn cmdAutoupdate(base: std.mem.Allocator, st: *store.Store, rest: []const []const u8) !u8 {
@@ -3470,13 +3485,60 @@ fn cmdAutoupdate(base: std.mem.Allocator, st: *store.Store, rest: []const []cons
     defer arena.deinit();
     const a = arena.allocator();
     const sub = if (rest.len > 0) rest[0] else "status";
-    var interval: auto.Interval = .daily;
-    for (rest[@min(rest.len, 1)..]) |opt| {
-        if (std.mem.eql(u8, opt, "--weekly")) interval = .weekly else if (std.mem.eql(u8, opt, "--daily")) interval = .daily else {
-            term.err("usage: abv0 autoupdate on [--daily|--weekly] | off | status\n", .{});
+    const usage = "usage: abv0 autoupdate on [--daily | --weekly [--day <mon..sun>] | --every <N>h | --hourly] [--at HH:MM] | off | status\n";
+    var sc = auto.Schedule{};
+    var weekly_asked = false;
+    var at_asked = false;
+    var i: usize = @min(rest.len, 1);
+    while (i < rest.len) : (i += 1) {
+        const opt = rest[i];
+        const value: ?[]const u8 = if (i + 1 < rest.len) rest[i + 1] else null;
+        if (std.mem.eql(u8, opt, "--daily")) {
+            sc.interval = .daily;
+        } else if (std.mem.eql(u8, opt, "--weekly")) {
+            sc.interval = .weekly;
+            weekly_asked = true;
+        } else if (std.mem.eql(u8, opt, "--hourly")) {
+            sc.interval = .hourly;
+            sc.every_hours = 1;
+        } else if (std.mem.eql(u8, opt, "--every") and value != null) {
+            sc.every_hours = auto.parseEvery(value.?) orelse {
+                term.err("{s}error{s}: --every takes a number of hours from 1 to 23, such as 6h\n", .{ term.red, term.reset });
+                return 2;
+            };
+            sc.interval = .hourly;
+            i += 1;
+        } else if (std.mem.eql(u8, opt, "--day") and value != null) {
+            sc.weekday = auto.parseDay(value.?) orelse {
+                term.err("{s}error{s}: --day takes a day of the week, such as mon or friday\n", .{ term.red, term.reset });
+                return 2;
+            };
+            weekly_asked = true;
+            i += 1;
+        } else if (std.mem.eql(u8, opt, "--at") and value != null) {
+            const t = auto.parseTime(value.?) orelse {
+                term.err("{s}error{s}: --at takes a 24-hour time, such as 09:30 or 21:00\n", .{ term.red, term.reset });
+                return 2;
+            };
+            sc.hour = t.hour;
+            sc.minute = t.minute;
+            sc.exact = true;
+            at_asked = true;
+            i += 1;
+        } else {
+            term.err(usage, .{});
             return 2;
         }
     }
+    if (weekly_asked) {
+        if (sc.interval == .hourly) {
+            term.err("{s}error{s}: pick either a weekly day or a number of hours, not both\n", .{ term.red, term.reset });
+            return 2;
+        }
+        sc.interval = .weekly;
+    }
+    // Every N hours starts at midnight; --at only sets the minute.
+    if (sc.interval == .hourly and !at_asked) sc.minute = 17;
     const logs = try std.fs.path.join(a, &.{ st.root, "logs" });
     const log = try std.fs.path.join(a, &.{ logs, "maintain.log" });
     const env = auto.JobEnv{ .home = envOwned(a, "ABV0_HOME"), .bin_dir = envOwned(a, "ABV0_BIN_DIR") };
@@ -3491,7 +3553,7 @@ fn cmdAutoupdate(base: std.mem.Allocator, st: *store.Store, rest: []const []cons
             }
         }
         try std.fs.cwd().makePath(logs);
-        const how = scheduleOn(a, st, exe, log, interval, env) catch |e| {
+        const how = scheduleOn(a, st, exe, log, sc, env) catch |e| {
             const why: []const u8 = switch (e) {
                 error.CrontabFailed => "no scheduler found: this needs a systemd user session or cron (the crontab command)",
                 error.LaunchctlFailed => "launchctl refused the job",
@@ -3501,19 +3563,31 @@ fn cmdAutoupdate(base: std.mem.Allocator, st: *store.Store, rest: []const []cons
             term.err("{s}error{s}: could not schedule abv0 maintain: {s}\n", .{ term.red, term.reset, why });
             return 1;
         };
-        say("{s}on{s}  abv0 maintain runs {s} at about 03:17 ({s})\n", .{ term.green, term.reset, @tagName(interval), how });
+        var when = std.ArrayList(u8).init(a);
+        try auto.describe(when.writer(), sc);
+        say("{s}on{s}  abv0 maintain runs {s}{s} ({s})\n", .{ term.green, term.reset, when.items, if (sc.exact or sc.interval == .hourly or !std.mem.startsWith(u8, how, "systemd")) "" else ", give or take an hour", how });
+        const state_dir = try std.fs.path.join(a, &.{ st.root, "state" });
+        std.fs.cwd().makePath(state_dir) catch {};
+        std.fs.cwd().writeFile(.{ .sub_path = try std.fs.path.join(a, &.{ state_dir, "autoupdate-schedule" }), .data = try auto.formatSchedule(a, sc) }) catch {};
         say("     it refreshes the catalog, upgrades unpinned packages, installs missing\n     dependencies, removes unused ones, cleans up and updates abv0\n", .{});
         say("     log: {s}\n", .{log});
         return 0;
     }
     if (std.mem.eql(u8, sub, "off")) {
         scheduleOff(a, st);
+        std.fs.cwd().deleteFile(try std.fs.path.join(a, &.{ st.root, "state", "autoupdate-schedule" })) catch {};
         say("{s}off{s}  automatic upkeep is disabled\n", .{ term.yellow, term.reset });
         return 0;
     }
     if (std.mem.eql(u8, sub, "status")) {
         const state = scheduleStatus(a, st);
         say("scheduled:   {s}\n", .{state});
+        const saved = std.fs.cwd().readFileAlloc(a, try std.fs.path.join(a, &.{ st.root, "state", "autoupdate-schedule" }), 256) catch null;
+        if (saved) |text| if (auto.parseSchedule(text)) |sv| {
+            var when = std.ArrayList(u8).init(a);
+            try auto.describe(when.writer(), sv);
+            say("when:        {s}\n", .{when.items});
+        };
         const last = try std.fs.path.join(a, &.{ st.root, "state", "last-maintain" });
         if (auto.ageSeconds(last)) |age| {
             say("last run:    {d} hours ago\n", .{@divTrunc(age, 3600)});
@@ -3524,7 +3598,7 @@ fn cmdAutoupdate(base: std.mem.Allocator, st: *store.Store, rest: []const []cons
         say("log:         {s}\n", .{log});
         return 0;
     }
-    term.err("usage: abv0 autoupdate on [--daily|--weekly] | off | status\n", .{});
+    term.err(usage, .{});
     return 2;
 }
 
@@ -3551,12 +3625,12 @@ fn hasUserSystemd(a: std.mem.Allocator) bool {
     return (runTool(a, &.{ "systemctl", "--user", "show-environment" }) orelse 1) == 0;
 }
 
-fn scheduleOn(a: std.mem.Allocator, st: *const store.Store, exe: []const u8, log: []const u8, interval: auto.Interval, env: auto.JobEnv) anyerror![]const u8 {
+fn scheduleOn(a: std.mem.Allocator, st: *const store.Store, exe: []const u8, log: []const u8, sc: auto.Schedule, env: auto.JobEnv) anyerror![]const u8 {
     switch (builtin.os.tag) {
         .macos => {
             const plist = try launchdPlistPath(a, st);
             try std.fs.cwd().makePath(std.fs.path.dirname(plist).?);
-            try std.fs.cwd().writeFile(.{ .sub_path = plist, .data = try auto.launchdPlist(a, exe, log, interval, env) });
+            try std.fs.cwd().writeFile(.{ .sub_path = plist, .data = try auto.launchdPlist(a, exe, log, sc, env) });
             const domain = try std.fmt.allocPrint(a, "gui/{d}", .{currentUid()});
             const target = try std.fmt.allocPrint(a, "{s}/{s}", .{ domain, auto.job_label });
             _ = runTool(a, &.{ "launchctl", "bootout", target });
@@ -3568,8 +3642,8 @@ fn scheduleOn(a: std.mem.Allocator, st: *const store.Store, exe: []const u8, log
         .windows => {
             const tr = try auto.schtasksCommand(a, exe, log, env);
             var argv = std.ArrayList([]const u8).init(a);
-            try argv.appendSlice(&.{ "schtasks", "/Create", "/F", "/TN", auto.job_name, "/ST", "03:17", "/TR", tr });
-            if (interval == .daily) try argv.appendSlice(&.{ "/SC", "DAILY" }) else try argv.appendSlice(&.{ "/SC", "WEEKLY", "/D", "SUN" });
+            try argv.appendSlice(&.{ "schtasks", "/Create", "/F", "/TN", auto.job_name, "/TR", tr });
+            try argv.appendSlice(try auto.schtasksSchedule(a, sc));
             if ((runTool(a, argv.items) orelse 1) != 0) return error.SchtasksFailed;
             return "Task Scheduler";
         },
@@ -3577,7 +3651,7 @@ fn scheduleOn(a: std.mem.Allocator, st: *const store.Store, exe: []const u8, log
             if (hasUserSystemd(a)) {
                 const dir = try systemdDir(a, st);
                 try std.fs.cwd().makePath(dir);
-                const units = try auto.systemdUnits(a, exe, interval, env);
+                const units = try auto.systemdUnits(a, exe, sc, env);
                 try std.fs.cwd().writeFile(.{ .sub_path = try std.fs.path.join(a, &.{ dir, auto.job_name ++ ".service" }), .data = units.service });
                 try std.fs.cwd().writeFile(.{ .sub_path = try std.fs.path.join(a, &.{ dir, auto.job_name ++ ".timer" }), .data = units.timer });
                 _ = runTool(a, &.{ "systemctl", "--user", "daemon-reload" });
@@ -3585,7 +3659,7 @@ fn scheduleOn(a: std.mem.Allocator, st: *const store.Store, exe: []const u8, log
             }
             // No user systemd: the user's crontab.
             const current = toolOutput(a, &.{ "crontab", "-l" }) orelse "";
-            const text = try auto.editCrontab(a, current, try auto.cronLine(a, exe, log, interval, env));
+            const text = try auto.editCrontab(a, current, try auto.cronLine(a, exe, log, sc, env));
             const tmp = try std.fs.path.join(a, &.{ st.root, "state", "crontab.tmp" });
             try std.fs.cwd().makePath(std.fs.path.dirname(tmp).?);
             try std.fs.cwd().writeFile(.{ .sub_path = tmp, .data = text });

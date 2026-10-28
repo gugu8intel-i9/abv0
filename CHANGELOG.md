@@ -9,6 +9,9 @@
   one of them) for every package it touched: switching back to a version still on disk
   with no download, removing what was added, and installing again what was removed.
   Undoing an undo redoes it.
+- **Choose when upkeep runs.** `abv0 autoupdate on` takes `--weekly --day mon`,
+  `--every 6h`, `--hourly` and `--at 09:30`, on launchd, systemd, cron and Task Scheduler
+  alike. `abv0 autoupdate status` shows when it runs.
 - **Roll abv0 itself back.** `self-update` keeps the abv0 it replaces, and
   `abv0 self-update --rollback` returns to it.
 

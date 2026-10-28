@@ -159,6 +159,11 @@ jobs:
           $abv0 autoupdate on --weekly
           $abv0 autoupdate status | tee status.txt
           grep -q '^scheduled: *yes' status.txt || { echo "not scheduled after 'on'"; exit 1; }
+          $abv0 autoupdate on --weekly --day mon --at 09:30
+          $abv0 autoupdate status | tee status.txt
+          grep -q '^when: *weekly on Monday at 09:30' status.txt || { echo "chosen time not kept"; exit 1; }
+          $abv0 autoupdate on --every 6h
+          $abv0 autoupdate status | grep -q '^when: *every 6 hours'
           $abv0 autoupdate off
           $abv0 autoupdate status | tee status.txt
           grep -q '^scheduled: *no' status.txt || { echo "still scheduled after 'off'"; exit 1; }
