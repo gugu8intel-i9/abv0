@@ -2525,7 +2525,7 @@ kubepug kubepug/kubepug
 gollama sammcj/gollama
 libpointmatcher norlab-ulaval/libpointmatcher
 refterm cmuratori/refterm
-agent stakpak/agent
+stakpak-agent stakpak/agent
 qbdi QBDI/QBDI
 core metacall/core
 vectorchord supervc-stack/VectorChord
@@ -2804,7 +2804,7 @@ notesmd-cli Yakitrak/notesmd-cli
 esp32-ble-gamepad lemmingDev/ESP32-BLE-Gamepad
 atvloadly bitxeno/atvloadly
 mark kovetskiy/mark
-stargz-snapshotter containerd/stargz-snapshotter
+containerd-stargz-snapshotter containerd/stargz-snapshotter
 lumos jmorton06/Lumos
 libssh2 libssh2/libssh2
 ghgrab abhixdd/ghgrab
@@ -2888,7 +2888,7 @@ fbneo finalburnneo/FBNeo
 jprq azimjohn/jprq
 zoro txthinking/zoro
 tongsuo Tongsuo-Project/Tongsuo
-anytls-go anytls/anytls-go
+anytls-anytls-go anytls/anytls-go
 ratex erweixin/RaTeX
 profanity profanity-im/profanity
 lstr bgreenwell/lstr
