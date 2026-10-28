@@ -13,10 +13,28 @@ can also be installed directly with `gh:owner/repo`.
 ```bash
 abv0 install ripgrep jq                  # verified, parallel
 abv0 install gh:BurntSushi/ripgrep       # any GitHub release, verified
+abv0 install google-chrome slack         # proprietary apps, from their makers' own sites
+abv0 install hf:Qwen/Qwen2.5-0.5B-Instruct-GGUF --include "*q4_k_m*"   # AI models
+abv0 install book:gutenberg/1342         # free books and papers
+abv0 undo                                # take back the last change
 abv0 run ripgrep -- --help               # run without touching PATH
 abv0 shell ripgrep                       # ephemeral subshell with just that package
 abv0 browse                              # pick packages from a searchable list
 ```
+
+**What it does, in one list:**
+
+| | |
+| :--- | :--- |
+| Command-line tools | About 1,500 in the signed catalog, plus any GitHub project's release with `gh:owner/repo` |
+| Desktop apps | Mac apps into `~/Applications`, Windows portable apps with Start Menu shortcuts |
+| Proprietary software | Chrome, VS Code, Slack, Discord, Docker Desktop, Terraform, 1Password CLI and more, from their makers' own links, checksum-pinned |
+| AI models and datasets | `hf:owner/model` into the Hugging Face cache, every file verified, pickle files scanned; token login, offline mode |
+| Books and papers | Project Gutenberg, Standard Ebooks, the Internet Archive and arXiv, into `~/Books` |
+| Undo | `abv0 history`, `abv0 undo`, `abv0 rollback <pkg>`, `abv0 self-update --rollback` |
+| Staying current | Catalog refreshes itself; `abv0 autoupdate on` with daily, weekly, every-N-hours or a set time |
+| Downloads | Built-in HTTPS client, parallel ranged downloads, micro-shards, streaming unpack, a verified download cache |
+| Safety | Signed catalog, SHA-256 on every file, malware scan before anything is linked |
 
 **Staying up to date, automatically.**
 
@@ -170,11 +188,20 @@ PACKAGES
   leaves                   List installed packages nothing else depends on
   switch <pkg> <version>   Make an installed version the active one
   rollback <pkg>           Go back to the previously installed version
+  history                  Every change to what is installed, newest first
+  undo [<#>]               Undo the last change (or change #), all packages at once
   home [--open] <pkg>      Print (or open) a package's homepage
   pin <pkg>                Hold a package at its installed version
   unpin <pkg>              Let upgrade update it again
   pinned                   List pinned packages
   which <bin>              Show which package owns a command
+
+MODELS, DATASETS AND BOOKS
+  install hf:owner/model   A Hugging Face model (hf:datasets/owner/name for a dataset)
+  hf login|whoami|logout   Plug in your Hugging Face token (kept on this computer only)
+  hf list|path|search      What is in the Hugging Face cache, or on the Hub
+  install book:source/id   A free book or paper (gutenberg, standard, archive, arxiv)
+  book search|list|dir     Search every book source at once; what you downloaded
 
 EXECUTION
   run <pkg> [-- args]      Run a package executable
@@ -195,7 +222,7 @@ MAINTENANCE
   gc                       Remove temporary files and stale sandboxes
   cleanup                  Remove old versions (including rollback's), keeping the newest
   completions <shell>      Print a bash, zsh, fish or pwsh completion script
-  self-update [--check]    Update abv0 from a signed release
+  self-update [--check]    Update abv0 from a signed release (--rollback goes back)
   reset                    Uninstall everything
   report [--bug]           Open a prefilled GitHub issue
   version                  Print the version
@@ -332,6 +359,10 @@ abv0 install owner/repo               # the same as gh:owner/repo
 | `--allow-unverified` | Permit installs without a verified checksum |
 | `--allow-suspicious` | Install a package even if the malware scan blocks it |
 | `--micro-split` | Parallel ranged download for large assets |
+| `--micro-shards[=SIZE]` | Fetch big files as many small pieces (1M each by default) that the connections share; see [Downloads](#downloads) |
+| `--include`, `--exclude <glob,...>` | `hf:` installs: only these files, or not these |
+| `--all-files` | `hf:` installs: also the copies in other weight formats |
+| `--format epub\|pdf\|txt\|kindle` | `book:` installs: the file type |
 | `--no-stream` | Download fully before unpacking (disables the streaming install) |
 | `--force` | Overwrite files and replace conflicting bin links |
 | `--dry-run` | Show what install, upgrade, uninstall, bundle or cleanup would do; change nothing |
@@ -374,6 +405,10 @@ fetches and stores the macOS build without linking it into your `PATH`.
 | `ABV0_DOWNLOADER` | `builtin`, `curl` or `auto` (the default). `builtin` never uses curl; `curl` never uses the built-in client. |
 | `ABV0_SPLIT_MIN` | Smallest download fetched over several connections at once, in bytes (`8M`, `512k` and `1G` work too). Default 8 MiB. |
 | `ABV0_CONNECTIONS` | Connections for a split download, 1 to 16. `1` turns splitting off. Unset, a download gets one connection per 4 MiB, up to 8. |
+| `ABV0_SHARD_SIZE` | Turn micro-shards on for every download: `on` (1 MiB pieces) or a size such as `512k` or `4M` |
+| `ABV0_BOOKS_DIR` | Where books go, replacing `~/Books` |
+| `HF_TOKEN`, `HF_HUB_CACHE`, `HF_HOME` | Hugging Face token and cache, as Hugging Face's own tools read them |
+| `HF_HUB_OFFLINE` | `1` never contacts Hugging Face; installs come from the cache only |
 | `GITHUB_TOKEN`, `GH_TOKEN` | Optional GitHub token for API requests. `GITHUB_TOKEN` is read first. |
 | `ABV0_NO_SCAN` | `1` turns off the install-time malware scan |
 | `ABV0_AUTO_UPDATE` | `0` stops commands refreshing a stale catalog |
