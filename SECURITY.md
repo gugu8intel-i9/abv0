@@ -35,6 +35,15 @@ to huggingface.co, never to the download servers it redirects to. `abv0 hf login
 saves it only in the local token file, readable only by its owner, and never prints
 it. With `HF_HUB_OFFLINE=1`, abv0 makes no request to Hugging Face at all.
 
+Books (`abv0 install book:...`) come only from Project Gutenberg, Standard Ebooks, the
+Internet Archive and arXiv, over https (a redirect to plain http is refused). Internet
+Archive files are checked against the SHA-1 and size it lists; the other sources
+publish no checksums, so trust rests on their TLS certificates. Every file must start
+the way its format does (`%PDF-`, an EPUB zip, a Mobipocket header, text with no NUL
+bytes), so an error page or another kind of file is deleted. File names are cleaned
+of path separators and leading dots, and the index of downloaded books is only ever
+used to name files inside the books folder. Books are documents, never run.
+
 Packages from `catalog/vendor.txt` come from their makers' own servers, which publish no
 checksum abv0 can check. The builder downloads each file over https, pins its SHA-256 in
 the signed catalog and scans it. A file swapped behind the same link afterwards no
