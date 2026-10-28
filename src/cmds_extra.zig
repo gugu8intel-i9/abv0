@@ -388,8 +388,9 @@ pub fn cmdCleanup(
     // shared files only those versions used.
     const cache_now = st.pruneCache(aa, true);
     const cas_now = st.pruneCas(aa, true);
+    const parked_now = st.purgeParked(aa, true, true);
 
-    if (plan.items.len == 0 and cache_now.files == 0 and cas_now.files == 0) {
+    if (plan.items.len == 0 and cache_now.files == 0 and cas_now.files == 0 and parked_now.trees == 0) {
         term.print("nothing to clean\n", .{});
         return 0;
     }
@@ -414,6 +415,12 @@ pub fn cmdCleanup(
         term.print("removed {s}: {s} ({s})\n", .{ v.label, v.path, size });
     }
 
+    const parked_done = if (dry_run) parked_now else st.purgeParked(aa, true, false);
+    if (parked_done.trees > 0) {
+        term.print("{s} {d} uninstalled packages kept for a quick reinstall ({s})\n", .{ if (dry_run) "would remove" else "removed", parked_done.trees, formatBytes(&size_buf, parked_done.bytes) });
+    }
+    total += parked_done.bytes;
+    if (!dry_run) reclaimed += parked_done.bytes;
     const cache_done = if (dry_run) cache_now else st.pruneCache(aa, false);
     const cas_done = if (dry_run) cas_now else st.pruneCas(aa, false);
     const verb: []const u8 = if (dry_run) "would remove" else "removed";

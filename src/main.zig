@@ -1458,7 +1458,12 @@ const Batch = struct {
 
     fn installOne(self: *Batch, scratch: std.mem.Allocator, name: []const u8) bool {
         const started = std.time.nanoTimestamp();
-        if (store.Store.resolveRequest(self.reg, name)) |pkg| {
+        const direct = store.Store.resolveRequest(self.reg, name);
+        const via_catalog = if (direct == null) store.Store.catalogForGithub(self.reg, name, self.platform_name) else null;
+        if (direct orelse via_catalog) |pkg| {
+            if (via_catalog != null and !self.opts.quiet) {
+                term.print("  {s}catalog{s}  {s} is {s} {s} in the signed catalog; no GitHub lookup needed\n", .{ term.cyan, term.reset, name, pkg.name, pkg.version });
+            }
             self.st.install(pkg, self.platform_name, self.opts) catch |e| {
                 reportInstallError(name, e);
                 return false;

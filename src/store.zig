@@ -377,12 +377,14 @@ pub const Store = struct {
         var w = try wal.Wal.init(a, self.store_root, pkg.name);
         defer w.deinit();
 
+        // A tree set aside by an earlier uninstall comes back with a rename.
+        const unparked = self.unpark(a, pkg_dir);
         // Re-check under the lock: another worker may have just finished.
         if (!self.isInstalled(pkg, platform_name)) {
             try self.fetchAndUnpack(a, pkg, info, pkg_dir, opts, &w);
             try scanOrReject(a, pkg.name, pkg_dir, opts);
         } else if (!opts.quiet) {
-            term.print("  {s}cached{s}  {s} {s}\n", .{ term.dim, term.reset, pkg.name, pkg.version });
+            term.print("  {s}{s}{s}  {s} {s}\n", .{ term.dim, if (unparked) "kept  " else "cached", term.reset, pkg.name, pkg.version });
         }
 
         try w.append(.link);
@@ -1544,7 +1546,9 @@ pub const Store = struct {
                     if (!platformListed(pkg, d.platform)) continue;
                     const p = try std.fs.path.join(a, &.{ self.store_root, d.dir_name });
                     defer a.free(p);
-                    if (std.fs.cwd().deleteTree(p)) |_| {
+                    if (self.park(a, p, d.dir_name)) {
+                        removed = true;
+                    } else if (std.fs.cwd().deleteTree(p)) |_| {
                         removed = true;
                     } else |_| {}
                 }
@@ -1559,8 +1563,106 @@ pub const Store = struct {
         return removed;
     }
 
+    // -----------------------------------------------------------------------
+    // Parked trees: uninstall keeps the unpacked package, reinstall renames it
+    // back. The tree was verified and scanned when it was first installed and
+    // has stayed inside abv0's own folder since, so it is trusted as the store
+    // is. `cleanup` removes them all; `gc` removes those older than 30 days.
+    // -----------------------------------------------------------------------
+
+    pub const park_max_age_ns: u64 = 30 * 24 * std.time.ns_per_hour;
+
+    fn parkedRoot(self: *const Store, a: std.mem.Allocator) ![]u8 {
+        return std.fs.path.join(a, &.{ self.root, "parked" });
+    }
+
+    /// Move `path` (store/<dir_name>) aside instead of deleting it. False when
+    /// parking is off or the move failed; the caller then deletes it.
+    fn park(self: *const Store, a: std.mem.Allocator, path: []const u8, dir_name: []const u8) bool {
+        if (!cas.Config.current().park) return false;
+        const root = self.parkedRoot(a) catch return false;
+        defer a.free(root);
+        std.fs.cwd().makePath(root) catch return false;
+        const dst = std.fs.path.join(a, &.{ root, dir_name }) catch return false;
+        defer a.free(dst);
+        std.fs.cwd().deleteTree(dst) catch {};
+        std.fs.cwd().rename(path, dst) catch return false;
+        // The rename keeps the tree's own times, so the age lives beside it.
+        const stamp = std.fmt.allocPrint(a, "{s}.parked", .{dst}) catch return true;
+        defer a.free(stamp);
+        var buf: [32]u8 = undefined;
+        const text = std.fmt.bufPrint(&buf, "{d}\n", .{std.time.timestamp()}) catch return true;
+        std.fs.cwd().writeFile(.{ .sub_path = stamp, .data = text }) catch {};
+        return true;
+    }
+
+    /// Put a parked tree back at `pkg_dir` if there is one and nothing is
+    /// there yet. True when it was restored.
+    pub fn unpark(self: *const Store, a: std.mem.Allocator, pkg_dir: []const u8) bool {
+        std.fs.cwd().access(pkg_dir, .{}) catch {
+            const root = self.parkedRoot(a) catch return false;
+            defer a.free(root);
+            const src = std.fs.path.join(a, &.{ root, std.fs.path.basename(pkg_dir) }) catch return false;
+            defer a.free(src);
+            std.fs.cwd().rename(src, pkg_dir) catch return false;
+            const stamp = std.fmt.allocPrint(a, "{s}.parked", .{src}) catch return true;
+            defer a.free(stamp);
+            std.fs.cwd().deleteFile(stamp) catch {};
+            return true;
+        };
+        return false;
+    }
+
+    pub const Purge = struct { trees: usize = 0, bytes: u64 = 0 };
+
+    /// Remove parked trees: every one, or only those parked longer than
+    /// `park_max_age_ns`.
+    pub fn purgeParked(self: *const Store, a: std.mem.Allocator, all: bool, dry_run: bool) Purge {
+        var out: Purge = .{};
+        const root = self.parkedRoot(a) catch return out;
+        defer a.free(root);
+        var dir = std.fs.cwd().openDir(root, .{ .iterate = true }) catch return out;
+        defer dir.close();
+        const now = std.time.timestamp();
+        var it = dir.iterate();
+        while (it.next() catch null) |e| {
+            if (e.kind != .directory) continue;
+            const stamp_name = std.fmt.allocPrint(a, "{s}.parked", .{e.name}) catch continue;
+            defer a.free(stamp_name);
+            if (!all) {
+                var buf: [32]u8 = undefined;
+                const text = dir.readFile(stamp_name, &buf) catch "";
+                const when = std.fmt.parseInt(i64, std.mem.trim(u8, text, " \r\n"), 10) catch 0;
+                if (now - when < @as(i64, @intCast(park_max_age_ns / std.time.ns_per_s))) continue;
+            }
+            const p = std.fs.path.join(a, &.{ root, e.name }) catch continue;
+            defer a.free(p);
+            out.bytes += treeBytes(a, p);
+            out.trees += 1;
+            if (dry_run) continue;
+            std.fs.cwd().deleteTree(p) catch continue;
+            dir.deleteFile(stamp_name) catch {};
+        }
+        return out;
+    }
+
+    fn treeBytes(a: std.mem.Allocator, path: []const u8) u64 {
+        var d = std.fs.cwd().openDir(path, .{ .iterate = true }) catch return 0;
+        defer d.close();
+        var w = d.walk(a) catch return 0;
+        defer w.deinit();
+        var total: u64 = 0;
+        while (w.next() catch null) |e| {
+            if (e.kind != .file) continue;
+            const st = e.dir.statFile(e.basename) catch continue;
+            total += st.size;
+        }
+        return total;
+    }
+
     pub fn gc(self: *Store, a: std.mem.Allocator) !usize {
         var reclaimed: usize = 0;
+        reclaimed += self.purgeParked(a, false, false).trees;
 
         if (std.fs.cwd().openDir(self.store_root, .{ .iterate = true })) |*d| {
             var dir = d.*;
@@ -2040,6 +2142,33 @@ pub const Store = struct {
         return reg.findByBin(name);
     }
 
+    /// `gh:owner/repo` with no tag, when the signed catalog builds that same
+    /// project for `platform_name`: the catalog package. Its download is
+    /// already pinned and signed, so no GitHub API call is needed, and the
+    /// check is stronger than a release's own checksum file.
+    pub fn catalogForGithub(reg: *const registry.Registry, name: []const u8, platform_name: []const u8) ?Package {
+        if (!ghverify.looksLikeSpec(name)) return null;
+        const spec = ghrelease.parseSpec(name) orelse return null;
+        if (spec.tag != null) return null;
+        for (reg.packages) |pkg| {
+            const info = pkg.platform(platform_name) orelse continue;
+            if (isReleaseOf(info.url, spec.owner, spec.repo)) return pkg;
+        }
+        return null;
+    }
+
+    /// True when `url` is a release download of github.com/owner/repo.
+    fn isReleaseOf(url: []const u8, owner: []const u8, repo: []const u8) bool {
+        const host = "https://github.com/";
+        if (!std.mem.startsWith(u8, url, host)) return false;
+        var rest = url[host.len..];
+        for ([_][]const u8{ owner, repo }) |part| {
+            if (rest.len <= part.len or rest[part.len] != '/' or !std.ascii.eqlIgnoreCase(rest[0..part.len], part)) return false;
+            rest = rest[part.len + 1 ..];
+        }
+        return std.mem.startsWith(u8, rest, "releases/download/");
+    }
+
     pub fn ensureInstalled(
         self: *Store,
         a: std.mem.Allocator,
@@ -2048,7 +2177,7 @@ pub const Store = struct {
         platform_name: []const u8,
         opts: InstallOptions,
     ) !Package {
-        if (resolveRequest(reg, name)) |pkg| {
+        if (resolveRequest(reg, name) orelse catalogForGithub(reg, name, platform_name)) |pkg| {
             if (!self.isInstalled(pkg, platform_name)) {
                 try self.install(pkg, platform_name, opts);
             }
@@ -2334,7 +2463,7 @@ pub const Store = struct {
 
         // ---- which release, which asset ----
         var api_message: ?[]const u8 = null;
-        const rel = fetchGithubRelease(a, spec, &api_message) catch |e| {
+        const rel = self.cachedGithubRelease(a, spec, &api_message) catch |e| {
             const at: []const u8 = if (spec.tag != null) "@" else "";
             term.err("{s}error{s}: cannot read the release of gh:{s}/{s}{s}{s}\n", .{
                 term.red, term.reset, spec.owner, spec.repo, at, spec.tag orelse "",
@@ -2457,6 +2586,7 @@ pub const Store = struct {
         run_opts.allow_unverified = decision == .unverified;
         run_opts.source_note = note;
 
+        _ = self.unpark(a, pkg_dir);
         const cached = self.isInstalled(pkg, platform_name) and self.installedFrom(a, pkg_dir, spec);
         if (!cached) {
             try self.fetchAndUnpack(a, pkg, plats[0], pkg_dir, run_opts, &w);
@@ -2581,6 +2711,55 @@ pub const Store = struct {
             try headers.append(try std.fmt.allocPrint(a, "Authorization: Bearer {s}", .{tok}));
         }
         return net.fetchToString(a, url, 8 * 1024 * 1024, .{ .headers = headers.items });
+    }
+
+    /// How long a release answer is reused by `install`: a tag names one
+    /// release, so a day; "latest" can move, so `ABV0_GH_CACHE_MINUTES`
+    /// (default 60, 0 turns it off). `upgrade` and `outdated` always ask.
+    fn releaseCacheSeconds(a: std.mem.Allocator, spec: ghrelease.Spec) i64 {
+        var minutes: i64 = 60;
+        if (platform.envOwned(a, "ABV0_GH_CACHE_MINUTES")) |v| {
+            minutes = std.fmt.parseInt(i64, std.mem.trim(u8, v, " \t\r\n"), 10) catch minutes;
+        }
+        if (minutes <= 0) return 0;
+        return if (spec.tag != null) 24 * 3600 else minutes * 60;
+    }
+
+    /// `fetchGithubRelease`, answered from `<root>/cache/gh-releases` while
+    /// that answer is fresh. A cached release is still checked the same way:
+    /// its asset's digest decides what is accepted.
+    fn cachedGithubRelease(self: *const Store, a: std.mem.Allocator, spec: ghrelease.Spec, message: *?[]const u8) !ghrelease.Release {
+        const ttl = releaseCacheSeconds(a, spec);
+        if (ttl == 0 or !cas.Config.current().cache) return fetchGithubRelease(a, spec, message);
+        const dir = try std.fs.path.join(a, &.{ self.root, "cache", "gh-releases" });
+        const which = spec.tag orelse "latest";
+        const file = try std.fmt.allocPrint(a, "{s}__{s}__{s}.json", .{ spec.owner, spec.repo, which });
+        for (file) |*c| c.* = if (std.ascii.isAlphanumeric(c.*) or c.* == '_' or c.* == '-' or c.* == '.') std.ascii.toLower(c.*) else '_';
+        const path = try std.fs.path.join(a, &.{ dir, file });
+        if (std.fs.cwd().statFile(path)) |st| {
+            const age = std.time.timestamp() - @divTrunc(@as(i64, @intCast(st.mtime)), std.time.ns_per_s);
+            if (age >= 0 and age < ttl) {
+                if (std.fs.cwd().readFileAlloc(a, path, 8 * 1024 * 1024)) |body| {
+                    if (ghrelease.parseRelease(a, body)) |rel| return rel else |_| {}
+                } else |_| {}
+            }
+        } else |_| {}
+        const body = try githubApiBody(a, spec);
+        const rel = ghrelease.parseRelease(a, body) catch |e| {
+            if (e == error.GitHubApiMessage) {
+                if (std.json.parseFromSliceLeaky(std.json.Value, a, body, .{})) |root| {
+                    if (root == .object) if (root.object.get("message")) |m| if (m == .string) {
+                        message.* = m.string;
+                    };
+                } else |_| {}
+            }
+            return e;
+        };
+        std.fs.cwd().makePath(dir) catch return rel;
+        const tmp = try std.fmt.allocPrint(a, "{s}.{x}.tmp", .{ path, std.crypto.random.int(u32) });
+        std.fs.cwd().writeFile(.{ .sub_path = tmp, .data = body }) catch return rel;
+        std.fs.cwd().rename(tmp, path) catch std.fs.cwd().deleteFile(tmp) catch {};
+        return rel;
     }
 
     /// Fetch and parse a release. `message` receives GitHub's own explanation
@@ -3047,6 +3226,71 @@ test "uninstall foo leaves foo-bar alone" {
     try tmp.dir.access("bin/foo-bar" ++ platform.exe_suffix, .{});
     try testing.expectError(error.FileNotFound, tmp.dir.access("store/foo@1.0@x86_64-linux", .{}));
     try testing.expectError(error.FileNotFound, tmp.dir.access("bin/foo" ++ platform.exe_suffix, .{}));
+}
+
+test "isReleaseOf matches only that project's release downloads" {
+    try testing.expect(Store.isReleaseOf("https://github.com/sharkdp/fd/releases/download/v10.5.0/fd.tar.gz", "sharkdp", "fd"));
+    try testing.expect(Store.isReleaseOf("https://github.com/SharkDP/FD/releases/download/v1/x", "sharkdp", "fd"));
+    try testing.expect(!Store.isReleaseOf("https://github.com/sharkdp/fd-find/releases/download/v1/x", "sharkdp", "fd"));
+    try testing.expect(!Store.isReleaseOf("https://github.com/sharkdp/fd/archive/v1.tar.gz", "sharkdp", "fd"));
+    try testing.expect(!Store.isReleaseOf("https://evil.example/sharkdp/fd/releases/download/v1/x", "sharkdp", "fd"));
+    try testing.expect(!Store.isReleaseOf("https://github.com/other/fd/releases/download/v1/x", "sharkdp", "fd"));
+}
+
+test "uninstall parks the tree; unpark brings it back; purge removes it" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var s = try testStore(&tmp);
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try tmp.dir.makePath("store/foo@1.0@x86_64-linux");
+    try tmp.dir.writeFile(.{ .sub_path = "store/foo@1.0@x86_64-linux/foo", .data = "program" });
+    const plats = [_]registry.PlatformInfo{.{ .name = "x86_64-linux" }};
+    const pkg = Package{ .name = "foo", .version = "1.0", .platforms = &plats };
+    try testing.expect(try s.uninstall(a, pkg));
+
+    // Gone from the store, kept aside with its files.
+    try testing.expectError(error.FileNotFound, tmp.dir.access("store/foo@1.0@x86_64-linux", .{}));
+    try tmp.dir.access("parked/foo@1.0@x86_64-linux/foo", .{});
+    try tmp.dir.access("parked/foo@1.0@x86_64-linux.parked", .{});
+
+    // Too young for gc's age limit.
+    try testing.expectEqual(@as(usize, 0), s.purgeParked(a, false, false).trees);
+
+    const pkg_dir = try s.pkgStorePath(a, pkg, "x86_64-linux");
+    try testing.expect(s.unpark(a, pkg_dir));
+    try tmp.dir.access("store/foo@1.0@x86_64-linux/foo", .{});
+    try testing.expectError(error.FileNotFound, tmp.dir.access("parked/foo@1.0@x86_64-linux.parked", .{}));
+    // Nothing parked: nothing to bring back, and an existing tree is never replaced.
+    try testing.expect(!s.unpark(a, pkg_dir));
+
+    try testing.expect(try s.uninstall(a, pkg));
+    const dry = s.purgeParked(a, true, true);
+    try testing.expectEqual(@as(usize, 1), dry.trees);
+    try testing.expectEqual(@as(u64, 7), dry.bytes);
+    try tmp.dir.access("parked/foo@1.0@x86_64-linux", .{});
+    try testing.expectEqual(@as(usize, 1), s.purgeParked(a, true, false).trees);
+    try testing.expectError(error.FileNotFound, tmp.dir.access("parked/foo@1.0@x86_64-linux", .{}));
+}
+
+test "with parking off, uninstall deletes the tree" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var s = try testStore(&tmp);
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    cas.config_override = .{ .park = false };
+    defer cas.config_override = null;
+
+    try tmp.dir.makePath("store/foo@1.0@x86_64-linux");
+    const plats = [_]registry.PlatformInfo{.{ .name = "x86_64-linux" }};
+    try testing.expect(try s.uninstall(a, .{ .name = "foo", .version = "1.0", .platforms = &plats }));
+    try testing.expectError(error.FileNotFound, tmp.dir.access("parked/foo@1.0@x86_64-linux", .{}));
 }
 
 test "bin conflicts are refused unless forced" {

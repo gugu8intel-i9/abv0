@@ -402,6 +402,8 @@ fetches and stores the macOS build without linking it into your `PATH`.
 | `ABV0_NO_CACHE` | `1` stops abv0 keeping and reusing verified downloads in `<root>/cache` |
 | `ABV0_CACHE_MAX` | Size cap of the download cache, such as `512M` or `4G` (default `2G`); least recently used entries go first |
 | `ABV0_NO_DEDUPE` | `1` stops abv0 hard-linking identical files between installs through `<root>/cas` |
+| `ABV0_NO_PARK` | `1` makes `uninstall` delete a package's files at once, instead of keeping them in `<root>/parked` for a quick reinstall |
+| `ABV0_GH_CACHE_MINUTES` | How long `install gh:owner/repo` reuses GitHub's answer for the latest release (default `60`; `0` always asks). `upgrade` and `outdated` always ask. |
 | `ABV0_DOWNLOADER` | `builtin`, `curl` or `auto` (the default). `builtin` never uses curl; `curl` never uses the built-in client. |
 | `ABV0_SPLIT_MIN` | Smallest download fetched over several connections at once, in bytes (`8M`, `512k` and `1G` work too). Default 8 MiB. |
 | `ABV0_CONNECTIONS` | Connections for a split download, 1 to 16. `1` turns splitting off. Unset, a download gets one connection per 4 MiB, up to 8. |
@@ -516,6 +518,14 @@ abv0 took 3.3–4.0 s for the same file and plain curl 17.5 s.
   version used equal 1 MB pieces and ran at about 30 MB/s on these runners, because every
   piece waited for the server to answer; the shrinking pieces fixed that.)
 - Verified downloads are kept in a cache, so reinstalling or rolling back needs no network.
+- **Uninstall keeps the unpacked files** in `~/.abv0/parked` (30 days, or until
+  `abv0 cleanup`), so installing the same version again is one rename and a link: no
+  download, no unpack, no scan. `ABV0_NO_PARK=1` turns this off.
+- **`gh:` installs skip GitHub when they can.** With no tag, a project the signed catalog
+  already builds comes from the catalog: no API call, and a signed checksum.
+- **GitHub answers are remembered.** `install gh:owner/repo` reuses GitHub's answer about
+  the latest release for an hour (a tagged release for a day), so a repeat install needs
+  no network at all. `upgrade` and `outdated` always ask again.
 
 ### Compared with zerobrew
 

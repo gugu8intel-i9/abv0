@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Faster
+
+- **Reinstalls in milliseconds.** `uninstall` keeps the unpacked files in
+  `~/.abv0/parked` (for 30 days, or until `abv0 cleanup`), so installing the same version
+  again is a rename and a link: no download, no unpack. Uninstalling and reinstalling
+  ripgrep, jq and bat went from about 600 ms to 35 ms. `ABV0_NO_PARK=1` turns it off.
+- **GitHub answers are remembered.** `install gh:owner/repo` reuses GitHub's release
+  answer for an hour (a tagged release for a day; `ABV0_GH_CACHE_MINUTES` changes it), so
+  a repeat install needs no network. `upgrade` and `outdated` always ask again.
+- **`gh:` installs skip GitHub when they can.** `install gh:owner/repo` with no tag, for
+  a project the signed catalog builds, installs the catalog's pinned download: no API
+  call, and a signed checksum instead of the release's own. A tag still goes to GitHub.
+- The benchmark times abv0 with one install command for all five tools, as it times
+  zerobrew and Homebrew.
+
+## Unreleased
+
 ### New
 
 - **Undo and history.** Every install, uninstall, upgrade, switch and undo is recorded.
