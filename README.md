@@ -450,51 +450,91 @@ abv0 completions pwsh | Out-String | Invoke-Expression
 
 ## Performance
 
-Measured on the development machine (2 vCPU, Linux x86_64, ReleaseFast static build).
-Reproduce with `abv0 benchmark`; the wall-clock figures below are 30-run averages of
-the whole process including spawn.
+Measured by the [Benchmark workflow](.github/workflows/bench.yml) on GitHub's hosted
+runners, on 2026-10-28, with abv0 2.7.0, Homebrew 6.0–7.0 and zerobrew 0.4.2 installing
+the same five tools (ripgrep, fd, bat, jq, fzf). Wall time in milliseconds; lower is
+better. Hosted runners are shared machines, so read these as rough sizes, not exact
+figures. Run it yourself from the Actions tab.
 
-| Command | v1.5.0 (previously shipped) | v2.0.0 | Change |
+**Installing five tools**
+
+| | Linux x86_64 | macOS arm64 | macOS x86_64 |
 | :--- | ---: | ---: | ---: |
-| `abv0 help` | 4.91 ms | **0.50 ms** | 9.8× faster |
-| `abv0 list` | 5.14 ms | **0.63 ms** | 8.2× faster |
-| `abv0 outdated` | 4.92 ms | **0.74 ms** | 6.7× faster (and it now works — see below) |
-| `abv0 install ripgrep jq` (cached) | — | **0.84 ms** | — |
-| `abv0 install ripgrep` (cold, 2.3 MB download) | — | **257–296 ms** | — |
+| abv0, cold install | **1,022** | **1,277** | **1,363** |
+| zerobrew, cold install | 2,626 | 4,510 | failed ¹ |
+| Homebrew, cold install | 42,436 | 4,225 | 4,149 |
+| abv0, warm reinstall | 567 | 763 | **881** |
+| zerobrew, warm reinstall | **62** | **434** | failed ¹ |
+| Homebrew, warm reinstall | 44,243 | 2,497 | 5,495 |
 
-Internal micro-benchmarks (`abv0 benchmark`):
+¹ zerobrew 0.4.2 could not install fzf's dependency pcre2 on Intel macOS ("unsupported
+archive format").
 
-```
-  registry lookup         100000 ops     1.119 ms       11.2 ns/op
-  index build                 13 pkgs    0.107 ms
-  index mmap load             13 pkgs    0.032 ms
-  fastLink (hard link)       500 ops     1.755 ms        3.5 us/op
-  sha256                       8 MiB     8.426 ms      949.5 MiB/s
-```
+- **Cold installs** (nothing downloaded yet): abv0 is 2.6–3.5× faster than zerobrew
+  and 3–42× faster than Homebrew.
+- **Warm reinstalls** (everything already downloaded once): zerobrew is faster. It keeps
+  every unpacked package in its store and only relinks, where abv0 unpacks again from its
+  download cache. abv0 is still 3–78× faster than Homebrew here.
 
-Where the old startup time went: `Store.init` spawned three `chmod` subprocesses on
-*every* invocation, including `abv0 help`. Permissions are now set in-process with
-`fchmod`, the registry is only loaded by commands that need it, and the shipped Linux
-binary is a stripped `ReleaseFast` static build (679 KB) rather than an unstripped
-debug build (3.5 MB).
+**Everyday commands** (mean of 20–50 runs)
 
-Other performance work in 2.0.0:
+| | abv0 | Homebrew | zerobrew |
+| :--- | ---: | ---: | ---: |
+| `--version` (Linux / macOS arm64) | **0.4 / 6.6** | 12.3 / 123.5 | 1.8 / 9.9 |
+| `search rip` | **15 / 36** | 660 / 817 | no such command |
+| `info ripgrep` | **15 / 52** | 517 / 848 | no such command |
+| `list --installed` | **0.6 / 7.9** | 10.8 / 55.3 | no such command |
 
-- **One pass over each archive.** Downloads used to be read three times (curl, then
-  SHA-256, then a "deduplicated block store" that wrote a full second copy of every
-  archive into `~/.abv0/blockstore` and never read it back). The block store is gone;
-  hashing is a single streaming pass.
-- **One directory walk per install**, not one per binary. Installing `ffmpeg`
-  (3 executables) previously ran three full recursive walks.
-- **Bounded worker pool.** Installs used to spawn one OS thread per package with no
-  limit; a 50-line Brewfile meant 50 threads fighting for bandwidth. Now
-  `min(CPUs, packages, 8)`.
-- **Buffered stdout.** Output went through unbuffered `std.debug.print` to *stderr*,
-  so `abv0 list | grep foo` printed nothing at all. Output is now buffered and on
-  stdout, with ANSI colour only when the destination is a TTY (`NO_COLOR` respected).
-- **No DOM parse of the manifest.** Loading used to build a full JSON `Value` tree and
-  then duplicate every string, keeping two copies of the registry alive and freeing
-  neither.
+**One big download** (a 415 MB model file from Hugging Face)
+
+| | Linux x86_64 | macOS arm64 | macOS x86_64 |
+| :--- | ---: | ---: | ---: |
+| abv0, default | 1,791 (232 MB/s) | 5,431 (76 MB/s) | 3,865 (107 MB/s) |
+| abv0 through curl | 1,688 (246 MB/s) | 5,923 (70 MB/s) | 3,750 (111 MB/s) |
+| plain curl, one connection | 2,148 (193 MB/s) | 3,810 (109 MB/s) | 4,286 (97 MB/s) |
+
+abv0's rows also check the SHA-256 and write the Hugging Face cache; plain curl only saves
+the file. On these well-connected runners one connection is already close to the limit,
+so splitting the download helps most on Linux. On an ordinary home connection, where one
+connection is the bottleneck, the gap is larger: in a sandbox test, abv0 took 3.3–4.0 s
+for the same file and plain curl 17.5 s.
+
+### Downloads
+
+- A big file is split over several connections (one per 4 MiB, up to 8;
+  `ABV0_CONNECTIONS` changes it) and hashed in order as the pieces land, so the file is
+  never read twice.
+- **Micro-shards** (`--micro-shards`, or `ABV0_SHARD_SIZE=on` for every download) cut the
+  file into many pieces that the connections take from a shared queue, so a fast
+  connection takes more and one slow connection cannot hold up the end. Pieces start big
+  and shrink toward the end. Use it on uneven links (Wi-Fi, a busy mirror, one stalled
+  connection). On a clean, fast link the default is as fast or faster, because every
+  piece is one more request. `--micro-shards=4M` sets the smallest piece.
+- Verified downloads are kept in a cache, so reinstalling or rolling back needs no network.
+
+### Compared with zerobrew
+
+[zerobrew](https://github.com/lucasgelfond/zerobrew) is a fast client for Homebrew's own
+packages, written in Rust. Both are much faster than Homebrew; they solve different
+problems.
+
+| | abv0 | zerobrew |
+| :--- | :--- | :--- |
+| Where packages come from | Its own signed catalog built from upstream releases, any GitHub release (`gh:`), vendors' own downloads | Homebrew's formulas and bottles |
+| Platforms | Linux, macOS, **Windows** | Linux, macOS |
+| Desktop apps | Mac apps, Windows portable apps, proprietary apps | No casks |
+| Catalog size | About 1,500 packages | Homebrew's formulas (thousands), with some unsupported |
+| Builds from source | No (prebuilt only) | Yes, as a fallback |
+| Checks | Signed catalog, SHA-256 on every download, malware scan before linking | Homebrew's bottle checksums |
+| Undo | `history`, `undo`, `rollback`, `switch`, `self-update --rollback` | None |
+| Scheduled updates | `autoupdate on` (daily, weekly, every N hours, at a time) | None |
+| AI models, books | `hf:` models and datasets, `book:` books and papers | No |
+| Cold install (5 tools, measured above) | **faster** (2.6–3.5×) | slower |
+| Warm reinstall (measured above) | slower | **faster** |
+
+Choose zerobrew if you want Homebrew's exact packages and formulas, faster. Choose abv0 if
+you want one tool across Linux, macOS and Windows that verifies everything, can undo, and
+also handles apps, models and books.
 
 ### Streaming install
 
@@ -740,7 +780,7 @@ zig-out/bin/sign-manifest verify keys/manifest.pub packages/index.json
 
 ```bash
 zig build                       # debug build
-zig build test                  # 255 test blocks across src/*.zig and tools/*.zig
+zig build test                  # 450 test blocks across src/*.zig and tools/*.zig
 zig build check                 # type-check Linux, macOS and Windows targets
 zig build release               # stripped ReleaseFast binaries for all 6 targets
 zig build sign-tool             # the sign-manifest CLI
