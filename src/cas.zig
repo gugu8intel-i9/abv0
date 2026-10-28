@@ -66,12 +66,16 @@ pub const Config = struct {
     cache: bool = true,
     /// Share identical files between installed trees.
     dedupe: bool = true,
+    /// Keep an uninstalled package's unpacked tree aside, so installing it
+    /// again is a rename instead of a download and unpack.
+    park: bool = true,
     max_bytes: u64 = default_cache_max,
 
     pub fn fromEnv() Config {
         var c = Config{};
         if (envFlag("ABV0_NO_CACHE")) c.cache = false;
         if (envFlag("ABV0_NO_DEDUPE")) c.dedupe = false;
+        if (envFlag("ABV0_NO_PARK")) c.park = false;
         var buf: [64]u8 = undefined;
         if (envText(&buf, "ABV0_CACHE_MAX")) |t| {
             if (parseSize(t)) |n| c.max_bytes = n;

@@ -171,7 +171,9 @@ jobs:
       - name: History and undo
         shell: bash
         env:
+          # Its own home and bin, so the jq an earlier step linked is not in the way.
           ABV0_HOME: ${{ runner.temp }}/undo-home
+          ABV0_BIN_DIR: ${{ runner.temp }}/undo-bin
         run: |
           set -euo pipefail
           abv0=./zig-out/bin/abv0
@@ -286,11 +288,15 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          ./zig-out/bin/abv0 --registry packages/index.json install gh:sharkdp/fd 2>&1 | tee install-fd.log
+          # A tag always goes to GitHub itself.
+          ./zig-out/bin/abv0 --registry packages/index.json install gh:sharkdp/fd@v10.5.0 2>&1 | tee install-fd.log
           grep -E '^done [0-9]+ packages in' install-fd.log
+          grep -q 'source.*gh:sharkdp/fd@v10.5.0' install-fd.log
           fd --version
+          # No tag, and the signed catalog builds fzf: no GitHub lookup.
           ./zig-out/bin/abv0 --registry packages/index.json install gh:junegunn/fzf 2>&1 | tee install-fzf.log
           grep -E '^done [0-9]+ packages in' install-fzf.log
+          grep -q 'in the signed catalog' install-fzf.log
           fzf --version
 
       - name: Tamper check (Linux)

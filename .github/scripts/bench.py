@@ -152,16 +152,15 @@ class Bench(object):
     def abv0_cold(self):
         shutil.rmtree(self.home, ignore_errors=True)
         shutil.rmtree(self.bin_dir, ignore_errors=True)
+        # One command for all five, as zerobrew and Homebrew are timed.
         return self.abv0_phase("cold", [
-            ("registry " + " ".join(self.catalog), ["install"] + self.catalog),
-            ("github " + " ".join(self.github), ["install"] + self.github),
+            ("install " + " ".join(self.catalog + self.github), ["install"] + self.catalog + self.github),
         ])
 
     def abv0_warm(self):
         return self.abv0_phase("warm", [
             ("uninstall", ["uninstall"] + ABV0_NAMES),
-            ("registry " + " ".join(self.catalog), ["install"] + self.catalog),
-            ("github " + " ".join(self.github), ["install"] + self.github),
+            ("install " + " ".join(self.catalog + self.github), ["install"] + self.catalog + self.github),
         ])
 
     def abv0_check_tools(self):

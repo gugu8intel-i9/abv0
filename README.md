@@ -402,6 +402,8 @@ fetches and stores the macOS build without linking it into your `PATH`.
 | `ABV0_NO_CACHE` | `1` stops abv0 keeping and reusing verified downloads in `<root>/cache` |
 | `ABV0_CACHE_MAX` | Size cap of the download cache, such as `512M` or `4G` (default `2G`); least recently used entries go first |
 | `ABV0_NO_DEDUPE` | `1` stops abv0 hard-linking identical files between installs through `<root>/cas` |
+| `ABV0_NO_PARK` | `1` makes `uninstall` delete a package's files at once, instead of keeping them in `<root>/parked` for a quick reinstall |
+| `ABV0_GH_CACHE_MINUTES` | How long `install gh:owner/repo` reuses GitHub's answer for the latest release (default `60`; `0` always asks). `upgrade` and `outdated` always ask. |
 | `ABV0_DOWNLOADER` | `builtin`, `curl` or `auto` (the default). `builtin` never uses curl; `curl` never uses the built-in client. |
 | `ABV0_SPLIT_MIN` | Smallest download fetched over several connections at once, in bytes (`8M`, `512k` and `1G` work too). Default 8 MiB. |
 | `ABV0_CONNECTIONS` | Connections for a split download, 1 to 16. `1` turns splitting off. Unset, a download gets one connection per 4 MiB, up to 8. |
@@ -451,53 +453,57 @@ abv0 completions pwsh | Out-String | Invoke-Expression
 ## Performance
 
 Measured by the [Benchmark workflow](.github/workflows/bench.yml) on GitHub's hosted
-runners, on 2026-10-28, with abv0 2.7.0, Homebrew 6.0–7.0 and zerobrew 0.4.2 installing
+runners, on 2026-10-28, with abv0 (this branch), Homebrew 6.0–7.0 and zerobrew 0.4.2 installing
 the same five tools (ripgrep, fd, bat, jq, fzf). Wall time in milliseconds; lower is
 better. Hosted runners are shared machines, so read these as rough sizes, not exact
 figures. Run it yourself from the Actions tab.
 
-**Installing five tools**
+**Installing five tools** (one command each)
 
 | | Linux x86_64 | macOS arm64 | macOS x86_64 |
 | :--- | ---: | ---: | ---: |
-| abv0, cold install | **1,022** | **1,277** | **1,363** |
-| zerobrew, cold install | 2,626 | 4,510 | failed ¹ |
-| Homebrew, cold install | 42,436 | 4,225 | 4,149 |
-| abv0, warm reinstall | 567 | 763 | **881** |
-| zerobrew, warm reinstall | **62** | **434** | failed ¹ |
-| Homebrew, warm reinstall | 44,243 | 2,497 | 5,495 |
+| abv0, cold install | **572** | **609** | **825** |
+| zerobrew, cold install | 3,142 | 4,558 | failed ¹ |
+| Homebrew, cold install | 42,052 | 1,745 | 4,318 |
+| abv0, warm reinstall | **52** | **62** | **99** |
+| zerobrew, warm reinstall | 56 | 291 | failed ¹ |
+| Homebrew, warm reinstall | 43,629 | 1,813 | 9,529 |
 
 ¹ zerobrew 0.4.2 could not install fzf's dependency pcre2 on Intel macOS ("unsupported
 archive format").
 
-- **Cold installs** (nothing downloaded yet): abv0 is 2.6–3.5× faster than zerobrew
-  and 3–42× faster than Homebrew.
-- **Warm reinstalls** (everything already downloaded once): zerobrew is faster. It keeps
-  every unpacked package in its store and only relinks, where abv0 unpacks again from its
-  download cache. abv0 is still 3–78× faster than Homebrew here.
+- **Cold installs** (nothing downloaded yet): abv0 is 5.5–7.5× faster than zerobrew and
+  3–74× faster than Homebrew. Tools the signed catalog builds need no GitHub API call,
+  even when asked for as `gh:owner/repo`.
+- **Warm reinstalls** (uninstall, then install again): abv0 is 1.1–4.7× faster than
+  zerobrew and 29–843× faster than Homebrew. Uninstall keeps the unpacked files aside, so
+  the reinstall is a rename and a link.
 
-**Everyday commands** (mean of 20–50 runs)
+**Everyday commands** (mean of 20–50 runs; Linux / macOS arm64)
 
 | | abv0 | Homebrew | zerobrew |
 | :--- | ---: | ---: | ---: |
-| `--version` (Linux / macOS arm64) | **0.4 / 6.6** | 12.3 / 123.5 | 1.8 / 9.9 |
-| `search rip` | **15 / 36** | 660 / 817 | no such command |
-| `info ripgrep` | **15 / 52** | 517 / 848 | no such command |
-| `list --installed` | **0.6 / 7.9** | 10.8 / 55.3 | no such command |
+| `--version` | **0.4 / 2.3** | 12.3 / 54.5 | 1.8 / 4.0 |
+| `search rip` | **15 / 28** | 654 / 401 | no such command |
+| `info ripgrep` | **15 / 30** | 511 / 325 | no such command |
+| `list --installed` | **0.6 / 2.4** | 10.8 / 14.4 | no such command |
 
-**One big download** (a 415 MB model file from Hugging Face)
+**One big download** (a 415 MB model file from Hugging Face; ms, with MB/s)
 
 | | Linux x86_64 | macOS arm64 | macOS x86_64 |
 | :--- | ---: | ---: | ---: |
-| abv0, default | 1,791 (232 MB/s) | 5,431 (76 MB/s) | 3,865 (107 MB/s) |
-| abv0 through curl | 1,688 (246 MB/s) | 5,923 (70 MB/s) | 3,750 (111 MB/s) |
-| plain curl, one connection | 2,148 (193 MB/s) | 3,810 (109 MB/s) | 4,286 (97 MB/s) |
+| abv0, default | 2,093 (198) | 4,347 (96) | 10,645 (39) |
+| abv0 `--micro-shards` | 2,354 (176) | **4,341 (96)** | 10,235 (41) |
+| abv0 `--micro-shards=4M` | 2,125 (195) | 4,991 (83) | 8,753 (47) |
+| abv0 through curl | **1,344 (309)** | 5,544 (75) | **7,405 (56)** |
+| plain curl, one connection | 3,646 (114) | 4,366 (95) | 10,754 (39) |
 
 abv0's rows also check the SHA-256 and write the Hugging Face cache; plain curl only saves
-the file. On these well-connected runners one connection is already close to the limit,
-so splitting the download helps most on Linux. On an ordinary home connection, where one
-connection is the bottleneck, the gap is larger: in a sandbox test, abv0 took 3.3–4.0 s
-for the same file and plain curl 17.5 s.
+the file. Each figure is one run on a shared machine, so differences under about 20% are
+noise: the Intel Mac's link was much slower in this run than in an earlier one. The split
+download beats a single connection most on Linux (up to 2.7×). On an ordinary home
+connection, where one connection is the bottleneck, the gap is larger: in a sandbox test,
+abv0 took 3.3–4.0 s for the same file and plain curl 17.5 s.
 
 ### Downloads
 
@@ -509,8 +515,18 @@ for the same file and plain curl 17.5 s.
   connection takes more and one slow connection cannot hold up the end. Pieces start big
   and shrink toward the end. Use it on uneven links (Wi-Fi, a busy mirror, one stalled
   connection). On a clean, fast link the default is as fast or faster, because every
-  piece is one more request. `--micro-shards=4M` sets the smallest piece.
+  piece is one more request. `--micro-shards=4M` sets the smallest piece. (A first
+  version used equal 1 MB pieces and ran at about 30 MB/s on these runners, because every
+  piece waited for the server to answer; the shrinking pieces fixed that.)
 - Verified downloads are kept in a cache, so reinstalling or rolling back needs no network.
+- **Uninstall keeps the unpacked files** in `~/.abv0/parked` (30 days, or until
+  `abv0 cleanup`), so installing the same version again is one rename and a link: no
+  download, no unpack, no scan. `ABV0_NO_PARK=1` turns this off.
+- **`gh:` installs skip GitHub when they can.** With no tag, a project the signed catalog
+  already builds comes from the catalog: no API call, and a signed checksum.
+- **GitHub answers are remembered.** `install gh:owner/repo` reuses GitHub's answer about
+  the latest release for an hour (a tagged release for a day), so a repeat install needs
+  no network at all. `upgrade` and `outdated` always ask again.
 
 ### Compared with zerobrew
 
@@ -529,8 +545,8 @@ problems.
 | Undo | `history`, `undo`, `rollback`, `switch`, `self-update --rollback` | None |
 | Scheduled updates | `autoupdate on` (daily, weekly, every N hours, at a time) | None |
 | AI models, books | `hf:` models and datasets, `book:` books and papers | No |
-| Cold install (5 tools, measured above) | **faster** (2.6–3.5×) | slower |
-| Warm reinstall (measured above) | slower | **faster** |
+| Cold install (5 tools, measured above) | **5.5–7.5× faster** | |
+| Warm reinstall (measured above) | **1.1–4.7× faster** | |
 
 Choose zerobrew if you want Homebrew's exact packages and formulas, faster. Choose abv0 if
 you want one tool across Linux, macOS and Windows that verifies everything, can undo, and
