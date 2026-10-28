@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.8.0 (2026-10-28)
 
 ### Faster
 
@@ -15,9 +15,8 @@
   a project the signed catalog builds, installs the catalog's pinned download: no API
   call, and a signed checksum instead of the release's own. A tag still goes to GitHub.
 - The benchmark times abv0 with one install command for all five tools, as it times
-  zerobrew and Homebrew.
-
-## Unreleased
+  zerobrew and Homebrew. Measured on GitHub's runners, installing five tools cold is
+  5.5–7.5× faster than zerobrew, and an uninstall plus reinstall 1.1–4.7× faster.
 
 ### New
 
@@ -29,15 +28,22 @@
 - **Choose when upkeep runs.** `abv0 autoupdate on` takes `--weekly --day mon`,
   `--every 6h`, `--hourly` and `--at 09:30`, on launchd, systemd, cron and Task Scheduler
   alike. `abv0 autoupdate status` shows when it runs.
-- **Micro-sharded downloads.** `--micro-shards` (or `ABV0_SHARD_SIZE=1M`) cuts a big
-  file into many small pieces that the connections take from a shared queue, so a fast
-  connection takes more and one slow connection no longer holds up the end.
-  `--micro-shards=4M` sets the piece size. The SHA-256 is still computed in order as the
-  pieces land.
+- **Micro-sharded downloads.** `--micro-shards` (or `ABV0_SHARD_SIZE=on`) cuts a big
+  file into pieces that the connections take from a shared queue, so a fast connection
+  takes more and one slow connection no longer holds up the end. Pieces start big and
+  shrink toward the end; `--micro-shards=4M` sets the smallest. The SHA-256 is still
+  computed in order as the pieces land. Off by default: on a fast, clean link the
+  default split is as fast.
 - **Benchmarks against zerobrew.** The benchmark workflow now times zerobrew next to
   Homebrew, and one 415 MB download with each download mode.
 - **Roll abv0 itself back.** `self-update` keeps the abv0 it replaces, and
   `abv0 self-update --rollback` returns to it.
+
+### Fixed
+
+- Hugging Face downloads could save files under the wrong name or fail with "file not
+  found" (seen on Windows and macOS): the parallel download threads shared memory that
+  is not safe to share. They now use a thread-safe allocator.
 
 ## 2.7.0 (2026-10-28)
 
