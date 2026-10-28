@@ -20,6 +20,7 @@ const sign = @import("sign.zig");
 const cmds_extra = @import("cmds_extra.zig");
 const books = @import("books.zig");
 const hf = @import("hf.zig");
+const history = @import("history.zig");
 const ghrelease = @import("ghrelease.zig");
 const ghverify = @import("ghverify.zig");
 
@@ -232,8 +233,8 @@ fn parseArgsDiag(allocator: std.mem.Allocator, argv: []const []const u8, diag: *
             if (i >= argv.len) return failArg(diag, arg, "", error.MissingOptionValue);
             args.jobs = std.fmt.parseInt(usize, argv[i], 10) catch
                 return failArg(diag, arg, argv[i], error.InvalidNumber);
-        } else if (std.mem.eql(u8, arg, "--daily") or std.mem.eql(u8, arg, "--weekly")) {
-            // `autoupdate on` reads these from the rest.
+        } else if (std.mem.eql(u8, arg, "--daily") or std.mem.eql(u8, arg, "--weekly") or std.mem.eql(u8, arg, "--rollback")) {
+            // `autoupdate on` and `self-update` read these from the rest.
             try args.rest.append(arg);
         } else if (std.mem.eql(u8, arg, "--token")) {
             // `hf login` reads it from the rest.
@@ -516,6 +517,18 @@ const commands = [_]Command{
         .example = "abv0 switch jq 1.6",
     },
     .{
+        .name = "history",
+        .args = "[--all]",
+        .summary = "Every change to what is installed, newest first: the command, and which packages were added, removed or switched. Kept in the abv0 folder (the newest 200).",
+        .example = "abv0 history",
+    },
+    .{
+        .name = "undo",
+        .args = "[<#>]",
+        .summary = "Put back what one change did (the newest when no number is given): switch back to the old version when it is still on disk, remove what was added, and install again what was removed. The undo is recorded too, so undoing it redoes.",
+        .example = "abv0 undo",
+    },
+    .{
         .name = "rollback",
         .args = "<pkg>",
         .summary = "Switch to the version installed just before the active one. `upgrade` keeps that previous version for this; `cleanup` removes it.",
@@ -667,8 +680,8 @@ const commands = [_]Command{
     },
     .{
         .name = "self-update",
-        .summary = "Update abv0 itself from a signed release.",
-        .flags = &.{.{ .name = "--check", .help = "Only report whether an update exists" }},
+        .summary = "Update abv0 itself from a signed release. The abv0 it replaces is kept, and --rollback returns to it (run it again to go forward).",
+        .flags = &.{ .{ .name = "--check", .help = "Only report whether an update exists" }, .{ .name = "--rollback", .help = "Go back to the abv0 the last update replaced" } },
         .example = "abv0 self-update --check",
     },
     .{
@@ -743,6 +756,8 @@ fn renderUsage(w: anytype) !void {
         \\  leaves                  List installed packages nothing else depends on
         \\  switch <pkg> <version>  Make an installed version the active one
         \\  rollback <pkg>          Go back to the previously installed version
+        \\  history                 Every change to what is installed, newest first
+        \\  undo [<#>]              Undo the last change (or change #), all packages at once
         \\  home [--open] <pkg>     Print (or open) a package's homepage
         \\  pin <pkg>               Hold a package at its installed version
         \\  unpin <pkg>             Let upgrade update it again
@@ -776,7 +791,7 @@ fn renderUsage(w: anytype) !void {
         \\  completions <shell>     Print a bash, zsh, fish or pwsh completion script
         \\  maintain                Refresh, upgrade, fix dependencies and clean up in one go
         \\  autoupdate on|off|status  Run `maintain` daily (or --weekly) via the system scheduler
-        \\  self-update [--check]   Update abv0 from a signed release
+        \\  self-update [--check]   Update abv0 from a signed release (--rollback goes back)
         \\  reset                   Uninstall everything
         \\  report [--bug]          Open a prefilled GitHub issue
         \\  version                 Print the version
@@ -2066,6 +2081,13 @@ fn run(base: std.mem.Allocator, a: std.mem.Allocator) !u8 {
         const extra: []const []const u8 = if (args.check) &.{"--check"} else &.{};
         return cmds_extra.cmdSelfUpdate(a, &st, version, if (args.rest.items.len > 0) args.rest.items else extra);
     }
+    if (std.mem.eql(u8, cmd, "history")) {
+        if (args.rest.items.len != 0) {
+            term.err("usage: abv0 history [--all]\n", .{});
+            return 2;
+        }
+        return history.cmdHistory(a, &st, args.all);
+    }
     if (std.mem.eql(u8, cmd, "list") and args.installed) {
         return writeInstalled(term.writer(), a, &st, platform_name, args.json);
     }
@@ -2090,51 +2112,97 @@ fn run(base: std.mem.Allocator, a: std.mem.Allocator) !u8 {
         try loadRegistry(base, &st, args.allow_unsigned_manifest);
     defer reg.deinit();
 
-    if (std.mem.eql(u8, cmd, "maintain")) return cmdMaintain(a, &st, &reg, &args, platform_name, opts);
+    // What is installed before and after, so the change can be undone.
+    var hist_arena = std.heap.ArenaAllocator.init(base);
+    defer hist_arena.deinit();
+    const before: ?[]const history.Item = if (recordsHistory(cmd) and !output.dry_run)
+        history.snapshot(hist_arena.allocator(), &st, platform_name) catch null
+    else
+        null;
+    const rc = runWithRegistry(a, &st, &reg, &args, platform_name, opts, &timer, cmd) catch |e| {
+        if (before) |b| recordHistory(hist_arena.allocator(), &st, rest_argv, b, platform_name);
+        return e;
+    };
+    if (before) |b| recordHistory(hist_arena.allocator(), &st, rest_argv, b, platform_name);
+    return rc;
+}
 
-    if (std.mem.eql(u8, cmd, "pin")) return cmds_extra.cmdPin(a, &st, &reg, args.rest.items);
-    if (std.mem.eql(u8, cmd, "list")) return cmdList(&reg, args.json);
-    if (std.mem.eql(u8, cmd, "search")) return cmdSearch(a, &reg, args.rest.items, args.json, args.online);
-    if (std.mem.eql(u8, cmd, "info")) return cmdInfo(a, &st, &reg, args.rest.items, args.json, platform_name);
-    if (std.mem.eql(u8, cmd, "deps")) return cmdDeps(a, &reg, &args);
-    if (std.mem.eql(u8, cmd, "uses")) return cmdUses(a, &st, &reg, &args, platform_name);
-    if (std.mem.eql(u8, cmd, "leaves")) return cmdLeaves(a, &st, &reg, &args, platform_name);
-    if (std.mem.eql(u8, cmd, "switch")) return cmdSwitch(a, &st, &reg, &args, platform_name, opts);
-    if (std.mem.eql(u8, cmd, "rollback")) return cmdSwitch(a, &st, &reg, &args, platform_name, opts);
-    if (std.mem.eql(u8, cmd, "home")) return cmdHome(a, &st, &reg, &args, platform_name);
-    if (std.mem.eql(u8, cmd, "migrate")) return cmdMigrate(a, &st, &reg, &args, platform_name, opts, &timer);
-    if (std.mem.eql(u8, cmd, "install")) return cmdInstall(a, &st, &reg, &args, platform_name, opts, &timer);
-    if (std.mem.eql(u8, cmd, "browse")) return cmdBrowse(a, &st, &reg, &args, platform_name, opts, &timer);
-    if (std.mem.eql(u8, cmd, "uninstall")) return cmdUninstall(a, &st, &reg, args.rest.items, platform_name);
-    if (std.mem.eql(u8, cmd, "outdated")) return cmdOutdated(a, &st, &reg, platform_name, args.json);
-    if (std.mem.eql(u8, cmd, "upgrade")) return cmdUpgrade(a, &st, &reg, args.rest.items, args.all, platform_name, opts, args.jobs);
-    if (std.mem.eql(u8, cmd, "run")) return cmdRun(a, &st, &reg, args.rest.items, platform_name, opts);
-    if (std.mem.eql(u8, cmd, "shell")) return cmdShell(a, &st, &reg, args.rest.items, platform_name, opts);
-    if (std.mem.eql(u8, cmd, "bundle")) return cmdBundle(a, &st, &reg, &args, platform_name, opts);
+/// Commands whose changes to what is installed go in the history.
+fn recordsHistory(cmd: []const u8) bool {
+    const names = [_][]const u8{ "install", "uninstall", "upgrade", "switch", "rollback", "undo", "migrate", "bundle", "fix", "reset", "maintain", "browse" };
+    for (names) |name| {
+        if (std.mem.eql(u8, cmd, name)) return true;
+    }
+    return false;
+}
+
+fn recordHistory(a: std.mem.Allocator, st: *const store.Store, argv: []const []const u8, before: []const history.Item, platform_name: []const u8) void {
+    const after = history.snapshot(a, st, platform_name) catch return;
+    const changes = history.diff(a, before, after) catch return;
+    const command = std.mem.join(a, " ", argv) catch return;
+    _ = history.record(a, st, command, changes) catch |e| {
+        term.err("{s}warning{s}: could not record this change in the history ({s})\n", .{ term.yellow, term.reset, @errorName(e) });
+    };
+}
+
+/// The commands that read the registry. `run` wraps them so a change to what
+/// is installed lands in the history.
+fn runWithRegistry(
+    a: std.mem.Allocator,
+    st: *store.Store,
+    reg: *registry.Registry,
+    args: *Args,
+    platform_name: []const u8,
+    opts: store.InstallOptions,
+    timer: *std.time.Timer,
+    cmd: []const u8,
+) !u8 {
+    if (std.mem.eql(u8, cmd, "maintain")) return cmdMaintain(a, st, reg, args, platform_name, opts);
+
+    if (std.mem.eql(u8, cmd, "pin")) return cmds_extra.cmdPin(a, st, reg, args.rest.items);
+    if (std.mem.eql(u8, cmd, "list")) return cmdList(reg, args.json);
+    if (std.mem.eql(u8, cmd, "search")) return cmdSearch(a, reg, args.rest.items, args.json, args.online);
+    if (std.mem.eql(u8, cmd, "info")) return cmdInfo(a, st, reg, args.rest.items, args.json, platform_name);
+    if (std.mem.eql(u8, cmd, "deps")) return cmdDeps(a, reg, args);
+    if (std.mem.eql(u8, cmd, "uses")) return cmdUses(a, st, reg, args, platform_name);
+    if (std.mem.eql(u8, cmd, "leaves")) return cmdLeaves(a, st, reg, args, platform_name);
+    if (std.mem.eql(u8, cmd, "switch")) return cmdSwitch(a, st, reg, args, platform_name, opts);
+    if (std.mem.eql(u8, cmd, "rollback")) return cmdSwitch(a, st, reg, args, platform_name, opts);
+    if (std.mem.eql(u8, cmd, "undo")) return cmdUndo(a, st, reg, args, platform_name, opts, timer);
+    if (std.mem.eql(u8, cmd, "home")) return cmdHome(a, st, reg, args, platform_name);
+    if (std.mem.eql(u8, cmd, "migrate")) return cmdMigrate(a, st, reg, args, platform_name, opts, timer);
+    if (std.mem.eql(u8, cmd, "install")) return cmdInstall(a, st, reg, args, platform_name, opts, timer);
+    if (std.mem.eql(u8, cmd, "browse")) return cmdBrowse(a, st, reg, args, platform_name, opts, timer);
+    if (std.mem.eql(u8, cmd, "uninstall")) return cmdUninstall(a, st, reg, args.rest.items, platform_name);
+    if (std.mem.eql(u8, cmd, "outdated")) return cmdOutdated(a, st, reg, platform_name, args.json);
+    if (std.mem.eql(u8, cmd, "upgrade")) return cmdUpgrade(a, st, reg, args.rest.items, args.all, platform_name, opts, args.jobs);
+    if (std.mem.eql(u8, cmd, "run")) return cmdRun(a, st, reg, args.rest.items, platform_name, opts);
+    if (std.mem.eql(u8, cmd, "shell")) return cmdShell(a, st, reg, args.rest.items, platform_name, opts);
+    if (std.mem.eql(u8, cmd, "bundle")) return cmdBundle(a, st, reg, args, platform_name, opts);
     if (std.mem.eql(u8, cmd, "doctor")) {
-        if (args.json) return cmdDoctorJson(a, &st, &reg, platform_name);
-        const h = try st.doctor(a, &reg, platform_name);
+        if (args.json) return cmdDoctorJson(a, st, reg, platform_name);
+        const h = try st.doctor(a, reg, platform_name);
         term.print("\n{d} warnings, {d} broken links ({d:.2}ms)\n", .{ h.warnings, h.broken_links, ms(timer.read()) });
         return if (h.warnings + h.broken_links == 0) 0 else 1;
     }
     if (std.mem.eql(u8, cmd, "fix")) {
-        const n = try st.fix(a, &reg, platform_name);
-        const deps = try installMissingDeps(a, &st, &reg, platform_name, opts, args.jobs);
+        const n = try st.fix(a, reg, platform_name);
+        const deps = try installMissingDeps(a, st, reg, platform_name, opts, args.jobs);
         say("repaired {d} packages and installed {d} missing dependencies in {d:.2}ms\n", .{ n, deps.installed, ms(timer.read()) });
         return if (deps.failed == 0) 0 else 1;
     }
-    if (std.mem.eql(u8, cmd, "detect")) return cmdDetect(a, &st, &reg, args.rest.items, platform_name);
+    if (std.mem.eql(u8, cmd, "detect")) return cmdDetect(a, st, reg, args.rest.items, platform_name);
     if (std.mem.eql(u8, cmd, "reset")) {
-        const n = try st.resetAll(a, &reg, platform_name);
+        const n = try st.resetAll(a, reg, platform_name);
         say("uninstalled {d} packages; store reset\n", .{n});
         return 0;
     }
     if (std.mem.eql(u8, cmd, "sync") or std.mem.eql(u8, cmd, "hybrid-sync")) {
-        try st.exportRegistry(a, &reg);
+        try st.exportRegistry(a, reg);
         say("\nsynchronised in {d:.2}ms\n", .{ms(timer.read())});
         return 0;
     }
-    if (std.mem.eql(u8, cmd, "benchmark")) return cmdBenchmark(a, &st, &reg, platform_name);
+    if (std.mem.eql(u8, cmd, "benchmark")) return cmdBenchmark(a, st, reg, platform_name);
 
     reportUnknownCommand(cmd);
     return 2;
@@ -2581,6 +2649,94 @@ fn cmdSwitch(
         say("  `abv0 upgrade` would replace it; `abv0 pin {}` holds it here\n", .{safe(name)});
     }
     return 0;
+}
+
+/// `undo [<#>]`: put back what one history entry changed (the newest when no
+/// number is given). A version still in the store is switched to with no
+/// download; a removed package is installed again (a GitHub one at the same
+/// release). The undo is itself recorded, so undoing it again redoes.
+fn cmdUndo(
+    a: std.mem.Allocator,
+    st: *store.Store,
+    reg: *const registry.Registry,
+    args: *Args,
+    platform_name: []const u8,
+    opts: store.InstallOptions,
+    timer: *std.time.Timer,
+) !u8 {
+    const rest = args.rest.items;
+    if (rest.len > 1) {
+        term.err("usage: abv0 undo [<#>]   (numbers come from `abv0 history`)\n", .{});
+        return 2;
+    }
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const aa = arena.allocator();
+    const entries = try history.load(aa, st);
+    if (entries.len == 0) {
+        term.err("nothing to undo: no changes are recorded yet\n", .{});
+        return 1;
+    }
+    const entry = if (rest.len == 0) entries[entries.len - 1] else blk: {
+        const text = std.mem.trimLeft(u8, rest[0], "#");
+        const id = std.fmt.parseInt(u64, text, 10) catch {
+            term.err("{s}error{s}: '{}' is not a history number (see `abv0 history`)\n", .{ term.red, term.reset, safe(rest[0]) });
+            return 2;
+        };
+        for (entries) |e| if (e.id == id) break :blk e;
+        term.err("{s}error{s}: there is no history entry #{d}\n", .{ term.red, term.reset, id });
+        return 1;
+    };
+    say("undoing #{d} (abv0 {})\n", .{ entry.id, safe(entry.command) });
+
+    var failed: u8 = 0;
+    for (entry.changes) |c| {
+        const rc = undoOne(aa, st, reg, c, platform_name, opts, timer) catch |e| blk: {
+            term.err("{s}error{s}: {}: {s}\n", .{ term.red, term.reset, safe(c.name), @errorName(e) });
+            break :blk 1;
+        };
+        if (rc != 0) failed = 1;
+    }
+    if (failed != 0) term.err("some changes could not be undone; `abv0 history` shows what is recorded\n", .{});
+    return failed;
+}
+
+fn undoOne(
+    a: std.mem.Allocator,
+    st: *store.Store,
+    reg: *const registry.Registry,
+    c: history.Change,
+    platform_name: []const u8,
+    opts: store.InstallOptions,
+    timer: *std.time.Timer,
+) !u8 {
+    // It was added: take it out again.
+    const want = c.from orelse return cmdUninstall(a, st, reg, &.{c.name}, platform_name);
+
+    const rows = try cmds_extra.listVersions(a, st, c.name, platform_name);
+    if (cmds_extra.findVersion(rows, want)) |i| {
+        if (cmds_extra.activeIndex(rows)) |cur| if (cur == i) return 0;
+        // Still on disk: relink it, nothing is downloaded.
+        var sargs = try parseArgs(a, &.{ "switch", c.name, want });
+        defer sargs.deinit();
+        return cmdSwitch(a, st, reg, &sargs, platform_name, opts);
+    }
+    // Gone from the store: install it again.
+    if (c.from_gh) |spec| {
+        var iargs = try parseArgs(a, &.{ "install", spec });
+        defer iargs.deinit();
+        return cmdInstall(a, st, reg, &iargs, platform_name, opts, timer);
+    }
+    const pkg = store.Store.resolveRequest(reg, c.name) orelse {
+        term.err("{s}error{s}: {} is no longer in the catalog, so {} cannot be installed again\n", .{ term.red, term.reset, safe(c.name), safe(want) });
+        return 1;
+    };
+    if (!std.mem.eql(u8, pkg.version, want)) {
+        term.err("{s}note{s}: {} {} is no longer on disk and the catalog now has {}; installing that\n", .{ term.yellow, term.reset, safe(c.name), safe(want), safe(pkg.version) });
+    }
+    var iargs = try parseArgs(a, &.{ "install", c.name });
+    defer iargs.deinit();
+    return cmdInstall(a, st, reg, &iargs, platform_name, opts, timer);
 }
 
 fn writeSwitchJson(w: anytype, name: []const u8, from: ?[]const u8, to: []const u8) !void {
@@ -4597,6 +4753,7 @@ comptime {
     _ = @import("cmds_extra.zig");
     _ = @import("books.zig");
     _ = @import("hf.zig");
+    _ = @import("history.zig");
     _ = @import("stream.zig");
     _ = @import("http.zig");
     _ = @import("ghrelease.zig");

@@ -259,6 +259,23 @@ abv0 uninstall book:gutenberg/1342
   archive lists. Every file must really be the format asked for, so an error page
   or a swapped file is never kept.
 
+### Undo and rollback
+
+```sh
+abv0 history              # every change to what is installed, newest first
+abv0 undo                 # undo the last change (all packages it touched)
+abv0 undo 12              # undo change #12 from the history
+abv0 rollback jq          # one package back to its previous version
+abv0 switch jq 1.7.1      # one package to any version still on disk
+abv0 self-update --rollback   # abv0 itself back to the version before the last update
+```
+
+- Every install, uninstall, upgrade, switch and undo is recorded in the history.
+- `undo` switches back to the old version when it is still on disk, with no download;
+  `upgrade` keeps the version it replaces for this. A removed package is installed
+  again (from the download cache when it is there; a GitHub one at the same release).
+- An undo is recorded too, so undoing it again redoes the change.
+
 ### Moving from Homebrew
 
 ```sh

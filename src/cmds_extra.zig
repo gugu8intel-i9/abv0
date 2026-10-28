@@ -438,7 +438,7 @@ pub fn cmdCleanup(
 // Shell completions
 // ---------------------------------------------------------------------------
 
-const commands_list = "help version list search info install uninstall outdated upgrade run shell bundle doctor fix detect reset sync update gc report benchmark pin unpin pinned cleanup completions which self-update deps uses leaves switch rollback home migrate";
+const commands_list = "help version list search info install uninstall outdated upgrade run shell bundle doctor fix detect reset sync update gc report benchmark pin unpin pinned cleanup completions which self-update deps uses leaves switch rollback history undo home migrate";
 
 /// Commands whose argument is a package name.
 const name_commands_space = "info install uninstall upgrade run shell pin unpin deps uses switch rollback home";
@@ -724,13 +724,15 @@ pub fn cmdSelfUpdate(
     current_version: []const u8,
     args: []const []const u8,
 ) !u8 {
-    _ = st;
     var check_only = false;
+    var rollback = false;
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "--check")) {
             check_only = true;
+        } else if (std.mem.eql(u8, arg, "--rollback")) {
+            rollback = true;
         } else {
-            term.err("usage: abv0 self-update [--check]\n", .{});
+            term.err("usage: abv0 self-update [--check | --rollback]\n", .{});
             return 2;
         }
     }
@@ -738,6 +740,7 @@ pub fn cmdSelfUpdate(
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const aa = arena.allocator();
+    if (rollback) return selfRollback(aa, st, current_version);
 
     const asset = assetName(builtin.os.tag, builtin.cpu.arch) orelse {
         term.err("{s}error{s}: no abv0 release is published for this platform\n", .{ term.red, term.reset });
@@ -843,31 +846,99 @@ pub fn cmdSelfUpdate(
         return 1;
     }
 
-    // 5. Swap it in. Unix can rename over a running executable. Windows cannot,
-    //    so the running one is moved aside first and put back on failure.
+    // 5. Keep the running binary, so `self-update --rollback` can return to it.
+    const kept = keepPrevious(aa, st, exe_path);
+    if (!swapExe(aa, exe_path, tmp_path)) return 1;
+
+    term.print("{s}updated{s} to {s} {s} (sha256 {s})\n", .{ term.green, term.reset, asset, new_version, expected });
+    if (kept) term.print("  the previous abv0 {s} is kept: `abv0 self-update --rollback` returns to it\n", .{current_version});
+    return 0;
+}
+
+fn previousExePath(a: std.mem.Allocator, st: *const store.Store) ![]u8 {
+    return std.fs.path.join(a, &.{ st.root, "self", if (platform.is_windows) "abv0-previous.exe" else "abv0-previous" });
+}
+
+/// Copy the running binary to the abv0 folder. A failure only means no
+/// rollback later, so it is reported and the update goes on.
+fn keepPrevious(a: std.mem.Allocator, st: *const store.Store, exe_path: []const u8) bool {
+    const dest = previousExePath(a, st) catch return false;
+    if (std.fs.path.dirname(dest)) |d| std.fs.cwd().makePath(d) catch return false;
+    std.fs.cwd().copyFile(exe_path, std.fs.cwd(), dest, .{}) catch |e| {
+        term.err("{s}warning{s}: could not keep the current abv0 for rollback ({s})\n", .{ term.yellow, term.reset, @errorName(e) });
+        return false;
+    };
+    platform.chmodPath(dest, platform.mode_bin);
+    return true;
+}
+
+/// Put `tmp_path` where the running binary is. Unix can rename over a running
+/// executable. Windows cannot, so the running one is moved aside first and
+/// put back on failure. `tmp_path` is gone afterwards either way.
+fn swapExe(a: std.mem.Allocator, exe_path: []const u8, tmp_path: []const u8) bool {
     if (platform.is_windows) {
-        const old_path = try std.fmt.allocPrint(aa, "{s}.old", .{exe_path});
+        const old_path = std.fmt.allocPrint(a, "{s}.old", .{exe_path}) catch return false;
         std.fs.cwd().deleteFile(old_path) catch {};
         std.fs.cwd().rename(exe_path, old_path) catch |e| {
             std.fs.cwd().deleteFile(tmp_path) catch {};
             term.err("{s}error{s}: cannot move the running binary aside ({s})\n", .{ term.red, term.reset, @errorName(e) });
-            return 1;
+            return false;
         };
         std.fs.cwd().rename(tmp_path, exe_path) catch |e| {
             std.fs.cwd().rename(old_path, exe_path) catch {};
             std.fs.cwd().deleteFile(tmp_path) catch {};
             term.err("{s}error{s}: cannot install the new binary ({s}); restored the old one\n", .{ term.red, term.reset, @errorName(e) });
-            return 1;
+            return false;
         };
     } else {
         std.fs.cwd().rename(tmp_path, exe_path) catch |e| {
             std.fs.cwd().deleteFile(tmp_path) catch {};
             term.err("{s}error{s}: cannot replace {s} ({s})\n", .{ term.red, term.reset, exe_path, @errorName(e) });
-            return 1;
+            return false;
         };
     }
+    return true;
+}
 
-    term.print("{s}updated{s} to {s} (sha256 {s})\n", .{ term.green, term.reset, asset, expected });
+/// `self-update --rollback`: go back to the abv0 the last self-update
+/// replaced. The two swap places, so running it again goes forward.
+fn selfRollback(aa: std.mem.Allocator, st: *const store.Store, current_version: []const u8) !u8 {
+    const saved = try previousExePath(aa, st);
+    std.fs.cwd().access(saved, .{}) catch {
+        term.err("{s}error{s}: no earlier abv0 is kept; `self-update` keeps the one it replaces from now on\n", .{ term.red, term.reset });
+        return 1;
+    };
+    const exe_path = std.fs.selfExePathAlloc(aa) catch |e| {
+        term.err("{s}error{s}: cannot locate the running binary ({s})\n", .{ term.red, term.reset, @errorName(e) });
+        return 1;
+    };
+    const exe_dir = std.fs.path.dirname(exe_path) orelse return 1;
+    var rand_buf: [8]u8 = undefined;
+    std.crypto.random.bytes(&rand_buf);
+    const tmp_path = try std.fs.path.join(aa, &.{ exe_dir, try std.fmt.allocPrint(aa, "abv0-rollback-{s}.tmp", .{std.fmt.bytesToHex(rand_buf, .lower)}) });
+    // Next to the running binary, so the swap is one rename on one filesystem.
+    std.fs.cwd().copyFile(saved, std.fs.cwd(), tmp_path, .{}) catch |e| {
+        term.err("{s}error{s}: cannot copy the kept abv0 ({s})\n", .{ term.red, term.reset, @errorName(e) });
+        return 1;
+    };
+    platform.chmodPath(tmp_path, platform.mode_bin);
+    const sanity = std.process.Child.run(.{ .allocator = aa, .argv = &.{ tmp_path, "--version" }, .max_output_bytes = 64 * 1024 }) catch null;
+    const old_version = if (sanity) |r| (if (r.term == .Exited and r.term.Exited == 0) versionFromOutput(r.stdout) else null) else null;
+    if (old_version == null) {
+        std.fs.cwd().deleteFile(tmp_path) catch {};
+        term.err("{s}error{s}: the kept abv0 does not run; nothing was changed\n", .{ term.red, term.reset });
+        return 1;
+    }
+    // The current one becomes the kept one, so a second rollback goes forward.
+    const swap_back = try std.fmt.allocPrint(aa, "{s}.{s}.tmp", .{ saved, std.fmt.bytesToHex(rand_buf, .lower) });
+    std.fs.cwd().copyFile(exe_path, std.fs.cwd(), swap_back, .{}) catch {};
+    if (!swapExe(aa, exe_path, tmp_path)) {
+        std.fs.cwd().deleteFile(swap_back) catch {};
+        return 1;
+    }
+    std.fs.cwd().rename(swap_back, saved) catch {};
+    term.print("{s}rolled back{s} abv0 {s} -> {s}\n", .{ term.green, term.reset, current_version, old_version.? });
+    term.print("  `abv0 self-update` goes forward again ({s} is kept)\n", .{current_version});
     return 0;
 }
 

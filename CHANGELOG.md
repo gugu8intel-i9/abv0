@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### New
+
+- **Undo and history.** Every install, uninstall, upgrade, switch and undo is recorded.
+  `abv0 history` lists the changes; `abv0 undo` reverses the newest (or `abv0 undo <#>`
+  one of them) for every package it touched: switching back to a version still on disk
+  with no download, removing what was added, and installing again what was removed.
+  Undoing an undo redoes it.
+- **Roll abv0 itself back.** `self-update` keeps the abv0 it replaces, and
+  `abv0 self-update --rollback` returns to it.
+
 ## 2.7.0 (2026-10-28)
 
 ### New
