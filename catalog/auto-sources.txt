@@ -3215,7 +3215,7 @@ hydrogen hydrogen-music/hydrogen
 proxy-scraper-checker monosans/proxy-scraper-checker
 bed itchyny/bed
 ncine nCine/nCine
-runwasi containerd/runwasi
+containerd-runwasi containerd/runwasi
 dsperse inference-labs-inc/dsperse
 noita_entangled_worlds IntQuant/noita_entangled_worlds
 gitmal antonmedv/gitmal
