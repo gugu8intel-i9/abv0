@@ -3680,7 +3680,7 @@ primesieve kimwalisch/primesieve
 windows-machine-learning microsoft/Windows-Machine-Learning
 carlaair louiszengCN/CarlaAir
 obot obot-platform/obot
-cluster-operator rabbitmq/cluster-operator
+rabbitmq-cluster-operator rabbitmq/cluster-operator
 ravencoin RavenProject/Ravencoin
 aliyun-cli aliyun/aliyun-cli
 lab zaquestion/lab
@@ -3815,7 +3815,7 @@ wings pterodactyl/wings
 slack qiwentaidi/Slack
 potplayer_chatgpt_translate Felix3322/PotPlayer_ChatGPT_Translate
 winpmem Velocidex/WinPmem
-tlrc tldr-pages/tlrc
+tldr-pages-tlrc tldr-pages/tlrc
 utox uTox/uTox
 goxlr-utility GoXLR-on-Linux/goxlr-utility
 zjstatus dj95/zjstatus
