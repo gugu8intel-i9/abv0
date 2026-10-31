@@ -4045,7 +4045,7 @@ go-chromecast vishen/go-chromecast
 flux-panel bqlpfy/flux-panel
 avbroot chenxiaolong/avbroot
 system-upgrade-controller rancher/system-upgrade-controller
-pxe ventoy/PXE
+ventoy-pxe ventoy/PXE
 azurehound SpecterOps/AzureHound
 cutelyst cutelyst/cutelyst
 oq plutov/oq
@@ -4192,7 +4192,7 @@ xcp tarka/xcp
 yorkie yorkie-team/yorkie
 xray-checker kutovoys/xray-checker
 zenity ncruces/zenity
-scopehal-apps ngscopeclient/scopehal-apps
+ngscopeclient-scopehal-apps ngscopeclient/scopehal-apps
 tuna univrsal/tuna
 cargo-lambda cargo-lambda/cargo-lambda
 idevice_pair jkcoxson/idevice_pair
@@ -4472,7 +4472,7 @@ appsandbox jamesstringer90/appsandbox
 skulls merge/skulls
 arrowdl setvisible/ArrowDL
 andromeda tryandromeda/andromeda
-speedtest-cli librespeed/speedtest-cli
+librespeed-speedtest-cli librespeed/speedtest-cli
 layotto mosn/layotto
 opendev opendev-to/opendev
 gale Kesomannen/gale
