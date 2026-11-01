@@ -4810,7 +4810,7 @@ coi coipond/coi
 convoc2 cxnturi0n/convoC2
 purple erickochen/purple
 ioio ytai/ioio
-qcefview CefView/QCefView
+cefview-qcefview CefView/QCefView
 pvetui devnullvoid/pvetui
 rindexer joshstevens19/rindexer
 sdl_ttf libsdl-org/SDL_ttf
@@ -4911,7 +4911,7 @@ candle-vllm EricLBuehler/candle-vllm
 xdg-desktop-portal-wlr emersion/xdg-desktop-portal-wlr
 taproom hzqtc/taproom
 maelstrom maelstrom-software/maelstrom
-qaul.net qaul/qaul.net
+qaul-qaul.net qaul/qaul.net
 ark ArkScript-lang/Ark
 voronoi JCash/voronoi
 cheburcheck LowderPlay/cheburcheck
