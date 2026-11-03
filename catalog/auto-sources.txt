@@ -5732,7 +5732,7 @@ zonedeck IvanHanloth/ZoneDeck
 smartcat efugier/smartcat
 ponyos klange/ponyos
 mummer mummer4/mummer
-pulumi-aws pulumi/pulumi-aws
+pulumi-pulumi-aws pulumi/pulumi-aws
 sif vmfunc/sif
 bex bex-co/bex
 wgo bokwoon95/wgo
