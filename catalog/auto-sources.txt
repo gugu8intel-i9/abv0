@@ -6158,7 +6158,7 @@ zimage-ncnn-vulkan nihui/zimage-ncnn-vulkan
 rfxgen raysan5/rfxgen
 models reyamira/models
 dice Dice-Developer-Team/Dice
-rust_hdl VHDL-LS/rust_hdl
+vhdl-ls-rust_hdl VHDL-LS/rust_hdl
 vsag antgroup/vsag
 gokeyless cloudflare/gokeyless
 bugdom jorio/Bugdom
@@ -6203,7 +6203,7 @@ ssh-vault ssh-vault/ssh-vault
 docto tobya/DocTo
 xybrid xybrid-ai/xybrid
 lingtai Lingtai-AI/lingtai
-nginx-obs-automatic-low-bitrate-switching NOALBS/nginx-obs-automatic-low-bitrate-switching
+noalbs-nginx-obs-automatic-low-bitrate-switching NOALBS/nginx-obs-automatic-low-bitrate-switching
 art artraweditor/ART
 malice-network chainreactors/malice-network
 cb-mpc coinbase/cb-mpc

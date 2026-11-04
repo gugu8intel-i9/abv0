@@ -15,10 +15,12 @@
 34736384/genshin-fps-unlock 20752
 3899/simadmin 20759
 3proxy/3proxy 20751
+4jx/l5p-keyboard-rgb 20761
 4paradigm/openmldb 20754
 78/xiaozhi-esp32 20750
 a-b-street/abstreet 20751
 a1ive/nwinfo 20759
+aa-proxy/aa-proxy-rs 20761
 aardappel/treesheets 20753
 aaronfeng753/waifu2x-extension-gui 20750
 abahmed/kwatch 20756
@@ -31,7 +33,9 @@ academysoftwarefoundation/openfx 20760
 academysoftwarefoundation/openimageio 20753
 academysoftwarefoundation/openshadinglanguage 20753
 acalanetwork/acala 20758
+acesls/slssteam 20761
 acheronfail/repgrep 20760
+achetagames/epic-asset-manager 20761
 acidanthera/airportbrcmfixup 20758
 acidanthera/applealc 20752
 acidanthera/brcmpatchram 20756
@@ -59,6 +63,7 @@ adamyuan/sparsevoxeloctree 20759
 adelolmo/hd-idle 20758
 adepierre/botcraft 20759
 adepierre/sniffcraft 20759
+adhocore/gronx 20761
 adonais/skylark 20760
 adroll/hologram 20758
 advancedfx/advancedfx 20758
@@ -66,6 +71,7 @@ adventuregamestudio/ags 20757
 adyanth/cloudflare-operator 20759
 aerospike/aerospike-server 20755
 aewallin/opencamlib 20760
+aff3ct/mipp 20761
 afkarxyz/twitter-x-media-batch-downloader 20760
 afritz1/opentesarena 20755
 afwbkbc/glsmac 20759
@@ -117,13 +123,16 @@ allenk/geminiwatermarktool 20753
 alliedmodders/amxmodx 20760
 alliedmodders/metamod-source 20760
 alliedmodders/sourcemod 20756
+aloneguid/bt 20761
 altalex531/openglass 20758
 altinity/clickhouse-operator 20753
 alvr-org/alvr 20751
 am32-firmware/am32 20756
 amadeusprotocol/node 20751
 ammarabouzor/tui-journal 20758
+amol-/dukpy 20761
 amrex-codes/amrex 20758
+amsynth/amsynth 20761
 analogdevicesinc/libiio 20759
 analogdevicesinc/no-os 20755
 andersbakken/rtags 20754
@@ -133,6 +142,8 @@ andy-5/wslgit 20755
 angband/angband 20754
 ankitects/anki 20750
 anonvector/slipnet 20754
+anrieff/libcpuid 20761
+antgroup/vsag 20761
 anthwlock/untrunc 20752
 antsx/ants 20754
 aomediacodec/libavif 20753
@@ -143,6 +154,7 @@ apache/cloudberry 20755
 apache/devlake 20753
 apache/impala 20755
 apache/mahout 20753
+apache/sedona-db 20761
 apecloud/ape-dts 20760
 apecloud/kubeblocks 20753
 aperezdc/ngx-fancyindex 20757
@@ -177,6 +189,7 @@ arp242/goatcounter 20751
 arp242/uni 20757
 arthursonzogni/diagon 20753
 arthursonzogni/ftxui 20750
+artraweditor/art 20761
 arvidn/libtorrent 20751
 asb2m10/dexed 20752
 asg017/sqlite-vec 20751
@@ -262,6 +275,7 @@ betterdiscord/installer 20754
 beyond-all-reason/recoilengine 20758
 bfgroup/lyra 20760
 bforartists/bforartists 20758
+bigbag/papyrix-reader 20761
 bigbigmdm/imsprog 20759
 bigboot/autokuma 20757
 bililive-go/bililive-go 20751
@@ -289,6 +303,7 @@ bmorcelli/launcher 20753
 bo3b/3dmigoto 20755
 boblemaire/iotawatt 20758
 bochs-emu/bochs 20755
+boeing/config-file-validator 20761
 bogdanfinn/tls-client 20753
 bokwoon95/wgo 20760
 bol-van/zapret 20750
@@ -296,6 +311,7 @@ bol-van/zapret2 20751
 bondagit/aes67-linux-daemon 20760
 bootc-dev/bootc 20753
 bowtieddevil/degenbot 20760
+bozimmerman/zimodem 20761
 bpftrace/bpftrace 20750
 bqlpfy/flux-panel 20757
 br0xen/boltbrowser 20758
@@ -303,12 +319,15 @@ brahmgan/ganchain-v2 20754
 brainboxdotcc/dpp 20755
 brainflow-dev/brainflow 20754
 brandur/redis-cell 20755
+brechtsanders/xlsxio 20761
 brentp/mosdepth 20757
 brettcannon/python-launcher 20759
 brexhq/crabtrap 20758
+brilliantlabsar/frame-codebase 20761
 brndnmtthws/conky 20751
 brocode/fblog 20760
 brocode/fw 20760
+brontoguana/krasis 20761
 brucedevices/firmware 20751
 bruderstein/npppluginmanager 20754
 brunolevy/geogram 20753
@@ -316,9 +335,11 @@ brutpitt/glchaos.p 20757
 btcgpu/btcgpu 20759
 buddhi1980/mandelbulber2 20756
 bufbuild/protovalidate 20754
+buggins/coolreader 20761
 build-cpp/cmkr 20759
 bumptop/bumptop 20759
 bupticybee/texassolver 20753
+burntsushi/rust-snappy 20761
 bus1/dbus-broker 20758
 bush2021/chrome_plus 20753
 buttplugio/buttplug 20755
@@ -333,6 +354,7 @@ c0m4r/kula 20755
 c3rb3ru5d3d53c/binlex 20760
 caarlos0/env 20751
 cacalabs/libcaca 20759
+cafali/snapkey 20761
 caffeinelabs/motoko 20760
 cage-kiosk/cage 20753
 cagnulein/qdomyos-zwift 20757
@@ -364,6 +386,7 @@ celestiaproject/celestia 20753
 celluloid-player/celluloid 20754
 cenkalti/rain 20756
 center-for-threat-informed-defense/adversary_emulation_library 20753
+centylab/pocketpd 20761
 cert-manager/cert-manager 20750
 cesanta/mongoose 20750
 cesiumgs/cesium-unreal 20755
@@ -381,6 +404,7 @@ chatmail/core 20757
 chatterino/chatterino2 20753
 chcg/npp_hexeditor 20757
 cheat/cheat 20750
+checkedc/checkedc-clang 20761
 checkra1n/pongoos 20753
 chefkissinc/nootedred 20753
 chen-and-sim/chordnova 20758
@@ -391,6 +415,7 @@ chir24/unreal_mcp 20757
 chlumsky/msdf-atlas-gen 20755
 chlumsky/msdfgen 20752
 chocolate-doom/chocolate-doom 20753
+chrchang/plink-ng 20761
 chrdavis/smartrename 20758
 chris2511/xca 20753
 chrisant996/clink 20751
@@ -425,6 +450,7 @@ cloudnative-pg/cloudnative-pg 20751
 cloverhackycolor/cloverbootloader 20751
 clusterm/open-bamboo-networking 20760
 cmangos/mangos-classic 20756
+cmangos/mangos-tbc 20761
 cmangos/mangos-wotlk 20760
 cminyard/ser2net 20759
 cmuratori/refterm 20754
@@ -440,6 +466,7 @@ cockatrice/cockatrice 20754
 codedeliveryservice/reckless 20759
 codestation/qcma 20759
 coin-or/ipopt 20754
+coinbase/cb-mpc 20761
 collabora/libsurvive 20757
 colleagueriley/rgfw 20753
 community-shaders/skyrim-community-shaders 20756
@@ -452,11 +479,13 @@ connectai-e/feishu-openai 20751
 const-me/whisper 20750
 container2wasm/container2wasm 20753
 containernetworking/plugins 20753
+containers/conmon 20761
 containers/fuse-overlayfs 20759
 containers/netavark 20758
 containers/toolbox 20752
 contour-terminal/contour 20753
 contribsys/faktory 20751
+controlplaneio/kubectl-kubesec 20761
 cookieplmonster/silentpatch 20755
 coolsnowwolf/lede 20750
 coop-deluxe/sm64coopdx 20754
@@ -467,6 +496,7 @@ corosync/corosync 20755
 cortesi/devd 20752
 cortesi/modd 20753
 cosmos/cosmos-sdk 20751
+cosmwasm/cw-plus 20761
 costela/wesher 20756
 covenantsql/covenantsql 20759
 cozodb/cozo 20752
@@ -516,6 +546,7 @@ dalathegreat/battery-emulator 20753
 danieleteti/delphimvcframework 20755
 danielpaulus/go-ios 20753
 danielswolf/rhubarb-lip-sync 20753
+danini/magsac 20761
 dankamongmen/notcurses 20752
 dankrusi/windowsvirtualdesktophelper 20759
 danoon2/boxedwine 20756
@@ -525,6 +556,7 @@ darkrenaissance/darkfi 20755
 darktable-org/darktable 20750
 darthsim/overmind 20752
 dartsim/dart 20755
+darwin-containers/rund 20761
 databendlabs/databend 20751
 datahaven-xyz/datahaven 20751
 datoviz/datoviz 20758
@@ -533,6 +565,7 @@ david-oconnor/pyflow 20755
 dawsonjon/picorx 20760
 dayanch96/ytmusicultimate 20753
 dbalsom/martypc 20757
+dborth/snes9xgx 20761
 dbt-labs/dbt 20750
 dchapyshev/aspia 20753
 ddvk/rmfakecloud 20755
@@ -542,6 +575,7 @@ deanxv/done-hub 20758
 deanxv/genspark2api 20759
 deividalfa/stm32_soldering_iron_controller 20760
 dekunukem/daytripper 20752
+deltabeard/peanut-gb 20761
 denoland/celld 20751
 denoland/deno_lint 20754
 denoland/rusty_v8 20752
@@ -558,6 +592,7 @@ dfeneyrou/palanteer 20753
 dfinity/ic 20754
 dfinity/internet-identity 20760
 dheijl/swyh-rs 20760
+dice-developer-team/dice 20761
 dicklesworthstone/beads_rust 20756
 dicklesworthstone/beads_viewer 20754
 dicklesworthstone/coding_agent_session_search 20756
@@ -568,6 +603,7 @@ digimend/digimend-kernel-drivers 20755
 digital-asset/daml 20757
 digitalocean/do-agent 20760
 dillo-browser/dillo 20756
+dimastbk/python-calamine 20761
 dimtpap/coppwr 20759
 dimtpap/obs-pipewire-audio-capture 20758
 dingtalk-real-ai/dingtalk-workspace-cli 20752
@@ -575,6 +611,7 @@ dioxuslabs/dioxus 20750
 directvt/vtm 20752
 dirtyjtag/dirtyjtag 20759
 discordmessenger/dm 20753
+dislord/nanovna-d 20761
 distrho/cardinal 20753
 distribution/distribution 20750
 diversenok/tokenuniverse 20759
@@ -583,6 +620,7 @@ djcb/mu 20754
 djylb/nps 20756
 dlang/dmd 20753
 dmitry-s93/mcontrolcenter 20758
+dn-programming-core-management/dn-famitracker 20761
 dnscrypt/doh-server 20756
 docgroup/ace_tao 20758
 documentdb/documentdb 20752
@@ -596,6 +634,7 @@ dpjudas/surrealengine 20756
 dragonflydb/dragonfly 20750
 dragonflyoss/dragonfly 20753
 dragonjoker/castor3d 20760
+drakmor/nanodns 20761
 drand/tlock 20759
 drawpile/drawpile 20755
 drawthingsai/draw-things-community 20760
@@ -637,12 +676,15 @@ edin45/simple_photogrammetry_gui 20759
 edisionnano/qdiskinfo 20759
 edk2-porting/edk2-rk3588 20756
 eeeehex/revokehook 20759
+eelcocramer/node-bluetooth-serial-port 20761
 effekseer/effekseer 20754
 efugier/smartcat 20760
 eggheads/eggdrop 20760
 egison/egison 20757
 eiblog/eiblog 20759
 eiz/synchronousaudiorouter 20755
+ekalinin/github-markdown-toc.go 20761
+elbywan/crystalline 20761
 electron/electron 20750
 elementsproject/lightning 20753
 elfmz/far2l 20753
@@ -655,10 +697,13 @@ elmercsc/elmerfem 20754
 emergetools/ettrace 20759
 emersion/go-imap 20753
 emersion/go-smtp 20753
+emersion/go-webdav 20761
 emersion/mako 20753
 emersion/slurp 20755
 emersion/xdg-desktop-portal-wlr 20758
+emmyluals/emmylua-analyzer-rust 20761
 emsesp/ems-esp32 20756
+emuflight/emuflight 20761
 emukidid/swiss-gc 20754
 encryqed/dumper-7 20753
 endless-sky/endless-sky 20751
@@ -677,6 +722,7 @@ equalsraf/neovim-qt 20753
 eraserhd/parinfer-rust 20759
 erebe/greenclip 20754
 erickutcher/httpdownloader 20758
+ericwa/ericw-tools 20761
 eried/flipperzero-mayhem 20758
 erigontech/erigon 20752
 erlineryi/plantsvszombies 20753
@@ -713,6 +759,7 @@ exein-io/pulsar 20756
 exeldro/obs-move-transition 20757
 exeldro/obs-source-record 20759
 exelix11/switchthemeinjector 20755
+exploits-forsale/collateral-damage 20761
 external-secrets/external-secrets 20751
 extism/extism 20751
 f4exb/sdrangel 20752
@@ -734,7 +781,9 @@ fanju6/netproxy-magisk 20755
 farama-foundation/arcade-learning-environment 20753
 fargroup/farmanager 20753
 farm-fe/farm 20751
+fast-imaging/fast 20761
 fastvm/minivm 20754
+fcorbelli/zpaqfranz 20761
 fdos/kernel 20756
 feather-wallet/feather 20759
 fedimint/fedimint 20759
@@ -746,9 +795,11 @@ felinics/memoh 20753
 felix3322/potplayer_chatgpt_translate 20756
 feodor2/mypal68 20757
 feralinteractive/gamemode 20751
+ferdi265/wl-mirror 20761
 ferriskey/ferriskey 20759
 fesiong/anqicms 20760
 fhanau/efficient-compression-tool 20758
+filecoin-project/rust-fil-proofs 20761
 filecoin-project/venus 20753
 filecxx/filecentipede 20750
 filoppi/luma-framework 20757
@@ -770,6 +821,7 @@ fletcher/multimarkdown-6 20759
 flightlessmango/mangohud 20751
 flintlib/flint 20759
 floattech/zerobot-plugin 20753
+flow-ipc/ipc 20761
 fltk/fltk 20753
 fluent/fluent-bit 20751
 fluid-cloudnative/fluid 20753
@@ -777,6 +829,7 @@ fluidsynth/fluidsynth 20753
 fluvio-community/fluvio 20751
 flux-iac/tofu-controller 20754
 fluxcd/flagger 20751
+fluxcd/helm-controller 20761
 flyinghead/flycast 20753
 fmtlib/fmt 20750
 fnproject/fn 20751
@@ -784,6 +837,7 @@ fontmanager/font-manager 20756
 foobnix/librerareader 20752
 forairaaaaa/monica 20757
 foriequal0/git-trim 20760
+formancehq/stack 20761
 fortheusers/hb-appstore 20755
 fossasia/badgemagic-firmware 20754
 fossasia/pslab-firmware 20754
@@ -802,8 +856,10 @@ freeorion/freeorion 20756
 freeradius/freeradius-server 20753
 freerdp/freerdp 20750
 frida/frida-gum 20756
+frostwire/frostwire-jlibtorrent 20761
 fschutt/azul 20751
 fuellabs/sway 20750
+furiko-io/furiko 20761
 fusionlanguage/fut 20753
 futurerestore/futurerestore 20759
 fw876/helloworld 20752
@@ -851,6 +907,7 @@ giongto35/cloud-game 20753
 gitahead/gitahead 20753
 github/securitylab 20754
 giuspen/cherrytree 20752
+gkonovalov/android-vad 20761
 glfw/glfw 20750
 glkarin/com.n0n3m4.diii4a 20759
 glmcdona/process-dump 20753
@@ -868,6 +925,7 @@ gnuton/asuswrt-merlin.ng 20753
 go-delve/delve 20750
 go-graphite/go-carbon 20758
 go-vikunja/vikunja 20751
+goatshriek/stumpless 20761
 godot-jolt/godot-jolt 20753
 goharbor/harbor 20750
 gojek/weaver 20760
@@ -906,6 +964,7 @@ gphoto/libgphoto2 20755
 gpuzelenograd/memtest_vulkan 20757
 gqrx-sdr/gqrx 20752
 grafana/grafana-operator 20755
+grafviktor/goto 20761
 grahamdumpleton/mod_wsgi 20756
 grame-cncm/faust 20753
 gramineproject/gramine 20758
@@ -915,12 +974,15 @@ greatscottgadgets/hackrf 20751
 greenheartgames/greenworks 20754
 greenpau/caddy-security 20753
 griddb/griddb 20753
+grke/burp 20761
 groonga/groonga 20757
 guillaumechereau/goxel 20753
+gundulabs/gaze 20761
 gustavosett/windows-11-clipboard-history-for-linux 20756
 gvcgo/version-manager 20755
 gwdevhub/gwtoolboxpp 20756
 gwion/gwion 20760
+gysmo38/mitsubishi2mqtt 20761
 gyulyvgc/sniffnet 20750
 h-m-h/weylus 20750
 h2oai/datatable 20753
@@ -929,6 +991,7 @@ h4570/tyra 20759
 hackmanit/web-cache-vulnerability-scanner 20755
 hailtododongo/pyrite64 20753
 haivision/srt 20752
+haiwen/seafile-client 20761
 hakwerk/labca 20758
 haleclipse/ccometixline 20752
 halfrgrd/flyline 20755
@@ -945,6 +1008,7 @@ hanslub42/rlwrap 20753
 haosulab/sapien 20757
 haproxytech/kubernetes-ingress 20757
 harbourmasters/ghostship 20757
+harbourmasters/lighthouse 20761
 harbourmasters/paperboat 20760
 harbourmasters/shipwright 20751
 harbourmasters/spaghettikart 20753
@@ -981,7 +1045,9 @@ heywillow/willow 20753
 hfiref0x/syscalltables 20754
 hfiref0x/winobjex64 20753
 hg-ha/icp_query 20756
+hh2048/xcpc 20761
 hhyyrylainen/godotpcktool 20760
+highcodeh/tentacleos 20761
 higress-group/higress 20750
 hillya51/lunatranslator 20750
 hiroi-sora/paddleocr-json 20754
@@ -1002,6 +1068,7 @@ hpjansson/chafa 20751
 hroptatyr/dateutils 20759
 htop-dev/htop 20751
 httprunner/httprunner 20752
+huahua132/skynet_fly 20761
 huanfeng/windinput 20755
 huderlem/porymap 20759
 hudikhq/hoodik 20754
@@ -1028,6 +1095,7 @@ i-am-shodan/usbarmyknife 20753
 i486/vxkex 20753
 iagooar/qqqa 20759
 iamaisim/projectairsim 20757
+ianmaclarty/amulet 20761
 ibnaleem/gosearch 20752
 icecc/icecream 20754
 ient/yuview 20753
@@ -1053,6 +1121,7 @@ inference-labs-inc/jstprove 20755
 infiniflow/infinity 20752
 infinitimeorg/infinitime 20752
 ingenimax/agent-sdk-go 20759
+ingonyama-zk/icicle 20761
 inguardians/peirates 20754
 inikep/lzbench 20756
 inochi2d/inochi-creator 20755
@@ -1107,8 +1176,10 @@ jbuehler23/jackdaw 20760
 jcash/voronoi 20758
 jedisct1/libsodium 20750
 jedisct1/minisign 20753
+jedypod/open-display-transform 20761
 jellyfin/jellyfin-ffmpeg 20757
 jerryuhoo/fire 20759
+jfjallid/go-secdump 20761
 jguer/yay 20750
 jhhoward/microweb 20760
 jhrobotics/softgpu 20756
@@ -1130,6 +1201,7 @@ jomjol/ai-on-the-edge-device 20751
 jonas/tig 20750
 jonathansalwan/triton 20752
 joncampbell123/dosbox-x 20752
+jonet/monksynth 20761
 jonmagon/kdiskmark 20754
 joseexposito/touchegg 20752
 joske/yserver 20760
@@ -1139,6 +1211,7 @@ jpersson77/lgtvcompanion 20755
 jpillora/cloud-torrent 20751
 jpillora/webproc 20758
 jpmens/jo 20752
+jrickey/battleship 20761
 jrmoulton/tmux-sessionizer 20759
 jsbsim-team/jsbsim 20753
 jsoftware/jsource 20758
@@ -1148,9 +1221,11 @@ jtheoof/swappy 20754
 juce-framework/juce 20751
 juice-labs/juice-labs 20759
 julian-adv/openmmo 20754
+julianxhokaxhiu/ffnx 20761
 juliusbrussee/caveman 20750
 julyighor/qtbitcointrader 20758
 julyx10/lap 20759
+junghoonghae/tossinvest-cli 20761
 junkurihara/rust-rpxy 20758
 jurkovic-nikola/openlinkhub 20755
 jurplel/qview 20752
@@ -1160,6 +1235,7 @@ justrach/turboapi 20756
 juzzlin/heimer 20757
 jvde-github/ais-catcher 20758
 k2-fsa/sherpa 20756
+k3s-io/helm-controller 20761
 k3s-io/k3s 20750
 k3s-io/kine 20753
 k8up-io/k8up 20756
@@ -1174,6 +1250,7 @@ kanryu/quickviewer 20759
 karawin/ka-radio32 20760
 karlstav/cava 20751
 kasmtech/kasmvnc 20751
+kaspanet/kaspad 20761
 kaspanet/rusty-kaspa 20757
 kasperskylab/hrtng 20753
 kata-containers/kata-containers 20751
@@ -1187,6 +1264,7 @@ kdave/btrfs-progs 20759
 kedacore/http-add-on 20760
 kedacore/keda 20750
 kefir500/apk-editor-studio 20754
+keralots/bambuhelper 20761
 kerberos-io/agent 20756
 kesomannen/gale 20757
 keybase/client 20751
@@ -1200,6 +1278,7 @@ kianmhz/gooserelayvpn 20755
 kika/fixedsys 20755
 kikoplayproject/kikoplay 20753
 kimono-koans/httm 20754
+kiriki-liszt/js_inflator 20761
 kisspeace/nsfwbox 20759
 kitao/pyxel 20750
 kittors/clirelay 20756
@@ -1234,6 +1313,7 @@ ksnip/ksnip 20753
 ksworddev/ksword 20760
 kuasar-io/kuasar 20755
 kube-green/kube-green 20755
+kubean-io/kubean 20761
 kubedb/cli 20758
 kubeedge/kubeedge 20751
 kubeflow/trainer 20753
@@ -1252,6 +1332,7 @@ kubernetes-sigs/security-profiles-operator 20757
 kubeshop/botkube 20753
 kubesphere/kubekey 20753
 kubestellar/kubestellar 20758
+kubevirt/containerized-data-importer 20761
 kudrykv/latex-yearly-planner 20754
 kulikov0/whitelist-bypass 20754
 kumahq/kuma 20752
@@ -1271,11 +1352,13 @@ lammps/lammps 20753
 lancedb/lancedb 20750
 langhuihui/monibuca 20753
 lanyi1998/dnslog-go 20755
+larien/aprenda-go-com-testes 20761
 larryli/putty 20754
 laruence/taint 20760
 laruence/yac 20758
 laruence/yaf 20752
 laruence/yar 20755
+lasa01/plumber 20761
 lastools/lastools 20756
 latchset/tang 20758
 laurenz/oracle_fdw 20760
@@ -1289,6 +1372,7 @@ ldcsaa/hp-socket 20751
 leadaxe/singbox-launcher 20758
 leadedge/spout2 20756
 leaguetoolkit/cslol-manager 20757
+leahneukirchen/mblaze 20761
 lean-dojo/leancopilot 20755
 leeese/messauto 20754
 leejet/stable-diffusion.cpp 20751
@@ -1308,6 +1392,7 @@ libarchive/libarchive 20752
 libass/libass 20756
 libaudioflux/audioflux 20752
 libbpf/bpftool 20758
+libconfuse/libconfuse 20761
 libevent/libevent 20750
 libexpat/libexpat 20755
 libffi/libffi 20752
@@ -1339,12 +1424,14 @@ libts/tslib 20759
 libunwind/libunwind 20755
 libusb/libusb 20751
 libvips/libvips 20750
+libxls/libxls 20761
 libxmljs/libxmljs 20756
 lico-n/zygiskfrida 20756
 lief-project/lief 20751
 lifting-bits/rellic 20759
 lightgbm-org/lightgbm 20750
 lightninglabs/lightning-terminal 20760
+lightninglabs/taproot-assets 20761
 lightonai/next-plaid 20760
 lightspark/lightspark 20753
 liji32/sameboy 20753
@@ -1354,6 +1441,7 @@ limbonaut/limboai 20753
 limine-bootloader/limine 20752
 lincity-ng/lincity-ng 20759
 linebender/resvg 20752
+lingtai-ai/lingtai 20761
 linux-pam/linux-pam 20758
 linux-test-project/ltp 20753
 linuxdeploy/linuxdeploy 20758
@@ -1368,6 +1456,7 @@ liteldev/levilamina 20754
 liteloaderqqnt/qqntfileverifypatch 20759
 litmuschaos/litmus 20751
 little-brother/sqlite-gui 20755
+livekit/rust-sdks 20761
 llamaedge/llamaedge 20754
 lldap/lldap 20751
 lldpd/lldpd 20758
@@ -1383,6 +1472,7 @@ loot/loot 20754
 losehu/uv-k5-firmware-custom 20755
 losfair/mvsqlite 20754
 lostartefacts/trx 20756
+lotusinputmethod/fcitx5-lotus 20761
 louiszengcn/carlaair 20756
 lovasoa/dezoomify-rs 20756
 love2d/love 20751
@@ -1427,6 +1517,7 @@ majjcom/ncmppgui 20757
 malbiruk/driftwm 20754
 man-group/arcticdb 20753
 mandiant/goresym 20756
+manugarg/pacparser 20761
 maplespe/dwmblurglass 20752
 maplibre/maplibre-native 20753
 maplibre/maplibre-tile-spec 20760
@@ -1445,6 +1536,7 @@ martichou/rquickshare 20752
 martin-olivier/airgorah 20752
 martinrotter/rssguard 20753
 martinus/unordered_dense 20754
+masagrator/fpslocker 20761
 masaiki/xy-vsfilter 20758
 masterking32/masterdnsvpn 20751
 mat/besticon 20756
@@ -1473,6 +1565,7 @@ memovai/mimiclaw 20751
 merge/skulls 20757
 meshcore-dev/meshcore 20752
 meshinspector/meshlib 20758
+meshtastic/atak-plugin 20761
 meshtastic/firmware 20751
 meta/folly 20759
 meta/proxygen 20759
@@ -1485,12 +1578,14 @@ metasequoiaime/chinese-ime-lm 20757
 methanepowered/methanekit 20757
 metrico/gigapipe 20754
 mgba-emu/mgba 20751
+mgree/ffs 20761
 mhmrdd/nohello 20755
 mhogomchungu/media-downloader 20752
 mhogomchungu/sirikali 20756
 mhogomchungu/zulucrypt 20760
 mhsanaei/3x-ui 20750
 micahkepe/jsongrep 20759
+michaelrsweet/mxml 20761
 michaelwillis/dragonfly-reverb 20756
 michelhe/rustboyadvance-ng 20759
 micmacign/micmac 20757
@@ -1585,6 +1680,7 @@ mullvad/mullvadvpn-app 20751
 multitheftauto/mtasa-blue 20753
 multiversx/mx-chain-go 20757
 multiwiii/baseflight 20759
+mumax/3 20761
 mummer4/mummer 20760
 munirov/cremniy 20760
 mupen64plus/mupen64plus-core 20754
@@ -1626,13 +1722,16 @@ neptunehub/audiomuse-ai-nv-plugin 20760
 nestrilabs/nestri 20754
 netbirdio/netbird 20750
 netblue30/firejail 20751
+netboxlabs/pktvisor 20761
 netdata/netdata 20750
 netis/cloud-probe 20757
 networkblockdevice/nbd 20760
 networkupstools/nut 20752
 neuronsimulator/nrn 20760
+neutrinolabs/xorgxrdp 20761
 neutrinolabs/xrdp 20751
 nevcairiel/lavfilters 20751
+neverous/efibooteditor 20761
 newaetech/chipwhisperer 20754
 newrelic/rusty-hog 20760
 next-flip/momentum-firmware 20751
@@ -1654,6 +1753,7 @@ nigels-com/glew 20753
 nih-at/libzip 20756
 nihui/opencv-mobile 20752
 nihui/waifu2x-ncnn-vulkan 20752
+nihui/zimage-ncnn-vulkan 20761
 nikivdev/code 20750
 nilsirl/dockerc 20752
 nilsirl/mozwire 20759
@@ -1664,6 +1764,7 @@ niudaii/zpscan 20755
 nixos/patchelf 20752
 njbrown/texturelab 20758
 nlohmann/json 20750
+nm-l2tp/networkmanager-l2tp 20761
 nmrugg/stockfish.js 20755
 no-chicken/ov-watch 20753
 noahbald/oxvg 20759
@@ -1672,6 +1773,7 @@ noctalia-dev/noctalia 20750
 nodegui/nodegui 20751
 noisebynorthwest/php-spx 20753
 noisetorch/noisetorch 20750
+nokv-lab/nokv 20761
 noltari/pico-uart-bridge 20760
 nomic-ai/gpt4all 20750
 nomorefood/putty-cac 20760
@@ -1690,8 +1792,10 @@ ntsc-rs/ntsc-rs 20753
 nucleic/kiwi 20758
 nulllatency/flowdriver 20758
 nullpo-head/wsl-distrod 20753
+nullroute1970/stormdns 20761
 numaproj/numaflow 20753
 nurupo/vlc-pause-click-plugin 20755
+nuzair46/monarch 20761
 nvidia-isaac/cuvslam 20753
 nvidia-isaac/nvblox 20755
 nvidia-omniverse/physx 20752
@@ -1702,7 +1806,9 @@ nvidia/cuda-quantum 20756
 nvidia/cutlass 20750
 nvidia/dlss 20754
 nvidia/k8s-device-plugin 20752
+nvidia/mdl-sdk 20761
 nvidia/nvidia-container-toolkit 20752
+nvpro-samples/vk_gaussian_splatting 20761
 nwchemgit/nwchem 20759
 nxp-imx/mfgtools 20759
 nyamisty/altserver-linux 20755
@@ -1727,6 +1833,7 @@ ogsr/ogsr-engine 20760
 ohf-voice/piper1-gpl 20751
 olav-st/screencloud 20759
 olliz0r/sys-botbase 20760
+ome-projects/ome 20761
 omersiar/esp-rfid 20759
 omnetpp/omnetpp 20758
 ompl/ompl 20753
@@ -1741,6 +1848,7 @@ open-mpi/hwloc 20758
 open-obfuscator/o-mvll 20756
 open-policy-agent/gatekeeper 20752
 open-smartwatch/open-smartwatch-os 20756
+open-telemetry/opentelemetry-collector-releases 20761
 open-telemetry/opentelemetry-cpp 20755
 open-telemetry/opentelemetry-ebpf-instrumentation 20760
 open-telemetry/opentelemetry-go 20751
@@ -1775,6 +1883,7 @@ openhmd/openhmd 20755
 openhpc/ohpc 20756
 openidc/mod_auth_openidc 20756
 openilink/openilink-hub 20754
+openimsdk/openim-sdk-core 20761
 openinterpreter/openinterpreter 20750
 openipc/firmware 20753
 openlink/virtuoso-opensource 20757
@@ -1783,6 +1892,7 @@ openmeterio/openmeter 20753
 openms/openms 20759
 openmultiplayer/open.mp 20759
 openmv/openmv 20753
+opennds/opennds 20761
 opennjet/opennjet 20756
 opennmt/ctranslate2 20752
 opennox/opennox 20759
@@ -1800,6 +1910,7 @@ openstarbound/openstarbound 20755
 opensteam001/opensteamtool 20753
 openstickcommunity/gp2040-ce 20753
 opentoonz/opentoonz 20751
+opentracing-contrib/nginx-opentracing 20761
 opentrack/opentrack 20751
 openucx/ucx 20754
 openvinotoolkit/model_server 20757
@@ -1824,6 +1935,7 @@ osgeo/proj 20753
 osqp/osqp 20753
 ossappscollective/oss-documentscanner 20753
 ossc-db/pg_hint_plan 20757
+ossc-db/pg_rman 20761
 ossec/ossec-hids 20752
 ossia/score 20753
 ossrs/oryx 20757
@@ -1863,6 +1975,7 @@ paulstoffregen/cores 20760
 pbatard/efifs 20759
 pbatard/uefi-ntfs 20756
 pbek/qownnotes 20751
+pcb2gcode/pcb2gcode 20761
 pciutils/pciutils 20759
 pcre2project/pcre2 20755
 pdal/pdal 20755
@@ -1885,13 +1998,16 @@ pgroonga/pgroonga 20758
 pgrouting/pgrouting 20755
 ph1p/ikea-led-obegraensad 20757
 phandasm/waveform 20759
+phdlee/uvk5cec 20761
 philipk/boilr 20753
 phiresky/sqlite-zstd 20754
+phobos-developers/phobos 20761
 phodal/coca 20756
 phonevr-developers/phonevr 20757
 phucvinh57/biopass 20760
 pi-hole/ftl 20754
 picolibc/picolibc 20754
+picoplus-devel/pico-infonesplus 20761
 picoruby/picoruby 20756
 picoruby/prk_firmware 20760
 pimoroni/pimoroni-pico 20754
@@ -1905,8 +2021,10 @@ pixpark/gpupixel 20753
 pjo2/tftpd64 20757
 pkdawson/imgui-godot 20757
 pkgconf/pkgconf 20759
+pksunkara/pgx_ulid 20761
 planetscale/cli 20759
 plugdata-team/plugdata 20753
+plumed/plumed2 20761
 pmodels/mpich 20759
 pnedev/compareplus 20755
 pocketpy/pocketpy 20753
@@ -1941,6 +2059,7 @@ project-jedi/jvcl 20759
 project-osrm/osrm-backend 20751
 projectcapsule/capsule 20753
 projectphysx/fluidx3d 20751
+prometheus-community/pro-bing 20761
 prometheus-community/yet-another-cloudwatch-exporter 20755
 prometheus-operator/prometheus-operator 20750
 proot-me/proot 20753
@@ -1995,8 +2114,10 @@ rainmakerv3/bb_launcher 20760
 rakshasa/rtorrent 20752
 ralim/ironos 20751
 ramensoftware/windhawk 20751
+ramilito/kubectl.nvim 20761
 rancher/rancher 20750
 rancher/system-upgrade-controller 20757
+rangi42/tilemap-studio 20761
 rashevskyv/kefir 20758
 raspberrypi/debugprobe 20755
 raspberrypi/rpi-imager 20753
@@ -2039,6 +2160,8 @@ rgaa-software/godesk 20760
 rh12503/triangula 20752
 rhash/rhash 20758
 rhboot/shim 20756
+richonguzman/lora_aprs_igate 20761
+richonguzman/lora_aprs_tracker 20761
 riey/kime 20759
 rigaya/nvenc 20755
 rikyoz/bit7z 20757
@@ -2050,6 +2173,7 @@ risingwavelabs/risingwave 20751
 rism-digital/verovio 20757
 riverwm/river 20752
 rkd77/elinks 20759
+rmottola/arctic-fox 20761
 rnd-ash/openvehiclediag 20756
 roadrunner-server/roadrunner 20751
 roaringbitmap/croaring 20753
@@ -2090,10 +2214,14 @@ runfinch/finch 20752
 rupor-github/wsl-ssh-agent 20760
 rusefi/rusefi 20755
 rust-embedded/cargo-binutils 20760
+rust-lang-ru/book 20761
+rust-minidump/rust-minidump 20761
 ruvnet/ruview 20750
+rux-lang/rux 20761
 ruyo/vrm4u 20753
 rvn0xsy/cooolis-ms 20757
 rzeldent/esp32cam-rtsp 20755
+s2e/s2e 20761
 sadoyan/aralez 20758
 sagernet/sing-geosite 20756
 saghen/frizbee 20760
@@ -2102,6 +2230,7 @@ sail-sg/envpool 20754
 sakura-editor/sakura 20754
 saltpi/iplay 20755
 samtay/tetris 20756
+samtv12345/podfetch 20761
 samuelvanderwaal/metaboss 20759
 santhosh-tekuri/jsonschema 20755
 sarah-walker-pcem/pcem 20753
@@ -2111,12 +2240,18 @@ saschanaz/jxl-winthumb 20760
 savedra1/clipse 20756
 savoirfairelinux/opendht 20756
 savonet/liquidsoap 20754
+scalablecapital/scalable-cli 20761
+scalerf/quadrf 20761
 scallyw4g/bonsai 20755
+schacon/ticgit 20761
 schwabe/ics-openvpn 20752
 schweikert/fping 20755
 scionproto/scion 20760
+scipenai/tylax 20761
 sciresm/boot9strap 20755
 scottlamb/moonfire-nvr 20754
+scp-fs2open/fs2open.github.com 20761
+scratcheverywhere/scratcheverywhere 20761
 sdlpal/sdlpal 20753
 seadve/kooha 20752
 seadve/mousai 20755
@@ -2127,10 +2262,13 @@ seladb/pcapplusplus 20753
 seleniumhq/docker-selenium 20751
 selinuxproject/selinux 20754
 sentrux/sentrux 20753
+seqan/seqan 20761
+serasidis/stm32_hid_bootloader 20761
 serge1/elfio 20757
 serhmarch/modbustools 20760
 setsunayukiovo/x64dbg-mcp 20760
 sfml/sfml 20750
+sh0ckfr/universal-dear-imgui-hook 20761
 shadowblip/inputplumber 20760
 shadowsocks/shadowsocks-rust 20750
 shadowsocks/v2ray-plugin 20753
@@ -2210,6 +2348,7 @@ spaceandtimefdn/blitzar 20752
 spaceandtimefdn/sxt-proof-of-sql 20751
 spacedriveapp/spacedrive 20750
 spacemeowx2/switch-lan-play 20753
+speed47/dvdisaster 20761
 spring1843/go-dsa 20757
 spriteovo/airpodsdesktop 20752
 spu7nix/obamify 20753
@@ -2224,15 +2363,20 @@ sqls-server/sqls 20755
 squalius-cephalus/silakka54 20759
 squid-cache/squid 20753
 ssdeep-project/ssdeep 20758
+sskodje/screenrecorderlib 20761
 sssd/sssd 20758
+staacks/gbinterceptor 20761
 stack-of-tasks/pinocchio 20752
 stacked-git/stgit 20759
 stacklok/toolhive 20753
 stacks-network/stacks-core 20753
+stanford-scs/jai 20761
+stanleyhuangyc/freematics 20761
 start9labs/start-technologies 20753
 stashapp/stash 20750
 staticbackendhq/core 20758
 status-im/nimbus-eth2 20759
+std-microblock/audivis-relay 20761
 std-microblock/breeze-shell 20753
 steel-foundation/steelmc 20758
 stefankueng/bowpad 20758
@@ -2259,6 +2403,7 @@ su2code/su2 20754
 succinctlabs/sp1 20754
 sudo-project/sudo 20754
 sudoevolve/eui-neo 20753
+sudoprivacy/sudocode 20761
 supabase/pg_graphql 20753
 supabase/pg_jsonschema 20755
 supabase/wrappers 20757
@@ -2280,6 +2425,7 @@ swaywm/swaylock 20755
 swiftwave-org/swiftwave 20757
 swoole/phpx 20757
 swow/swow 20755
+sxhxliang/agent-studio 20761
 sylabs/singularity 20756
 synfig/synfig 20753
 synopse/mormot2 20758
@@ -2294,6 +2440,7 @@ tactilityproject/tactility 20757
 tahoma2d/tahoma2d 20759
 talkingdata/owl 20757
 tarampampam/error-pages 20754
+tarpboi/prediction-markets-trading-bot-toolkits 20761
 tasemulators/desmume 20752
 tasemulators/fceux 20754
 tatsu-syo/nomeiryoui 20751
@@ -2301,6 +2448,7 @@ tavianator/bfs 20755
 taviso/123elf 20755
 taviso/wpunix 20758
 tbnobody/opendtu 20753
+tbs1996/speki 20761
 tcltk/tcl 20757
 tcnoco/tcno-acc-switcher 20753
 team-ide/teamide 20758
@@ -2318,15 +2466,20 @@ tencent/xlua 20750
 tencentcloud/cubesandbox 20750
 tensorchord/pgvecto.rs 20753
 termux/termux-x11 20752
+tesseract-robotics/trajopt 20761
 tessi/wasmex 20759
 texstudio-org/texstudio 20752
+textbrowser/dooble 20761
 texus/tgui 20756
 texworks/texworks 20758
+tght1211/lan-proxy-gateway 20761
 thalhammer/jwt-cpp 20756
 the-vibe-company/quivr 20759
 theassassin/appimagelauncher 20751
+thecruz/simple-manual-map-injector 20761
 theelixzammuto/moonlight-xbox 20760
 theforceengine/theforceengine 20756
+theinvisible/openfortigui 20761
 theos/sdks 20759
 thephd/sol2 20751
 therealaleph/masterhttprelayvpn-rust 20752
@@ -2350,6 +2503,7 @@ tiffany352/rink-rs 20760
 tihmstar/tsschecker 20758
 tiledb-inc/tiledb 20753
 tiltedphoques/tiltedevolution 20756
+timbray/quamina 20761
 time-appliances-project/time-card 20754
 timeplus-io/proton 20753
 timescale/pg_textsearch 20752
@@ -2364,12 +2518,14 @@ tju-aerial-robotics/yopo 20755
 tklengyel/drakvuf 20755
 tmandry/glide 20759
 tobilg/polyglot 20757
+tobya/docto 20761
 tom94/tev 20755
 tomas-m/iotop 20759
 tomking062/cve-2022-38694_unlock_bootloader 20759
 tommybee456/opensplitdeck 20756
 tomohiron907/strecs3d 20756
 tongsuo-project/tongsuo 20754
+tony1223/better-agent-terminal 20761
 tools-cx-app/meta-magic_mount-rs 20760
 topling/toplingdb 20756
 torquegameengines/torque3d 20753
@@ -2393,6 +2549,7 @@ trzsz/trzsz-ssh 20753
 trzy/supermodel 20759
 tsl0922/implay 20758
 tsudakageyu/minhook 20751
+tsujan/featherpad 20761
 tsujan/kvantum 20753
 ttalvitie/browservice 20755
 tugraph-family/tugraph-db 20754
@@ -2407,6 +2564,7 @@ uber/piranha 20753
 ubuntu/lightdm 20756
 uccl-project/uccl 20754
 uclouvain/openjpeg 20756
+udem-dlteam/pnut 20761
 ue4ss-re/re-ue4ss 20753
 ufoscout/docker-compose-wait 20754
 ufrisk/leechcore 20757
@@ -2431,6 +2589,7 @@ unlimitedbacon/stl-thumb 20754
 unum-cloud/usearch 20752
 unvanquished/unvanquished 20756
 upbge/upbge 20754
+upliftgames/wally 20761
 uriopass/egregoria 20754
 uroni/urbackup_backend 20757
 usagi-flow/evil-helix 20755
@@ -2462,6 +2621,7 @@ ventoy/ventoy 20750
 veracrypt/veracrypt 20750
 vergecurrency/verge 20754
 vergoh/vnstat 20754
+verifast/verifast 20761
 verilog-to-routing/vtr-verilog-to-routing 20755
 verus-lang/verus 20752
 vesoft-inc/nebula 20750
@@ -2477,12 +2637,14 @@ victoriametrics/victorialogs 20753
 victoriametrics/victoriametrics 20750
 viest/php-ext-xlswriter 20753
 vifm/vifm 20753
+vimpop/ucraft 20761
 vincentlaucsb/csv-parser 20756
 violiate/bili_ticket_rush 20756
 virustotal/vt-cli 20754
 virustotal/yara 20759
 virustotal/yara-python 20758
 virustotal/yara-x 20755
+visit-dav/visit 20761
 vitessio/vitess 20750
 vitoplantamura/magictrackpad2forwindows 20757
 vitoplantamura/onnxstream 20753
@@ -2502,6 +2664,7 @@ vosen/zluda 20750
 vslavik/diff-pdf 20752
 vslavik/winsparkle 20754
 vtereshkov/umka-lang 20753
+vult-dsp/vult 20761
 wabarc/wayback 20753
 wack0/entii-for-workcubes 20758
 waditu/czsc 20751
@@ -2509,6 +2672,7 @@ wal-g/wal-g 20752
 wallarm/api-firewall 20759
 wangfenjin/simple 20757
 warewulf/warewulf 20759
+wargio/naxsi 20761
 wargus/stratagus 20758
 warrensbox/terraform-switcher 20754
 warycat/rustgym 20757
@@ -2538,10 +2702,12 @@ whitewaterfoundry/fedora-remix-for-wsl 20758
 wieku/danser-go 20757
 wilix-team/iohook 20755
 willfaust/madeira 20753
+williamschack/spotify-downloader 20761
 williamvenner/gmpublisher 20755
 windirstat/windirstat 20752
 windmill-labs/windmill 20750
 windowsair/wireless-esp8266-dap 20759
+winegui/winegui 20761
 winfsp/sshfs-win 20751
 winfsp/winfsp 20751
 wingtk/gvsbuild 20760
@@ -2555,7 +2721,9 @@ wntrblm/castor_and_pollux 20760
 woelper/oculante 20754
 wojciechmula/pyahocorasick 20756
 wolfpld/tracy 20750
+wolfssl/wolfssh 20761
 wolfssl/wolfssl 20753
+wopss/red4ext 20761
 workiva/go-datastructures 20751
 wrf-model/wrf 20754
 wseemann/ffmpegmediametadataretriever 20754
@@ -2575,6 +2743,7 @@ xiaoyifang/goldendict-ng 20753
 xilinx/mlir-aie 20759
 xiph/flac 20753
 xiph/vorbis 20760
+xiphonics/picotracker 20761
 xitrix/moonlight-switch 20754
 xiu2/cloudflarespeedtest 20750
 xlightssequencer/xlights 20758
@@ -2631,6 +2800,7 @@ yuezk/globalprotect-openconnect 20753
 yukihoaa/waifu2x_snowshell 20759
 yun-liu/rcf 20758
 yutaka-sawada/multipar 20755
+yuzhii0718/bl-mt798x-dhcpd 20761
 yym68686/uni-api 20755
 za233/polaris-obfuscator 20760
 zachjs/sv2v 20758
