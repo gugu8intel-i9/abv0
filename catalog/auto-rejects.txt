@@ -117,6 +117,7 @@ alibaba/havenask 20754
 alibaba/loongcollector 20753
 alibaba/zvec 20750
 alicevision/alicevision 20752
+alienatedsec/yi-hack-v5 20773
 aliyun/ossfs 20758
 alkaidlab/foundation-sunshine 20751
 allenk/geminiwatermarktool 20753
@@ -204,6 +205,7 @@ asterisk/asterisk 20752
 astra-toolbox/astra-toolbox 20759
 astrio-labs/forall-mcp 20760
 astronautlevel2/anemone3ds 20756
+asuswrt-merlin/asuswrt-merlin.ng-gnuton 20773
 asymptote-labs/agent-beacon 20766
 async-profiler/async-profiler 20751
 atlas0fd00m/rfcat 20759
@@ -412,6 +414,7 @@ checkra1n/pongoos 20753
 chefkissinc/nootedred 20753
 chen-and-sim/chordnova 20758
 chengyangkj/ros_qt5_gui_app 20755
+chethan616/artefact 20773
 chexiongsheng/build_xlua_with_libs 20759
 chiaki-ng/chiaki-ng 20753
 chir24/unreal_mcp 20757
@@ -544,6 +547,7 @@ cztomczak/cefpython 20753
 czyt1988/saribbon 20755
 d00movenok/bounceback 20756
 dacotaco/priiloader 20759
+daijro/camoufox 20773
 dalance/amber 20757
 dalathegreat/battery-emulator 20753
 danieleteti/delphimvcframework 20755
@@ -567,6 +571,7 @@ davatorium/rofi 20750
 david-oconnor/pyflow 20755
 dawsonjon/picorx 20760
 dayanch96/ytmusicultimate 20753
+db-lyon/ue-mcp 20773
 dbalsom/martypc 20757
 dborth/snes9xgx 20761
 dbt-labs/dbt 20750
@@ -615,6 +620,7 @@ directvt/vtm 20752
 dirtyjtag/dirtyjtag 20759
 discordmessenger/dm 20753
 dislord/nanovna-d 20761
+distr-sh/distr 20773
 distrho/cardinal 20753
 distribution/distribution 20750
 diversenok/tokenuniverse 20759
@@ -681,6 +687,7 @@ edisionnano/qdiskinfo 20759
 edk2-porting/edk2-rk3588 20756
 eeeehex/revokehook 20759
 eelcocramer/node-bluetooth-serial-port 20761
+efeckc17/simple-todo-c 20773
 effekseer/effekseer 20754
 efugier/smartcat 20760
 eggheads/eggdrop 20760
@@ -706,6 +713,7 @@ emersion/mako 20753
 emersion/slurp 20755
 emersion/xdg-desktop-portal-wlr 20758
 emmyluals/emmylua-analyzer-rust 20761
+emp0ry/cs2-erscripts 20773
 emsesp/ems-esp32 20756
 emuflight/emuflight 20761
 emukidid/swiss-gc 20754
@@ -768,6 +776,7 @@ exploits-forsale/collateral-damage 20761
 external-secrets/external-secrets 20751
 extism/extism 20751
 f4exb/sdrangel 20752
+f5oeo/tezuka_fw 20773
 fabriziosalmi/caddy-waf 20757
 facebook/folly 20750
 facebook/proxygen 20751
@@ -912,6 +921,7 @@ gideros/gideros 20760
 giongto35/cloud-game 20753
 gitahead/gitahead 20753
 github/securitylab 20754
+gitoxidelabs/gitoxide 20773
 giuspen/cherrytree 20752
 gkonovalov/android-vad 20761
 glfw/glfw 20750
@@ -1031,9 +1041,11 @@ hasherezade/pe-sieve 20752
 hasherezade/pe_to_shellcode 20753
 hashicorp/terraform-provider-google 20753
 haswitchplate/openhasp 20756
+hax0kartik/wumiibo 20773
 hcavarsan/kftray 20754
 hdfgroup/hdf5 20756
 hedge-dev/unleashedrecomp 20751
+hehehai/voxtmini 20773
 heidisql/heidisql 20751
 helm-unittest/helm-unittest 20755
 helm/chart-releaser 20758
@@ -1181,6 +1193,7 @@ jaysmito101/terraforge3d 20755
 jayxon/leanify 20757
 jbuehler23/jackdaw 20760
 jcash/voronoi 20758
+jdkato/prose 20773
 jedisct1/libsodium 20750
 jedisct1/minisign 20753
 jedypod/open-display-transform 20761
@@ -1304,6 +1317,7 @@ knights-analytics/hugot 20759
 knutwurst/marlin-2-0-x-anycubic-i3-mega-s 20757
 koderover/zadig 20753
 kokkos/kokkos 20753
+kokkos/mdspan 20773
 komet/mediaelch 20756
 komorebicarry/baidupcs-rust 20758
 konghayao/cn-font-split 20755
@@ -1415,8 +1429,10 @@ libplctag/libplctag 20757
 librecad/librecad 20751
 libreddit/libreddit 20751
 libredwg/libredwg 20754
+librespeed/speedtest-go 20773
 libressl/portable 20754
 libreswan/libreswan 20756
+libriscv/godot-sandbox 20773
 librsync/librsync 20758
 libsdl-org/sdl 20750
 libsdl-org/sdl_image 20756
@@ -1474,10 +1490,12 @@ llnl/rose 20759
 llnl/sundials 20759
 llnl/zfp 20757
 localdesktop/localdesktop.github.io 20754
+localgpt-app/localgpt 20773
 loco-3d/crocoddyl 20755
 log4cplus/log4cplus 20754
 logrotate/logrotate 20754
 longbridge/gpui-kit 20750
+longsoft/ifrextractor-rs 20773
 loot/loot 20754
 losehu/uv-k5-firmware-custom 20755
 losfair/mvsqlite 20754
@@ -1493,6 +1511,7 @@ ltaoo/wx_channels_download 20750
 luanti-org/luanti 20750
 luau-lang/luau 20751
 lucianodato/noise-repellent 20760
+lucydsl/liblucy 20773
 ludo-technologies/pyscn 20756
 luke-you/tacky-borders 20760
 lukeswitz/antihunter 20758
@@ -1584,6 +1603,7 @@ meta/folly 20759
 meta/proxygen 20759
 meta/sapling 20759
 meta/wangle 20759
+meta/watchman 20773
 meta/zstd 20759
 metacall/core 20754
 metacraft-labs/codetracer 20755
@@ -1608,6 +1628,7 @@ microsoft/avml 20756
 microsoft/ccf 20757
 microsoft/directxshadercompiler 20752
 microsoft/ethr 20751
+microsoft/intelligent-terminal 20773
 microsoft/mfcmapi 20757
 microsoft/mimalloc 20750
 microsoft/msix-packaging 20756
@@ -1782,6 +1803,7 @@ nixos/patchelf 20752
 njbrown/texturelab 20758
 nlohmann/json 20750
 nm-l2tp/networkmanager-l2tp 20761
+nmap/ncrack 20773
 nmrugg/stockfish.js 20755
 no-chicken/ov-watch 20753
 noahbald/oxvg 20759
@@ -1831,6 +1853,7 @@ nwchemgit/nwchem 20759
 nxp-imx/mfgtools 20759
 nyamisty/altserver-linux 20755
 nymtech/nym 20753
+nymtech/nym-vpn-client 20773
 o3de/o3de 20750
 o7-machinehum/phantomdrive 20757
 oaid/tengine 20752
@@ -1882,6 +1905,7 @@ openboard-org/openboard 20753
 openboardview/openboardview 20753
 openchemistry/avogadrolibs 20759
 openchoreo/openchoreo 20754
+opencloudos/nettrace 20773
 opencontainers/distribution-spec 20756
 opencontainers/image-spec 20752
 opencontainers/runc 20750
@@ -2066,6 +2090,7 @@ praydog/reframework 20751
 praydog/uevr 20752
 precice/precice 20757
 premake/premake-core 20752
+premohq/playtendoh 20773
 pritunl/pritunl-client 20755
 pritunl/pritunl-zero 20759
 private-octopus/picoquic 20758
@@ -2110,6 +2135,7 @@ qalculate/libqalculate 20753
 qalculate/qalculate-gtk 20755
 qalculate/qalculate-qt 20760
 qarmin/szyszka 20757
+qianxuntudou-ops/mytvb 20773
 qiusimons/yaof 20753
 qsgs-fans/freekill 20756
 qt-creator/qt-creator 20753
@@ -2237,10 +2263,12 @@ rusefi/rusefi 20755
 rust-embedded/cargo-binutils 20760
 rust-lang-ru/book 20761
 rust-minidump/rust-minidump 20761
+rustsec/rustsec 20773
 ruvnet/ruview 20750
 rux-lang/rux 20761
 ruyo/vrm4u 20753
 rvn0xsy/cooolis-ms 20757
+rxnaison/epson-waste-reset 20773
 rzeldent/esp32cam-rtsp 20755
 s2e/s2e 20761
 sadoyan/aralez 20758
@@ -2250,6 +2278,7 @@ saghul/txiki.js 20753
 sail-sg/envpool 20754
 sakura-editor/sakura 20754
 saltpi/iplay 20755
+samizdatco/skia-canvas 20773
 samtay/tetris 20756
 samtv12345/podfetch 20761
 samuelvanderwaal/metaboss 20759
@@ -2460,6 +2489,7 @@ syself/cluster-api-provider-hetzner 20756
 sysulq/nginx-vts-exporter 20759
 sz3/libcimbar 20751
 szad670401/hyperlpr 20751
+t-troll/alien-tools 20773
 t-troll/alienfx-tools 20757
 ta-lib/ta-lib 20754
 tactilityproject/tactility 20757
@@ -2526,6 +2556,7 @@ thundercls/xanalyzer 20755
 tiagolr/ripplerx 20759
 tianzerl/anime4kcpp 20753
 tiffany352/rink-rs 20760
+tihmstar/futurerestore 20773
 tihmstar/tsschecker 20758
 tiledb-inc/tiledb 20753
 tiltedphoques/tiltedevolution 20756
@@ -2693,6 +2724,7 @@ vtereshkov/umka-lang 20753
 vult-dsp/vult 20761
 wabarc/wayback 20753
 wack0/entii-for-workcubes 20758
+wadey/node-microtime 20773
 waditu/czsc 20751
 wal-g/wal-g 20752
 wallarm/api-firewall 20759
@@ -2812,6 +2844,7 @@ yianwillis/vimcdoc 20753
 ying32/govcl 20753
 yitter/idgenerator 20753
 yliu7949/koushare-dl 20757
+yokecd/yoke 20773
 yorukot/superfile 20750
 yoshisuga/mame4ios 20758
 youki-dev/youki 20751
